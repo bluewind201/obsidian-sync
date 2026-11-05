@@ -1,0 +1,467 @@
+//! 양방향 동기화 엔진.
+//!
+//! 로컬 현재 상태 / 원격 현재 상태 / 마지막 동기화 상태를 비교(3-way)하여
+//! 업로드·다운로드·삭제·충돌 처리를 결정합니다.
+//!
+//! 안전장치
+//! - 로컬에서 지워지는 파일은 볼트의 `.trash/` 폴더로 이동 (Obsidian 휴지통과 동일)
+//! - 양쪽 모두 수정된 경우 로컬 파일을 `이름 (충돌 기기 날짜).md` 로 보존
+//! - 원격/로컬이 갑자기 비었거나 대량 삭제가 예정되면 동기화 중단
+
+use crate::backend::{self, local::write_atomic, Backend, RemoteEntry};
+use crate::config::AppConfig;
+use crate::scan::{self, mtime_ms, Ignore, LocalFile};
+use crate::state::{FileState, SyncState};
+use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeSet, HashMap};
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+#[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SyncReport {
+    pub uploaded: usize,
+    pub downloaded: usize,
+    pub deleted_local: usize,
+    pub deleted_remote: usize,
+    pub conflicts: usize,
+    pub errors: Vec<String>,
+    pub duration_ms: u64,
+}
+
+impl SyncReport {
+    pub fn changes(&self) -> usize {
+        self.uploaded + self.downloaded + self.deleted_local + self.deleted_remote + self.conflicts
+    }
+    pub fn summary(&self) -> String {
+        if self.changes() == 0 && self.errors.is_empty() {
+            return "변경 없음".into();
+        }
+        let mut parts = Vec::new();
+        if self.uploaded > 0 {
+            parts.push(format!("업로드 {}", self.uploaded));
+        }
+        if self.downloaded > 0 {
+            parts.push(format!("다운로드 {}", self.downloaded));
+        }
+        if self.deleted_local > 0 {
+            parts.push(format!("로컬 삭제 {}", self.deleted_local));
+        }
+        if self.deleted_remote > 0 {
+            parts.push(format!("원격 삭제 {}", self.deleted_remote));
+        }
+        if self.conflicts > 0 {
+            parts.push(format!("충돌 {}", self.conflicts));
+        }
+        if !self.errors.is_empty() {
+            parts.push(format!("오류 {}", self.errors.len()));
+        }
+        parts.join(", ")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Action {
+    Upload,
+    Download,
+    DeleteLocal,
+    DeleteRemote,
+    Conflict,
+    Forget,
+    Touch,
+}
+
+pub struct SyncEngine {
+    cfg: AppConfig,
+    vault: PathBuf,
+    backend: Box<dyn Backend>,
+    ignore: Ignore,
+    state_path: PathBuf,
+    state: SyncState,
+    device: String,
+}
+
+pub fn hash_bytes(data: &[u8]) -> String {
+    hex::encode(Sha256::digest(data))
+}
+
+pub fn hash_file(path: &Path) -> Result<String> {
+    let mut f = std::fs::File::open(path)?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(hex::encode(h.finalize()))
+}
+
+fn state_file(data_dir: &Path, vault: &str, backend_id: &str) -> PathBuf {
+    let key = hash_bytes(format!("{vault}\n{backend_id}").as_bytes());
+    data_dir.join(format!("state-{}.json", &key[..16]))
+}
+
+impl SyncEngine {
+    pub fn new(cfg: AppConfig, data_dir: &Path) -> Result<Self> {
+        cfg.validate()?;
+        let backend = backend::create_backend(&cfg.backend, data_dir)?;
+        Self::with_backend(cfg, backend, data_dir)
+    }
+
+    pub fn with_backend(cfg: AppConfig, backend: Box<dyn Backend>, data_dir: &Path) -> Result<Self> {
+        let vault = PathBuf::from(cfg.vault_path.trim());
+        let ignore = Ignore::new(&cfg).context("제외 패턴 오류")?;
+        let id = backend.id();
+        let state_path = state_file(data_dir, &cfg.vault_path, &id);
+        let mut state = SyncState::load(&state_path);
+        if state.backend_id != id {
+            state = SyncState {
+                backend_id: id,
+                ..Default::default()
+            };
+        }
+        let device = cfg
+            .effective_device_name()
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        Ok(Self {
+            cfg,
+            vault,
+            backend,
+            ignore,
+            state_path,
+            state,
+            device,
+        })
+    }
+
+    /// 동기화 기록 초기화 (다음 동기화 때 양쪽을 처음부터 비교)
+    pub fn reset_state(&mut self) -> Result<()> {
+        self.state.files.clear();
+        let _ = std::fs::remove_file(&self.state_path);
+        Ok(())
+    }
+
+    pub fn is_ignored(&self, rel: &str) -> bool {
+        self.ignore.is_ignored(rel)
+    }
+
+    fn full(&self, rel: &str) -> PathBuf {
+        let mut p = self.vault.clone();
+        for seg in rel.split('/') {
+            p.push(seg);
+        }
+        p
+    }
+
+    pub fn sync_once(&mut self, log: &dyn Fn(&str)) -> Result<SyncReport> {
+        let started = Instant::now();
+        if !self.vault.is_dir() {
+            bail!("볼트 폴더를 찾을 수 없습니다: {}", self.vault.display());
+        }
+        let mut report = SyncReport::default();
+
+        // 1) 로컬 스캔 + 해시 (크기/수정시각이 같으면 이전 해시 재사용)
+        let local = scan::scan(&self.vault, &self.ignore)?;
+        let mut local_hash: HashMap<String, String> = HashMap::new();
+        for (p, f) in &local {
+            let cached = self
+                .state
+                .files
+                .get(p)
+                .filter(|s| s.size == f.size && s.mtime == f.mtime)
+                .map(|s| s.hash.clone());
+            let h = match cached {
+                Some(h) => h,
+                None => match hash_file(&self.full(p)) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        report.errors.push(format!("{p}: 읽기 실패 ({e})"));
+                        continue;
+                    }
+                },
+            };
+            local_hash.insert(p.clone(), h);
+        }
+
+        // 2) 원격 목록
+        let remote: HashMap<String, RemoteEntry> = self
+            .backend
+            .list()
+            .context("원격 목록 조회 실패")?
+            .into_iter()
+            .filter(|e| backend::is_safe_rel_path(&e.path) && !self.ignore.is_ignored(&e.path))
+            .map(|e| (e.path.clone(), e))
+            .collect();
+
+        // 3) 안전장치
+        let known = self.state.files.len();
+        if known >= 5 && remote.is_empty() && !local.is_empty() {
+            bail!(
+                "원격 저장소가 비어 있습니다. 설정이 바뀌었거나 원격 파일이 지워진 것 같아 안전을 위해 중단했습니다. \
+                 의도한 경우 '동기화 기록 초기화'를 눌러 주세요"
+            );
+        }
+        if known >= 5 && local.is_empty() && !remote.is_empty() {
+            bail!(
+                "볼트 폴더가 비어 있습니다. 안전을 위해 중단했습니다. 의도한 경우 '동기화 기록 초기화'를 눌러 주세요"
+            );
+        }
+
+        // 4) 계획 수립
+        let all: BTreeSet<&String> = local
+            .keys()
+            .chain(remote.keys())
+            .chain(self.state.files.keys())
+            .collect();
+        let mut plan: Vec<(String, Action)> = Vec::new();
+        for p in all {
+            let l = local.get(p);
+            let r = remote.get(p);
+            let s = self.state.files.get(p);
+            if l.is_some() && !local_hash.contains_key(p) {
+                continue; // 읽기 실패한 파일
+            }
+            let lchanged = match (l, s) {
+                (Some(_), Some(s)) => local_hash.get(p) != Some(&s.hash),
+                (Some(_), None) => true,
+                _ => false,
+            };
+            let rchanged = match (r, s) {
+                (Some(r), Some(s)) => r.rev != s.remote_rev,
+                (Some(_), None) => true,
+                _ => false,
+            };
+            let propagate = self.cfg.propagate_deletes;
+            let action = match (l, r, s) {
+                (Some(_), None, None) => Action::Upload,
+                (None, Some(_), None) => Action::Download,
+                (Some(_), Some(_), None) => Action::Conflict,
+                (None, None, Some(_)) => Action::Forget,
+                (None, None, None) => continue,
+                (Some(lf), Some(_), Some(s)) => match (lchanged, rchanged) {
+                    (false, false) => {
+                        if s.size != lf.size || s.mtime != lf.mtime {
+                            Action::Touch
+                        } else {
+                            continue;
+                        }
+                    }
+                    (true, false) => Action::Upload,
+                    (false, true) => Action::Download,
+                    (true, true) => Action::Conflict,
+                },
+                (None, Some(_), Some(_)) => {
+                    if rchanged || !propagate {
+                        Action::Download
+                    } else {
+                        Action::DeleteRemote
+                    }
+                }
+                (Some(_), None, Some(_)) => {
+                    if lchanged || !propagate {
+                        Action::Upload
+                    } else {
+                        Action::DeleteLocal
+                    }
+                }
+            };
+            plan.push((p.clone(), action));
+        }
+
+        let deletions = plan
+            .iter()
+            .filter(|(_, a)| matches!(a, Action::DeleteLocal | Action::DeleteRemote))
+            .count();
+        if deletions > 20 && deletions * 2 > known {
+            bail!(
+                "한 번에 {deletions}개 파일이 삭제될 예정이라 안전을 위해 중단했습니다. \
+                 의도한 경우 '동기화 기록 초기화'를 누른 뒤 다시 동기화하세요 (이 경우 삭제 대신 복원됩니다)"
+            );
+        }
+
+        // 5) 실행
+        let mut since_save = 0;
+        for (p, action) in plan {
+            let res = match action {
+                Action::Upload => self.do_upload(&p).map(|_| {
+                    report.uploaded += 1;
+                    log(&format!("↑ {p}"));
+                }),
+                Action::Download => {
+                    let r = remote[&p].clone();
+                    self.do_download(&p, &r, local.get(&p)).map(|done| {
+                        if done {
+                            report.downloaded += 1;
+                            log(&format!("↓ {p}"));
+                        }
+                    })
+                }
+                Action::DeleteLocal => self.do_delete_local(&p).map(|_| {
+                    report.deleted_local += 1;
+                    log(&format!("✕ (로컬) {p}"));
+                }),
+                Action::DeleteRemote => self.do_delete_remote(&p).map(|_| {
+                    report.deleted_remote += 1;
+                    log(&format!("✕ (원격) {p}"));
+                }),
+                Action::Conflict => {
+                    let r = remote[&p].clone();
+                    let lh = local_hash[&p].clone();
+                    self.do_conflict(&p, &r, &lh).map(|c| match c {
+                        Some(name) => {
+                            report.conflicts += 1;
+                            log(&format!("⚠ 충돌: {p} → 로컬본을 '{name}' 로 보존"));
+                        }
+                        None => {}
+                    })
+                }
+                Action::Forget => {
+                    self.state.files.remove(&p);
+                    Ok(())
+                }
+                Action::Touch => {
+                    if let (Some(lf), Some(s)) = (local.get(&p), self.state.files.get_mut(&p)) {
+                        s.size = lf.size;
+                        s.mtime = lf.mtime;
+                    }
+                    Ok(())
+                }
+            };
+            if let Err(e) = res {
+                let msg = format!("{p}: {e:#}");
+                log(&format!("오류 {msg}"));
+                report.errors.push(msg);
+            }
+            since_save += 1;
+            if since_save >= 25 {
+                since_save = 0;
+                let _ = self.state.save(&self.state_path);
+            }
+        }
+        self.state.save(&self.state_path)?;
+        report.duration_ms = started.elapsed().as_millis() as u64;
+        Ok(report)
+    }
+
+    fn record(&mut self, p: &str, hash: String, remote_rev: String) -> Result<()> {
+        let meta = std::fs::metadata(self.full(p))?;
+        self.state.files.insert(
+            p.to_string(),
+            FileState {
+                hash,
+                size: meta.len(),
+                mtime: mtime_ms(&meta),
+                remote_rev,
+            },
+        );
+        Ok(())
+    }
+
+    fn do_upload(&mut self, p: &str) -> Result<()> {
+        let data = std::fs::read(self.full(p))?;
+        let hash = hash_bytes(&data);
+        let entry = self.backend.upload(p, &data)?;
+        self.record(p, hash, entry.rev)
+    }
+
+    /// 다운로드. 스캔 이후 로컬 파일이 바뀌었으면 덮어쓰지 않고 건너뜀 (false 반환)
+    fn do_download(&mut self, p: &str, r: &RemoteEntry, expected: Option<&LocalFile>) -> Result<bool> {
+        let full = self.full(p);
+        let data = self.backend.download(p)?;
+        let hash = hash_bytes(&data);
+        match (std::fs::metadata(&full), expected) {
+            (Ok(m), Some(e)) if m.len() != e.size || mtime_ms(&m) != e.mtime => {
+                return Ok(false);
+            }
+            (Ok(_), None) => return Ok(false),
+            _ => {}
+        }
+        let same = full.is_file() && hash_file(&full).map(|h| h == hash).unwrap_or(false);
+        if !same {
+            write_atomic(&full, &data)?;
+        }
+        self.record(p, hash, r.rev.clone())?;
+        Ok(!same)
+    }
+
+    fn do_delete_local(&mut self, p: &str) -> Result<()> {
+        let full = self.full(p);
+        if full.exists() {
+            let mut dest = self.vault.join(".trash");
+            for seg in p.split('/') {
+                dest.push(seg);
+            }
+            if dest.exists() {
+                let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+                let name = format!(
+                    "{} ({stamp})",
+                    dest.file_name().unwrap_or_default().to_string_lossy()
+                );
+                dest.set_file_name(name);
+            }
+            if let Some(d) = dest.parent() {
+                std::fs::create_dir_all(d)?;
+            }
+            if std::fs::rename(&full, &dest).is_err() {
+                std::fs::copy(&full, &dest)?;
+                std::fs::remove_file(&full)?;
+            }
+            backend::local::cleanup_empty_dirs(&self.vault, &full);
+        }
+        self.state.files.remove(p);
+        Ok(())
+    }
+
+    fn do_delete_remote(&mut self, p: &str) -> Result<()> {
+        self.backend.delete(p)?;
+        self.state.files.remove(p);
+        Ok(())
+    }
+
+    fn conflict_name(&self, p: &str) -> String {
+        let (dir, file) = match p.rsplit_once('/') {
+            Some((d, f)) => (format!("{d}/"), f),
+            None => (String::new(), p),
+        };
+        let (stem, ext) = match file.rsplit_once('.') {
+            Some((s, e)) if !s.is_empty() => (s, format!(".{e}")),
+            _ => (file, String::new()),
+        };
+        let stamp = chrono::Local::now().format("%Y-%m-%d %H%M%S");
+        let mut name = format!("{dir}{stem} (충돌 {} {stamp}){ext}", self.device);
+        let mut n = 2;
+        while self.full(&name).exists() {
+            name = format!("{dir}{stem} (충돌 {} {stamp} {n}){ext}", self.device);
+            n += 1;
+        }
+        name
+    }
+
+    /// 양쪽이 모두 바뀐 경우. 내용이 같으면 None, 다르면 보존한 로컬 사본 이름 반환
+    fn do_conflict(&mut self, p: &str, r: &RemoteEntry, local_hash: &str) -> Result<Option<String>> {
+        let data = self.backend.download(p)?;
+        let rhash = hash_bytes(&data);
+        if rhash == local_hash {
+            self.record(p, rhash, r.rev.clone())?;
+            return Ok(None);
+        }
+        let full = self.full(p);
+        let cname = self.conflict_name(p);
+        let cfull = self.full(&cname);
+        std::fs::rename(&full, &cfull)?;
+        write_atomic(&full, &data)?;
+        self.record(p, rhash, r.rev.clone())?;
+        // 보존한 로컬 사본도 원격에 올려 다른 기기에서도 보이게 함
+        let cdata = std::fs::read(&cfull)?;
+        let centry = self.backend.upload(&cname, &cdata)?;
+        self.record(&cname, hash_bytes(&cdata), centry.rev)?;
+        Ok(Some(cname))
+    }
+}

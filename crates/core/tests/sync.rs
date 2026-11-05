@@ -1,230 +1,145 @@
-use std::{fs, path::Path};
-use tempfile::TempDir;
-use vault_sync_core::{sync, validate_path, Config};
+//! 로컬 폴더 백엔드를 원격 삼아 두 기기(A, B) 간 동기화를 검증
+use obsidian_sync_core::{AppConfig, BackendConfig, SyncEngine};
+use std::fs;
+use std::path::Path;
 
-fn setup(vault: &Path, remote: &Path) -> Config {
-    fs::create_dir_all(vault).unwrap();
-    fs::create_dir_all(remote).unwrap();
-    Config {
-        vault: vault.into(),
-        options: [("root".into(), remote.to_string_lossy().into())].into(),
+struct Env {
+    _tmp: tempfile::TempDir,
+    a: std::path::PathBuf,
+    b: std::path::PathBuf,
+    remote: std::path::PathBuf,
+    data_a: std::path::PathBuf,
+    data_b: std::path::PathBuf,
+}
+
+fn env() -> Env {
+    let tmp = tempfile::tempdir().unwrap();
+    let r = tmp.path();
+    let e = Env {
+        a: r.join("a"),
+        b: r.join("b"),
+        remote: r.join("remote"),
+        data_a: r.join("data_a"),
+        data_b: r.join("data_b"),
+        _tmp: tmp,
+    };
+    for d in [&e.a, &e.b, &e.remote] {
+        fs::create_dir_all(d).unwrap();
+    }
+    e
+}
+
+fn engine(vault: &Path, remote: &Path, data: &Path, device: &str) -> SyncEngine {
+    let cfg = AppConfig {
+        vault_path: vault.to_string_lossy().into(),
+        backend: BackendConfig::LocalFolder {
+            path: remote.to_string_lossy().into(),
+        },
+        device_name: device.into(),
         ..Default::default()
-    }
+    };
+    SyncEngine::new(cfg, data).unwrap()
 }
-#[tokio::test]
-async fn roundtrip_updates_and_binary() {
-    let dir = TempDir::new().unwrap();
-    let d = dir.path();
-    let a = setup(&d.join("a"), &d.join("remote"));
-    let b = setup(&d.join("b"), &d.join("remote"));
-    fs::create_dir(a.vault.join("한글")).unwrap();
-    fs::write(a.vault.join("한글/노트.md"), "hello").unwrap();
-    fs::write(a.vault.join("image.png"), [0, 255, 10, 32]).unwrap();
-    sync(&a, &d.join("sa")).await.unwrap();
-    sync(&b, &d.join("sb")).await.unwrap();
-    assert_eq!(
-        fs::read(b.vault.join("image.png")).unwrap(),
-        [0, 255, 10, 32]
-    );
-    fs::write(b.vault.join("한글/노트.md"), "changed").unwrap();
-    sync(&b, &d.join("sb")).await.unwrap();
-    sync(&a, &d.join("sa")).await.unwrap();
-    assert_eq!(
-        fs::read_to_string(a.vault.join("한글/노트.md")).unwrap(),
-        "changed"
-    );
-    assert_eq!(sync(&a, &d.join("sa")).await.unwrap().uploaded, 0);
+
+fn write(p: &Path, s: &str) {
+    fs::create_dir_all(p.parent().unwrap()).unwrap();
+    fs::write(p, s).unwrap();
 }
-#[tokio::test]
-async fn concurrent_changes_preserve_both_and_converge() {
-    let dir = TempDir::new().unwrap();
-    let d = dir.path();
-    let a = setup(&d.join("a"), &d.join("remote"));
-    let b = setup(&d.join("b"), &d.join("remote"));
-    fs::write(a.vault.join("note.md"), "base").unwrap();
-    sync(&a, &d.join("sa")).await.unwrap();
-    sync(&b, &d.join("sb")).await.unwrap();
-    fs::write(a.vault.join("note.md"), "A").unwrap();
-    fs::write(b.vault.join("note.md"), "B").unwrap();
-    sync(&a, &d.join("sa")).await.unwrap();
-    assert_eq!(sync(&b, &d.join("sb")).await.unwrap().conflicts, 1);
-    sync(&a, &d.join("sa")).await.unwrap();
-    assert_eq!(
-        fs::read(a.vault.join("note.md")).unwrap(),
-        fs::read(b.vault.join("note.md")).unwrap()
-    );
-    let copies: Vec<_> = fs::read_dir(b.vault.join(".sync-conflicts"))
-        .unwrap()
-        .map(|e| fs::read(e.unwrap().path()).unwrap())
-        .collect();
-    assert!(copies.contains(&b"A".to_vec()) && copies.contains(&b"B".to_vec()));
-    fs::write(b.vault.join("note.md"), "merged").unwrap();
-    sync(&b, &d.join("sb")).await.unwrap();
-    assert_eq!(sync(&a, &d.join("sa")).await.unwrap().conflicts, 0);
-}
-#[tokio::test]
-async fn deletes_default_to_restore_and_opt_in_to_backup() {
-    let dir = TempDir::new().unwrap();
-    let d = dir.path();
-    let mut a = setup(&d.join("a"), &d.join("remote"));
-    let mut b = setup(&d.join("b"), &d.join("remote"));
-    fs::write(a.vault.join("note.md"), "keep").unwrap();
-    sync(&a, &d.join("sa")).await.unwrap();
-    sync(&b, &d.join("sb")).await.unwrap();
-    fs::remove_file(a.vault.join("note.md")).unwrap();
-    sync(&a, &d.join("sa")).await.unwrap();
-    assert!(a.vault.join("note.md").exists());
-    a.propagate_deletes = true;
-    b.propagate_deletes = true;
-    fs::remove_file(a.vault.join("note.md")).unwrap();
-    sync(&a, &d.join("sa")).await.unwrap();
-    sync(&b, &d.join("sb")).await.unwrap();
-    assert!(!b.vault.join("note.md").exists());
-    assert!(b.vault.join(".sync-backups").is_dir());
-}
-#[tokio::test]
-async fn missing_vault_and_remote_history_fail_closed() {
-    let dir = TempDir::new().unwrap();
-    let d = dir.path();
-    let a = setup(&d.join("a"), &d.join("remote"));
-    fs::write(a.vault.join("note.md"), "keep").unwrap();
-    sync(&a, &d.join("state")).await.unwrap();
-    fs::remove_dir_all(d.join("remote/vault-sync-v1/events")).unwrap();
-    assert!(sync(&a, &d.join("state")).await.is_err());
-    assert_eq!(fs::read(a.vault.join("note.md")).unwrap(), b"keep");
-    fs::remove_dir_all(&a.vault).unwrap();
-    assert!(sync(&a, &d.join("state")).await.is_err());
-}
-#[tokio::test]
-async fn mass_delete_is_blocked() {
-    let dir = TempDir::new().unwrap();
-    let d = dir.path();
-    let mut a = setup(&d.join("a"), &d.join("remote"));
-    a.propagate_deletes = true;
-    for i in 0..12 {
-        fs::write(a.vault.join(format!("{i}.md")), "keep").unwrap();
-    }
-    sync(&a, &d.join("state")).await.unwrap();
-    for i in 0..12 {
-        fs::remove_file(a.vault.join(format!("{i}.md"))).unwrap();
-    }
-    assert!(sync(&a, &d.join("state")).await.is_err());
-}
+
+fn noop(_: &str) {}
+
 #[test]
-fn rejects_traversal_and_windows_aliases() {
-    for path in [
-        "../x",
-        "/x",
-        "a//b",
-        "a\\b",
-        "C:/x",
-        "x:ads",
-        "CON.md",
-        "a. ",
-        ".sync-backups/x",
-    ] {
-        assert!(validate_path(path).is_err(), "{path}");
+fn two_way_sync() {
+    let e = env();
+    let mut ea = engine(&e.a, &e.remote, &e.data_a, "PC");
+    let mut eb = engine(&e.b, &e.remote, &e.data_b, "Phone");
+
+    write(&e.a.join("노트/첫 노트.md"), "hello");
+    write(&e.a.join(".obsidian/app.json"), "{}");
+    write(&e.a.join(".obsidian/workspace.json"), "ignored");
+    let r = ea.sync_once(&noop).unwrap();
+    assert_eq!(r.uploaded, 2, "{r:?}");
+    assert!(!e.remote.join(".obsidian/workspace.json").exists());
+
+    let r = eb.sync_once(&noop).unwrap();
+    assert_eq!(r.downloaded, 2);
+    assert_eq!(fs::read_to_string(e.b.join("노트/첫 노트.md")).unwrap(), "hello");
+
+    // 변경 없음
+    assert_eq!(ea.sync_once(&noop).unwrap().changes(), 0);
+    assert_eq!(eb.sync_once(&noop).unwrap().changes(), 0);
+
+    // B에서 수정 → A로 전파
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    write(&e.b.join("노트/첫 노트.md"), "hello from B");
+    assert_eq!(eb.sync_once(&noop).unwrap().uploaded, 1);
+    assert_eq!(ea.sync_once(&noop).unwrap().downloaded, 1);
+    assert_eq!(fs::read_to_string(e.a.join("노트/첫 노트.md")).unwrap(), "hello from B");
+
+    // A에서 삭제 → 원격 삭제 → B는 .trash로 이동
+    fs::remove_file(e.a.join("노트/첫 노트.md")).unwrap();
+    assert_eq!(ea.sync_once(&noop).unwrap().deleted_remote, 1);
+    assert!(!e.remote.join("노트/첫 노트.md").exists());
+    assert_eq!(eb.sync_once(&noop).unwrap().deleted_local, 1);
+    assert!(!e.b.join("노트/첫 노트.md").exists());
+    assert!(e.b.join(".trash/노트/첫 노트.md").exists());
+}
+
+#[test]
+fn conflict_keeps_both() {
+    let e = env();
+    let mut ea = engine(&e.a, &e.remote, &e.data_a, "PC");
+    let mut eb = engine(&e.b, &e.remote, &e.data_b, "Phone");
+    write(&e.a.join("x.md"), "base");
+    ea.sync_once(&noop).unwrap();
+    eb.sync_once(&noop).unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    write(&e.a.join("x.md"), "A edit");
+    write(&e.b.join("x.md"), "B edit");
+    ea.sync_once(&noop).unwrap();
+    let r = eb.sync_once(&noop).unwrap();
+    assert_eq!(r.conflicts, 1, "{r:?}");
+    // 원격(A) 버전이 원래 이름, B 버전은 충돌 사본
+    assert_eq!(fs::read_to_string(e.b.join("x.md")).unwrap(), "A edit");
+    let copies: Vec<_> = fs::read_dir(&e.b)
+        .unwrap()
+        .filter_map(|d| d.ok())
+        .map(|d| d.file_name().to_string_lossy().to_string())
+        .filter(|n| n.contains("충돌"))
+        .collect();
+    assert_eq!(copies.len(), 1);
+    assert_eq!(fs::read_to_string(e.b.join(&copies[0])).unwrap(), "B edit");
+    // 충돌 사본도 A로 전달
+    assert_eq!(ea.sync_once(&noop).unwrap().downloaded, 1);
+    assert!(e.a.join(&copies[0]).exists());
+}
+
+#[test]
+fn identical_files_first_sync_no_conflict() {
+    let e = env();
+    write(&e.a.join("same.md"), "same");
+    write(&e.remote.join("same.md"), "same");
+    let mut ea = engine(&e.a, &e.remote, &e.data_a, "PC");
+    let r = ea.sync_once(&noop).unwrap();
+    assert_eq!(r.conflicts, 0);
+    assert_eq!(r.changes(), 0);
+}
+
+#[test]
+fn empty_remote_safety() {
+    let e = env();
+    let mut ea = engine(&e.a, &e.remote, &e.data_a, "PC");
+    for i in 0..6 {
+        write(&e.a.join(format!("{i}.md")), "x");
     }
-    assert!(validate_path("한글/notes.md").is_ok());
-}
-
-#[tokio::test]
-async fn concurrent_delete_and_edit_preserves_edit() {
-    let dir = TempDir::new().unwrap();
-    let d = dir.path();
-    let mut a = setup(&d.join("a"), &d.join("remote"));
-    let mut b = setup(&d.join("b"), &d.join("remote"));
-    a.propagate_deletes = true;
-    b.propagate_deletes = true;
-    fs::write(a.vault.join("note.md"), "base").unwrap();
-    sync(&a, &d.join("sa")).await.unwrap();
-    sync(&b, &d.join("sb")).await.unwrap();
-    fs::remove_file(a.vault.join("note.md")).unwrap();
-    fs::write(b.vault.join("note.md"), "edited offline").unwrap();
-    sync(&a, &d.join("sa")).await.unwrap();
-    sync(&b, &d.join("sb")).await.unwrap();
-    sync(&a, &d.join("sa")).await.unwrap();
-    assert_eq!(
-        fs::read(a.vault.join("note.md")).unwrap(),
-        b"edited offline"
-    );
-}
-
-#[tokio::test]
-async fn empty_client_can_recover_remote_vault() {
-    let dir = TempDir::new().unwrap();
-    let d = dir.path();
-    let a = setup(&d.join("a"), &d.join("remote"));
-    let b = setup(&d.join("b"), &d.join("remote"));
-    fs::write(a.vault.join("note.md"), "recover").unwrap();
-    sync(&a, &d.join("sa")).await.unwrap();
-    sync(&b, &d.join("fresh-state")).await.unwrap();
-    assert_eq!(fs::read(b.vault.join("note.md")).unwrap(), b"recover");
-}
-
-#[tokio::test]
-async fn remote_case_collision_aborts_before_upload() {
-    let dir = TempDir::new().unwrap();
-    let d = dir.path();
-    let a = setup(&d.join("a"), &d.join("remote"));
-    let b = setup(&d.join("b"), &d.join("remote"));
-    fs::write(a.vault.join("Note.md"), "remote").unwrap();
-    sync(&a, &d.join("sa")).await.unwrap();
-    fs::write(b.vault.join("note.md"), "local").unwrap();
-    assert!(sync(&b, &d.join("sb")).await.is_err());
-    assert_eq!(
-        fs::read_dir(d.join("remote/vault-sync-v1/events"))
-            .unwrap()
-            .count(),
-        1
-    );
-    assert_eq!(fs::read(b.vault.join("note.md")).unwrap(), b"local");
-}
-
-#[tokio::test]
-async fn internal_files_never_upload() {
-    let dir = TempDir::new().unwrap();
-    let d = dir.path();
-    let a = setup(&d.join("a"), &d.join("remote"));
-    let b = setup(&d.join("b"), &d.join("remote"));
-    fs::create_dir_all(a.vault.join(".obsidian")).unwrap();
-    fs::write(a.vault.join(".obsidian/workspace.json"), "private UI state").unwrap();
-    fs::write(a.vault.join(".obsidian/app.json"), "settings").unwrap();
-    fs::write(a.vault.join("scratch.tmp"), "incomplete").unwrap();
-    sync(&a, &d.join("sa")).await.unwrap();
-    sync(&b, &d.join("sb")).await.unwrap();
-    assert!(!b.vault.join(".obsidian/workspace.json").exists());
-    assert!(!b.vault.join("scratch.tmp").exists());
-    assert!(b.vault.join(".obsidian/app.json").exists());
-}
-#[tokio::test]
-async fn corrupt_blob_does_not_replace_local_file() {
-    let dir = TempDir::new().unwrap();
-    let d = dir.path();
-    let a = setup(&d.join("a"), &d.join("remote"));
-    let b = setup(&d.join("b"), &d.join("remote"));
-    fs::write(a.vault.join("x.md"), "good").unwrap();
-    sync(&a, &d.join("sa")).await.unwrap();
-    for item in fs::read_dir(d.join("remote/vault-sync-v1/blobs")).unwrap() {
-        fs::write(item.unwrap().path(), "corrupt").unwrap();
-    }
-    assert!(sync(&b, &d.join("sb")).await.is_err());
-    assert!(!b.vault.join("x.md").exists());
-}
-#[tokio::test]
-async fn nested_remote_is_rejected() {
-    let dir = TempDir::new().unwrap();
-    let d = dir.path();
-    let a = setup(&d.join("a"), &d.join("a/remote"));
-    assert!(sync(&a, &d.join("state")).await.is_err());
-}
-#[cfg(unix)]
-#[tokio::test]
-async fn symlinks_cannot_escape_vault() {
-    let dir = TempDir::new().unwrap();
-    let d = dir.path();
-    let a = setup(&d.join("a"), &d.join("remote"));
-    fs::write(d.join("outside"), "private").unwrap();
-    std::os::unix::fs::symlink(d.join("outside"), a.vault.join("link")).unwrap();
-    assert!(sync(&a, &d.join("state")).await.is_err());
+    ea.sync_once(&noop).unwrap();
+    // 원격이 통째로 사라짐 → 로컬을 지우지 않고 중단
+    fs::remove_dir_all(&e.remote).unwrap();
+    fs::create_dir_all(&e.remote).unwrap();
+    assert!(ea.sync_once(&noop).is_err());
+    assert!(e.a.join("0.md").exists());
+    // 기록 초기화 후에는 다시 업로드
+    ea.reset_state().unwrap();
+    assert_eq!(ea.sync_once(&noop).unwrap().uploaded, 6);
 }
