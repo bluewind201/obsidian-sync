@@ -1,0 +1,12 @@
+/target/
+/.tools/
+/.work/
+**/build/
+**/.gradle/
+**/local.properties
+*.jks
+*.keystore
+*.log
+config.json
+*.secret
+

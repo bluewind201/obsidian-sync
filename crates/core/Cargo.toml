@@ -1,0 +1,19 @@
+[package]
+name = "vault-sync-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+opendal = { version = "0.54.1", default-features = false, features = ["executors-tokio", "services-fs", "services-memory", "services-webdav", "services-s3", "services-onedrive", "services-gdrive"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+walkdir = "2"
+tempfile = "3"
+fs2 = "0.4"
+
