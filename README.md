@@ -68,6 +68,7 @@ cd android
 gradle assembleDebug lintDebug
 ```
 
-GitHub Actions는 main/PR에서 테스트와 Windows/Android 빌드를 실행합니다.
+GitHub Actions는 main/PR에서 Linux 및 Windows 파일 동기화 테스트와 Windows/Android 빌드를 실행합니다.
+Android 15 x86_64 에뮬레이터에서 Rust JNI 파일 복제, 잘못된 설정 처리, 앱 화면 실행을 테스트하고 화면 캡처와 Lint 보고서를 보관합니다.
 `v*` 태그를 푸시하면 모든 작업 성공 후 ZIP, APK, SHA256SUMS를 GitHub 프리릴리즈에 게시합니다.
 실제 클라우드 계정과 Android 실기기에서의 동작은 별도 검증이 필요합니다.

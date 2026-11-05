@@ -80,6 +80,7 @@ jobs:
           disable-animations: true
           script: |
             cd android && gradle connectedDebugAndroidTest --no-daemon
+            adb install -r android/app/build/outputs/apk/debug/app-debug.apk
             adb shell am start -n io.bluewind.obsidiansync/.MainActivity
             sleep 2
             adb exec-out screencap -p > android-preview.png
@@ -114,8 +115,10 @@ jobs:
       - run: sha256sum artifacts/* > artifacts/SHA256SUMS.txt
       - env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          GH_REPO: ${{ github.repository }}
         run: >-
-          gh release create '${{ github.ref_name }}' artifacts/*
-          --repo '${{ github.repository }}' --prerelease
-          --title 'Obsidian Sync ${{ github.ref_name }} preview'
+          gh release create "$RELEASE_TAG" artifacts/*
+          --prerelease
+          --title "Obsidian Sync $RELEASE_TAG preview"
           --notes 'Windows x64 portable app and Android arm64/x86_64 preview APK. Android is debug-signed for evaluation; future builds may require reinstalling. Back up your vault before first use. Cloud adapters require your own credentials and have not been tested against your accounts. See README and provider setup guide. Not affiliated with Obsidian.'
