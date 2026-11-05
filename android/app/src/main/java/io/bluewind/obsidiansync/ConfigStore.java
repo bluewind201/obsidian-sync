@@ -1,53 +1,66 @@
 package io.bluewind.obsidiansync;
+
 import android.content.Context;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
 import android.util.Base64;
+import java.io.File;
+import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 
+/** 설정(JSON)을 Android Keystore로 암호화해 저장합니다. 비밀번호/키가 포함되기 때문입니다. */
 final class ConfigStore {
     private static final String ALIAS = "obsidian-sync-config";
+    private static final String PREFS = "secure-v2";
+
     private static SecretKey key() throws Exception {
-        KeyStore store = KeyStore.getInstance("AndroidKeyStore"); store.load(null);
+        KeyStore store = KeyStore.getInstance("AndroidKeyStore");
+        store.load(null);
         if (!store.containsAlias(ALIAS)) {
-            KeyGenerator generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
-            generator.init(new KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT).setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build());
-            generator.generateKey();
+            KeyGenerator g = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+            g.init(new KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
+                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .build());
+            g.generateKey();
         }
         return (SecretKey) store.getKey(ALIAS, null);
     }
-    static synchronized void save(Context c, String value) throws Exception {
-        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding"); cipher.init(Cipher.ENCRYPT_MODE, key());
-        String encrypted = Base64.encodeToString(cipher.doFinal(value.getBytes(java.nio.charset.StandardCharsets.UTF_8)), Base64.NO_WRAP);
-        String iv = Base64.encodeToString(cipher.getIV(), Base64.NO_WRAP);
-        if (!c.getSharedPreferences("secure", 0).edit().putString("data", encrypted).putString("iv", iv).commit()) throw new java.io.IOException("Cannot save settings");
-    }
-    static synchronized String load(Context c) throws Exception {
-        var prefs = c.getSharedPreferences("secure", 0);
-        if (!prefs.contains("data")) return "";
+
+    static synchronized void save(Context c, String json) throws Exception {
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-        cipher.init(Cipher.DECRYPT_MODE, key(), new GCMParameterSpec(128, Base64.decode(prefs.getString("iv", ""), Base64.NO_WRAP)));
-        return new String(cipher.doFinal(Base64.decode(prefs.getString("data", ""), Base64.NO_WRAP)), java.nio.charset.StandardCharsets.UTF_8);
+        cipher.init(Cipher.ENCRYPT_MODE, key());
+        String data = Base64.encodeToString(cipher.doFinal(json.getBytes(StandardCharsets.UTF_8)), Base64.NO_WRAP);
+        String iv = Base64.encodeToString(cipher.getIV(), Base64.NO_WRAP);
+        if (!c.getSharedPreferences(PREFS, 0).edit().putString("data", data).putString("iv", iv).commit())
+            throw new java.io.IOException("설정을 저장할 수 없습니다");
     }
-    static String run(Context c) {
+
+    /** 저장된 설정 JSON. 없으면 빈 문자열 */
+    static synchronized String load(Context c) {
         try {
-            String config = load(c);
-            if (config.isEmpty()) return "{\"ok\":false,\"error\":\"Save connection settings first\"}";
-            String result = Native.sync(config, new java.io.File(c.getFilesDir(), "state").getAbsolutePath());
-            c.getSharedPreferences("status", 0).edit().putString("last", result).apply();
-            return result;
-        } catch (Exception | LinkageError e) { return "{\"ok\":false,\"error\":\"Check storage permission and connection settings\"}"; }
+            var p = c.getSharedPreferences(PREFS, 0);
+            if (!p.contains("data")) return "";
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.DECRYPT_MODE, key(), new GCMParameterSpec(128, Base64.decode(p.getString("iv", ""), Base64.NO_WRAP)));
+            return new String(cipher.doFinal(Base64.decode(p.getString("data", ""), Base64.NO_WRAP)), StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return "";
+        }
     }
-    static String describe(String raw) {
-        try {
-            org.json.JSONObject result = new org.json.JSONObject(raw);
-            if (!result.optBoolean("ok")) return "동기화를 중단했습니다. 폴더 권한·인증 정보·네트워크·파일명·원격 이력을 확인하세요.";
-            org.json.JSONObject report = result.getJSONObject("report");
-            return "동기화 완료 · 업로드 " + report.optInt("uploaded") + " · 다운로드 " + report.optInt("downloaded") + " · 삭제 " + report.optInt("deleted") + " · 충돌 " + report.optInt("conflicts") + " · 다음 확인 " + report.optInt("deferred");
-        } catch (Exception e) { return raw; }
+
+    static String dataDir(Context c) {
+        File d = new File(c.getFilesDir(), "sync");
+        //noinspection ResultOfMethodCallIgnored
+        d.mkdirs();
+        return d.getAbsolutePath();
     }
+
+    /** 실시간 동기화를 켜둔 상태인지 (재부팅 후 자동 시작용) */
+    static boolean enabled(Context c) { return c.getSharedPreferences("state", 0).getBoolean("enabled", false); }
+    static void setEnabled(Context c, boolean on) { c.getSharedPreferences("state", 0).edit().putBoolean("enabled", on).apply(); }
 }

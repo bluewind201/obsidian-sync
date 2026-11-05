@@ -63,7 +63,10 @@ fn two_way_sync() {
 
     let r = eb.sync_once(&noop).unwrap();
     assert_eq!(r.downloaded, 2);
-    assert_eq!(fs::read_to_string(e.b.join("노트/첫 노트.md")).unwrap(), "hello");
+    assert_eq!(
+        fs::read_to_string(e.b.join("노트/첫 노트.md")).unwrap(),
+        "hello"
+    );
 
     // 변경 없음
     assert_eq!(ea.sync_once(&noop).unwrap().changes(), 0);
@@ -74,7 +77,10 @@ fn two_way_sync() {
     write(&e.b.join("노트/첫 노트.md"), "hello from B");
     assert_eq!(eb.sync_once(&noop).unwrap().uploaded, 1);
     assert_eq!(ea.sync_once(&noop).unwrap().downloaded, 1);
-    assert_eq!(fs::read_to_string(e.a.join("노트/첫 노트.md")).unwrap(), "hello from B");
+    assert_eq!(
+        fs::read_to_string(e.a.join("노트/첫 노트.md")).unwrap(),
+        "hello from B"
+    );
 
     // A에서 삭제 → 원격 삭제 → B는 .trash로 이동
     fs::remove_file(e.a.join("노트/첫 노트.md")).unwrap();

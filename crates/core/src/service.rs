@@ -89,10 +89,10 @@ impl SyncService {
             running: true,
             ..Default::default()
         }));
-        shared
-            .lock()
-            .unwrap()
-            .push(format!("동기화 시작: {}", cfg.backend.display_name()), false);
+        shared.lock().unwrap().push(
+            format!("동기화 시작: {}", cfg.backend.display_name()),
+            false,
+        );
 
         // 실시간 파일 감시
         let watcher = if cfg.watch_local {
@@ -117,10 +117,10 @@ impl SyncService {
                 Ok(mut w) => match w.watch(&vault, RecursiveMode::Recursive) {
                     Ok(()) => Some(w),
                     Err(e) => {
-                        shared
-                            .lock()
-                            .unwrap()
-                            .push(format!("실시간 감시를 사용할 수 없어 주기 동기화만 합니다: {e}"), true);
+                        shared.lock().unwrap().push(
+                            format!("실시간 감시를 사용할 수 없어 주기 동기화만 합니다: {e}"),
+                            true,
+                        );
                         None
                     }
                 },
@@ -169,7 +169,8 @@ impl SyncService {
                     });
                     let mut s = sh.lock().unwrap();
                     s.syncing = false;
-                    s.last_sync = Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+                    s.last_sync =
+                        Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
                     match result {
                         Ok(rep) => {
                             s.last_summary = rep.summary();

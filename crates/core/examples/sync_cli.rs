@@ -7,7 +7,10 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(2);
     }
     let cfg = obsidian_sync_core::AppConfig::load(std::path::Path::new(&args[1]))?;
-    let report = obsidian_sync_core::service::sync_once(cfg, std::path::Path::new(&args[2]), &|l| println!("{l}"))?;
+    let report =
+        obsidian_sync_core::service::sync_once(cfg, std::path::Path::new(&args[2]), &|l| {
+            println!("{l}")
+        })?;
     println!("{}", report.summary());
     for e in &report.errors {
         eprintln!("ERR {e}");

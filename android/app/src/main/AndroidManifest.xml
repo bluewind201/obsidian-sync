@@ -1,14 +1,29 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <!-- Obsidian 볼트는 일반 저장소 폴더에 있으므로 파일 직접 접근 권한이 필요합니다 -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" tools:ignore="ScopedStorage"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
-    <application android:label="Obsidian Sync" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:allowBackup="false" android:usesCleartextTraffic="false" android:supportsRtl="true">
-        <activity android:name=".MainActivity" android:exported="true">
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+    <application android:label="Obsidian Sync" android:icon="@android:drawable/stat_notify_sync"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:allowBackup="false" android:usesCleartextTraffic="true" android:supportsRtl="true">
+        <activity android:name=".MainActivity" android:exported="true" android:windowSoftInputMode="adjustResize">
             <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
         </activity>
-        <service android:name=".SyncService" android:foregroundServiceType="dataSync" android:exported="false"/>
+        <!-- Android 14+: specialUse (실시간 동기화는 시간 제한이 없어야 함), 그 이전: dataSync -->
+        <service android:name=".SyncService" android:exported="false" android:foregroundServiceType="dataSync|specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Continuous two-way synchronization of the user's Obsidian notes folder with the user's own storage"/>
+        </service>
+        <receiver android:name=".BootReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

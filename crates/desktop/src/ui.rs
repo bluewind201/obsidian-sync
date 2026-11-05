@@ -27,7 +27,9 @@ pub fn setup_style(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     for c in candidates {
         if let Ok(bytes) = std::fs::read(c) {
-            fonts.font_data.insert("korean".into(), egui::FontData::from_owned(bytes));
+            fonts
+                .font_data
+                .insert("korean".into(), egui::FontData::from_owned(bytes));
             for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
                 // 영문은 기본 글꼴, 한글은 맑은 고딕으로 표시
                 fonts.families.entry(fam).or_default().push("korean".into());
@@ -58,8 +60,10 @@ pub fn setup_style(ctx: &egui::Context) {
         s.spacing.item_spacing = egui::vec2(8.0, 7.0);
         s.spacing.button_padding = egui::vec2(12.0, 6.0);
         s.spacing.interact_size.y = 28.0;
-        s.text_styles.insert(egui::TextStyle::Body, egui::FontId::proportional(14.5));
-        s.text_styles.insert(egui::TextStyle::Button, egui::FontId::proportional(14.5));
+        s.text_styles
+            .insert(egui::TextStyle::Body, egui::FontId::proportional(14.5));
+        s.text_styles
+            .insert(egui::TextStyle::Button, egui::FontId::proportional(14.5));
     });
 }
 
@@ -103,24 +107,44 @@ pub fn primary_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
 }
 
 pub fn big_button(text: &str) -> egui::Button<'_> {
-    egui::Button::new(text).rounding(Rounding::same(8.0)).min_size(egui::vec2(0.0, 36.0))
+    egui::Button::new(text)
+        .rounding(Rounding::same(8.0))
+        .min_size(egui::vec2(0.0, 36.0))
 }
 
 pub fn nav_button(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
-    let btn = egui::Button::new(RichText::new(text).size(15.0).color(if selected { ACCENT } else { TEXT }))
-        .fill(if selected { CARD } else { Color32::TRANSPARENT })
-        .stroke(if selected { Stroke::new(1.0_f32, BORDER) } else { Stroke::NONE })
-        .rounding(Rounding::same(8.0))
-        .min_size(egui::vec2(ui.available_width(), 34.0));
+    let btn = egui::Button::new(RichText::new(text).size(15.0).color(if selected {
+        ACCENT
+    } else {
+        TEXT
+    }))
+    .fill(if selected { CARD } else { Color32::TRANSPARENT })
+    .stroke(if selected {
+        Stroke::new(1.0_f32, BORDER)
+    } else {
+        Stroke::NONE
+    })
+    .rounding(Rounding::same(8.0))
+    .min_size(egui::vec2(ui.available_width(), 34.0));
     ui.add(btn)
 }
 
 /// 번호가 붙은 설정 단계 카드
-pub fn step_card(ui: &mut egui::Ui, n: u8, title: &str, done: bool, add: impl FnOnce(&mut egui::Ui)) {
+pub fn step_card(
+    ui: &mut egui::Ui,
+    n: u8,
+    title: &str,
+    done: bool,
+    add: impl FnOnce(&mut egui::Ui),
+) {
     card(ui, |ui| {
         ui.horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
-            let (fill, txt) = if done { (OK, "✔".to_string()) } else { (ACCENT, n.to_string()) };
+            let (fill, txt) = if done {
+                (OK, "✔".to_string())
+            } else {
+                (ACCENT, n.to_string())
+            };
             ui.painter().circle_filled(rect.center(), 12.0, fill);
             ui.painter().text(
                 rect.center(),
@@ -137,10 +161,21 @@ pub fn step_card(ui: &mut egui::Ui, n: u8, title: &str, done: bool, add: impl Fn
 }
 
 /// 선택형 카드 (저장소 종류 선택)
-pub fn choice_card(ui: &mut egui::Ui, width: f32, badge: &str, color: Color32, name: &str, desc: &str, selected: bool) -> egui::Response {
+pub fn choice_card(
+    ui: &mut egui::Ui,
+    width: f32,
+    badge: &str,
+    color: Color32,
+    name: &str,
+    desc: &str,
+    selected: bool,
+) -> egui::Response {
     let frame = egui::Frame::none()
         .fill(if selected { ACCENT_SOFT } else { CARD })
-        .stroke(Stroke::new(if selected { 2.0_f32 } else { 1.0 }, if selected { ACCENT } else { BORDER }))
+        .stroke(Stroke::new(
+            if selected { 2.0_f32 } else { 1.0 },
+            if selected { ACCENT } else { BORDER },
+        ))
         .rounding(Rounding::same(8.0))
         .inner_margin(egui::Margin::same(10.0));
     let resp = frame
@@ -148,7 +183,8 @@ pub fn choice_card(ui: &mut egui::Ui, width: f32, badge: &str, color: Color32, n
             ui.set_width(width - 26.0);
             ui.set_min_height(46.0);
             ui.horizontal(|ui| {
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(36.0, 36.0), egui::Sense::hover());
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(36.0, 36.0), egui::Sense::hover());
                 ui.painter().rect_filled(rect, Rounding::same(8.0), color);
                 ui.painter().text(
                     rect.center(),
@@ -158,7 +194,11 @@ pub fn choice_card(ui: &mut egui::Ui, width: f32, badge: &str, color: Color32, n
                     Color32::WHITE,
                 );
                 ui.vertical(|ui| {
-                    ui.label(RichText::new(name).strong().color(if selected { ACCENT } else { TEXT }));
+                    ui.label(RichText::new(name).strong().color(if selected {
+                        ACCENT
+                    } else {
+                        TEXT
+                    }));
                     ui.label(RichText::new(desc).small().color(MUTED));
                 });
             });

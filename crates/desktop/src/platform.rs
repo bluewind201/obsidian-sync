@@ -32,7 +32,9 @@ pub fn icon_rgba(size: u32) -> Vec<u8> {
 mod imp {
     use super::SharedTrigger;
     use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-    use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
+    use tray_icon::{
+        Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
+    };
     use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
     use windows_sys::Win32::System::Threading::CreateMutexW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -66,14 +68,20 @@ mod imp {
 
     /// 이미 실행 중이면 false
     pub fn single_instance() -> bool {
-        let name: Vec<u16> = "Local\\ObsidianSyncSingleInstance\0".encode_utf16().collect();
+        let name: Vec<u16> = "Local\\ObsidianSyncSingleInstance\0"
+            .encode_utf16()
+            .collect();
         unsafe {
             let h = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
             !(h.is_null() || GetLastError() == ERROR_ALREADY_EXISTS)
         }
     }
 
-    pub fn create_tray(hwnd: isize, trigger: SharedTrigger, ctx: eframe::egui::Context) -> Option<TrayIcon> {
+    pub fn create_tray(
+        hwnd: isize,
+        trigger: SharedTrigger,
+        ctx: eframe::egui::Context,
+    ) -> Option<TrayIcon> {
         let menu = Menu::new();
         let open = MenuItem::new("열기", true, None);
         let sync = MenuItem::new("지금 동기화", true, None);

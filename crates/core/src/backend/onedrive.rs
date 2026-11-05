@@ -82,7 +82,12 @@ impl OneDriveBackend {
         while let Some(url) = next.take() {
             let resp = self.send(&|a| a.get(&url), None)?;
             let v = http::read_json(resp)?;
-            for item in v.get("value").and_then(|x| x.as_array()).into_iter().flatten() {
+            for item in v
+                .get("value")
+                .and_then(|x| x.as_array())
+                .into_iter()
+                .flatten()
+            {
                 let name = item.get("name").and_then(|x| x.as_str()).unwrap_or("");
                 if name.is_empty() {
                     continue;

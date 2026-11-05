@@ -86,7 +86,11 @@ impl GDriveBackend {
     fn children(&mut self, parent_id: &str, extra_q: &str) -> Result<Vec<Value>> {
         let mut out = Vec::new();
         let mut page: Option<String> = None;
-        let q = format!("'{}' in parents and trashed = false{}", q_escape(parent_id), extra_q);
+        let q = format!(
+            "'{}' in parents and trashed = false{}",
+            q_escape(parent_id),
+            extra_q
+        );
         let fields = format!("nextPageToken,files({FIELDS})");
         loop {
             let pt = page.clone();
@@ -121,7 +125,8 @@ impl GDriveBackend {
     }
 
     fn create_folder(&mut self, name: &str, parent_id: &str) -> Result<String> {
-        let body = json!({"name": name, "mimeType": FOLDER_MIME, "parents": [parent_id]}).to_string();
+        let body =
+            json!({"name": name, "mimeType": FOLDER_MIME, "parents": [parent_id]}).to_string();
         let resp = self.send(
             &|a| {
                 a.post(API)
@@ -151,7 +156,11 @@ impl GDriveBackend {
                 FOLDER_MIME
             );
             let found = self.children(&parent, &q)?;
-            parent = match found.first().and_then(|v| v.get("id")).and_then(|x| x.as_str()) {
+            parent = match found
+                .first()
+                .and_then(|v| v.get("id"))
+                .and_then(|x| x.as_str())
+            {
                 Some(id) => id.to_string(),
                 None => self.create_folder(&seg, &parent)?,
             };
@@ -178,7 +187,13 @@ impl GDriveBackend {
         Ok(id)
     }
 
-    fn upload_resumable(&mut self, init_url: String, method: &str, meta: String, data: &[u8]) -> Result<Value> {
+    fn upload_resumable(
+        &mut self,
+        init_url: String,
+        method: &str,
+        meta: String,
+        data: &[u8],
+    ) -> Result<Value> {
         let m = method.to_string();
         let resp = self.send(
             &|a| {
@@ -281,7 +296,10 @@ impl Backend for GDriveBackend {
             };
             let meta = json!({"name": name, "parents": [parent]}).to_string();
             if data.len() <= SIMPLE_LIMIT {
-                let boundary = format!("obsync{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
+                let boundary = format!(
+                    "obsync{}",
+                    chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+                );
                 let mut body = Vec::with_capacity(data.len() + meta.len() + 256);
                 body.extend_from_slice(
                     format!("--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{meta}\r\n--{boundary}\r\nContent-Type: application/octet-stream\r\n\r\n").as_bytes(),
@@ -319,7 +337,10 @@ impl Backend for GDriveBackend {
         let url = format!("{API}/{id}");
         let body = br#"{"trashed":true}"#;
         match self.send(
-            &|a| a.request("PATCH", &url).set("Content-Type", "application/json"),
+            &|a| {
+                a.request("PATCH", &url)
+                    .set("Content-Type", "application/json")
+            },
             Some(body),
         ) {
             Ok(_) => {}

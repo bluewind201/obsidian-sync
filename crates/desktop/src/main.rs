@@ -16,11 +16,41 @@ use ui::{ACCENT, DANGER, MUTED, OK, WARN};
 
 /// 저장소 종류: (kind, 배지, 배지 색, 이름, 설명)
 const BACKENDS: &[(&str, &str, egui::Color32, &str, &str)] = &[
-    ("web_dav", "NAS", egui::Color32::from_rgb(40, 90, 170), "Synology NAS (WebDAV)", "집/회사 NAS에 저장. DSM의 WebDAV Server 사용"),
-    ("local_folder", "폴더", egui::Color32::from_rgb(110, 114, 128), "폴더 / 공유 드라이브", "NAS 공유폴더(SMB), 외장 디스크 등"),
-    ("one_drive", "OD", egui::Color32::from_rgb(0, 120, 212), "OneDrive", "Microsoft 계정으로 로그인"),
-    ("google_drive", "GD", egui::Color32::from_rgb(30, 142, 62), "Google Drive", "Google 계정으로 로그인"),
-    ("s3", "S3", egui::Color32::from_rgb(3, 199, 90), "네이버 클라우드 / GCS", "S3 호환 스토리지 (액세스 키 필요)"),
+    (
+        "web_dav",
+        "NAS",
+        egui::Color32::from_rgb(40, 90, 170),
+        "Synology NAS (WebDAV)",
+        "집/회사 NAS에 저장. DSM의 WebDAV Server 사용",
+    ),
+    (
+        "local_folder",
+        "폴더",
+        egui::Color32::from_rgb(110, 114, 128),
+        "폴더 / 공유 드라이브",
+        "NAS 공유폴더(SMB), 외장 디스크 등",
+    ),
+    (
+        "one_drive",
+        "OD",
+        egui::Color32::from_rgb(0, 120, 212),
+        "OneDrive",
+        "Microsoft 계정으로 로그인",
+    ),
+    (
+        "google_drive",
+        "GD",
+        egui::Color32::from_rgb(30, 142, 62),
+        "Google Drive",
+        "Google 계정으로 로그인",
+    ),
+    (
+        "s3",
+        "S3",
+        egui::Color32::from_rgb(3, 199, 90),
+        "네이버 클라우드 / GCS",
+        "S3 호환 스토리지 (액세스 키 필요)",
+    ),
 ];
 
 const SETUP_DOC: &str = "https://github.com/bluewind201/obsidian-sync/blob/main/docs/SETUP.md";
@@ -149,7 +179,11 @@ impl App {
             message: None,
             autostart: platform::autostart_enabled(),
             show_secret: false,
-            page: if configured { Page::Home } else { Page::Settings },
+            page: if configured {
+                Page::Home
+            } else {
+                Page::Settings
+            },
             hwnd,
             hide_on_start: hide_on_start && tray.is_some(),
             has_tray: tray.is_some(),
@@ -195,7 +229,8 @@ impl App {
             self.page = Page::Settings;
             return;
         }
-        if self.cfg.backend.needs_oauth() && !auth::is_logged_in(&self.data_dir, &self.cfg.backend) {
+        if self.cfg.backend.needs_oauth() && !auth::is_logged_in(&self.data_dir, &self.cfg.backend)
+        {
             self.set_msg("먼저 '로그인' 버튼으로 계정을 연결해 주세요", true);
             self.page = Page::Settings;
             return;
@@ -219,11 +254,18 @@ impl App {
 
     fn start_test(&mut self, ctx: &egui::Context) {
         let job = Arc::new(Mutex::new(Job::Running));
-        let (j, backend, dir, ctx) = (job.clone(), self.cfg.backend.clone(), self.data_dir.clone(), ctx.clone());
+        let (j, backend, dir, ctx) = (
+            job.clone(),
+            self.cfg.backend.clone(),
+            self.data_dir.clone(),
+            ctx.clone(),
+        );
         std::thread::spawn(move || {
             let r = service::test_connection(&backend, &dir);
             *j.lock().unwrap() = match r {
-                Ok(0) => Job::Ok("연결 성공! 원격 폴더가 비어 있어 첫 동기화 때 노트를 올립니다.".into()),
+                Ok(0) => {
+                    Job::Ok("연결 성공! 원격 폴더가 비어 있어 첫 동기화 때 노트를 올립니다.".into())
+                }
                 Ok(n) => Job::Ok(format!("연결 성공! 원격에 파일 {n}개가 있습니다.")),
                 Err(e) => Job::Failed(friendly_error(&format!("{e:#}"))),
             };
@@ -270,7 +312,11 @@ impl App {
     // ───────────────────────────── 홈 ─────────────────────────────
     fn home_page(&mut self, ui: &mut egui::Ui, status: &Option<ServiceStatus>) {
         let (title, sub, color) = match status {
-            Some(s) if s.syncing => ("동기화 중…", "변경된 파일을 주고받고 있습니다".to_string(), ACCENT),
+            Some(s) if s.syncing => (
+                "동기화 중…",
+                "변경된 파일을 주고받고 있습니다".to_string(),
+                ACCENT,
+            ),
             Some(s) if s.last_error.is_some() => (
                 "확인이 필요합니다",
                 friendly_error(s.last_error.as_deref().unwrap_or("")),
@@ -289,7 +335,11 @@ impl App {
                 "볼트 폴더와 저장소를 먼저 연결해 주세요".into(),
                 WARN,
             ),
-            None => ("동기화 꺼짐", "시작 버튼을 누르면 실시간 동기화가 켜집니다".into(), MUTED),
+            None => (
+                "동기화 꺼짐",
+                "시작 버튼을 누르면 실시간 동기화가 켜집니다".into(),
+                MUTED,
+            ),
         };
 
         ui::card(ui, |ui| {
@@ -320,7 +370,9 @@ impl App {
                         self.stop_service();
                     }
                 }
-                if !self.cfg.vault_path.is_empty() && ui.add(ui::big_button("📂  볼트 열기")).clicked() {
+                if !self.cfg.vault_path.is_empty()
+                    && ui.add(ui::big_button("📂  볼트 열기")).clicked()
+                {
                     let _ = open::that(&self.cfg.vault_path);
                 }
             });
@@ -328,21 +380,34 @@ impl App {
 
         ui.add_space(8.0);
         ui::card(ui, |ui| {
-            egui::Grid::new("summary").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
-                ui.label(RichText::new("볼트").color(MUTED));
-                ui.add(egui::Label::new(if self.cfg.vault_path.is_empty() { "-" } else { &self.cfg.vault_path }).truncate());
-                ui.end_row();
-                ui.label(RichText::new("저장소").color(MUTED));
-                ui.add(egui::Label::new(backend_summary(&self.cfg.backend)).truncate());
-                ui.end_row();
-                ui.label(RichText::new("방식").color(MUTED));
-                ui.label(if self.cfg.watch_local {
-                    format!("저장 즉시 업로드 · {}초마다 원격 확인", self.cfg.poll_interval_secs)
-                } else {
-                    format!("{}초마다 확인", self.cfg.poll_interval_secs)
+            egui::Grid::new("summary")
+                .num_columns(2)
+                .spacing([16.0, 8.0])
+                .show(ui, |ui| {
+                    ui.label(RichText::new("볼트").color(MUTED));
+                    ui.add(
+                        egui::Label::new(if self.cfg.vault_path.is_empty() {
+                            "-"
+                        } else {
+                            &self.cfg.vault_path
+                        })
+                        .truncate(),
+                    );
+                    ui.end_row();
+                    ui.label(RichText::new("저장소").color(MUTED));
+                    ui.add(egui::Label::new(backend_summary(&self.cfg.backend)).truncate());
+                    ui.end_row();
+                    ui.label(RichText::new("방식").color(MUTED));
+                    ui.label(if self.cfg.watch_local {
+                        format!(
+                            "저장 즉시 업로드 · {}초마다 원격 확인",
+                            self.cfg.poll_interval_secs
+                        )
+                    } else {
+                        format!("{}초마다 확인", self.cfg.poll_interval_secs)
+                    });
+                    ui.end_row();
                 });
-                ui.end_row();
-            });
             ui.add_space(4.0);
             if ui.link("설정 변경 →").clicked() {
                 self.page = Page::Settings;
@@ -377,7 +442,8 @@ impl App {
 
     // ───────────────────────────── 설정 ─────────────────────────────
     fn settings_page(&mut self, ui: &mut egui::Ui) {
-        let vault_ok = !self.cfg.vault_path.trim().is_empty() && std::path::Path::new(self.cfg.vault_path.trim()).is_dir();
+        let vault_ok = !self.cfg.vault_path.trim().is_empty()
+            && std::path::Path::new(self.cfg.vault_path.trim()).is_dir();
         ui::step_card(ui, 1, "Obsidian 볼트 선택", vault_ok, |ui| {
             ui.label(RichText::new("Obsidian에서 사용하는 볼트(보관함) 폴더를 고르세요. .obsidian 폴더가 들어 있는 폴더입니다.").color(MUTED));
             ui.horizontal(|ui| {
@@ -392,7 +458,11 @@ impl App {
                     }
                 }
             });
-            if vault_ok && !std::path::Path::new(self.cfg.vault_path.trim()).join(".obsidian").is_dir() {
+            if vault_ok
+                && !std::path::Path::new(self.cfg.vault_path.trim())
+                    .join(".obsidian")
+                    .is_dir()
+            {
                 ui.label(RichText::new("⚠ 이 폴더에 .obsidian 폴더가 없습니다. 새 기기라면 빈 폴더여도 괜찮습니다.").color(WARN).small());
             }
         });
@@ -406,17 +476,31 @@ impl App {
         });
 
         ui.add_space(8.0);
-        let logged_in = !self.cfg.backend.needs_oauth() || auth::is_logged_in(&self.data_dir, &self.cfg.backend);
-        let tested = matches!(self.test.as_ref().map(|j| matches!(&*j.lock().unwrap(), Job::Ok(_))), Some(true));
+        let logged_in = !self.cfg.backend.needs_oauth()
+            || auth::is_logged_in(&self.data_dir, &self.cfg.backend);
+        let tested = matches!(
+            self.test
+                .as_ref()
+                .map(|j| matches!(&*j.lock().unwrap(), Job::Ok(_))),
+            Some(true)
+        );
         ui::step_card(ui, 3, "연결 확인", logged_in && tested, |ui| {
             if self.cfg.backend.needs_oauth() {
                 self.login_ui(ui);
                 ui.add_space(6.0);
             }
             ui.horizontal(|ui| {
-                let running = matches!(self.test.as_ref().map(|j| matches!(&*j.lock().unwrap(), Job::Running)), Some(true));
+                let running = matches!(
+                    self.test
+                        .as_ref()
+                        .map(|j| matches!(&*j.lock().unwrap(), Job::Running)),
+                    Some(true)
+                );
                 if ui
-                    .add_enabled(backend_ok && logged_in && !running, egui::Button::new("🔌  연결 테스트"))
+                    .add_enabled(
+                        backend_ok && logged_in && !running,
+                        egui::Button::new("🔌  연결 테스트"),
+                    )
                     .clicked()
                 {
                     self.start_test(ui.ctx());
@@ -440,20 +524,34 @@ impl App {
         });
 
         ui.add_space(8.0);
-        ui::step_card(ui, 4, "저장하고 시작", self.service.is_some() && !self.dirty(), |ui| {
-            ui.horizontal(|ui| {
-                let label = if self.service.is_some() { "저장 후 다시 시작" } else { "저장하고 동기화 시작" };
-                if ui::primary_button(ui, label).clicked() && self.save() {
-                    self.start_service();
-                    if self.service.is_some() {
-                        self.page = Page::Home;
+        ui::step_card(
+            ui,
+            4,
+            "저장하고 시작",
+            self.service.is_some() && !self.dirty(),
+            |ui| {
+                ui.horizontal(|ui| {
+                    let label = if self.service.is_some() {
+                        "저장 후 다시 시작"
+                    } else {
+                        "저장하고 동기화 시작"
+                    };
+                    if ui::primary_button(ui, label).clicked() && self.save() {
+                        self.start_service();
+                        if self.service.is_some() {
+                            self.page = Page::Home;
+                        }
                     }
-                }
-                if ui.add_enabled(self.dirty(), egui::Button::new("저장만 하기")).clicked() && self.save() {
-                    self.set_msg("저장했습니다", false);
-                }
-            });
-        });
+                    if ui
+                        .add_enabled(self.dirty(), egui::Button::new("저장만 하기"))
+                        .clicked()
+                        && self.save()
+                    {
+                        self.set_msg("저장했습니다", false);
+                    }
+                });
+            },
+        );
 
         ui.add_space(8.0);
         ui::card(ui, |ui| {
@@ -467,20 +565,27 @@ impl App {
         let current = self.cfg.backend.kind();
         let mut selected = current;
         let w = ((ui.available_width() - 8.0) / 2.0).max(200.0);
-        egui::Grid::new("backend_cards").num_columns(2).spacing([8.0, 8.0]).show(ui, |ui| {
-            for (i, (kind, badge, color, name, desc)) in BACKENDS.iter().enumerate() {
-                if ui::choice_card(ui, w, badge, *color, name, desc, selected == *kind).clicked() {
-                    selected = kind;
+        egui::Grid::new("backend_cards")
+            .num_columns(2)
+            .spacing([8.0, 8.0])
+            .show(ui, |ui| {
+                for (i, (kind, badge, color, name, desc)) in BACKENDS.iter().enumerate() {
+                    if ui::choice_card(ui, w, badge, *color, name, desc, selected == *kind)
+                        .clicked()
+                    {
+                        selected = kind;
+                    }
+                    if i % 2 == 1 {
+                        ui.end_row();
+                    }
                 }
-                if i % 2 == 1 {
-                    ui.end_row();
-                }
-            }
-        });
+            });
         if selected != current {
             let old = std::mem::replace(
                 &mut self.cfg.backend,
-                self.backend_cache.remove(selected).unwrap_or_else(|| default_backend(selected)),
+                self.backend_cache
+                    .remove(selected)
+                    .unwrap_or_else(|| default_backend(selected)),
             );
             self.backend_cache.insert(current, old);
             self.test = None;
@@ -490,22 +595,47 @@ impl App {
     fn backend_fields(&mut self, ui: &mut egui::Ui) {
         let secret = !self.show_secret;
         let mut pick_path = false;
-        egui::Grid::new("backend_fields").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-            match &mut self.cfg.backend {
+        egui::Grid::new("backend_fields")
+            .num_columns(2)
+            .spacing([12.0, 8.0])
+            .show(ui, |ui| match &mut self.cfg.backend {
                 BackendConfig::LocalFolder { path } => {
-                    ui::field(ui, "저장 위치", path, false, r"\\NAS\home\Obsidian 또는 Z:\Obsidian");
+                    ui::field(
+                        ui,
+                        "저장 위치",
+                        path,
+                        false,
+                        r"\\NAS\home\Obsidian 또는 Z:\Obsidian",
+                    );
                     ui.label("");
                     if ui.button("폴더 선택…").clicked() {
                         pick_path = true;
                     }
                     ui.end_row();
                 }
-                BackendConfig::WebDav { url, username, password } => {
-                    ui::field(ui, "WebDAV 주소", url, false, "https://내NAS주소:5006/home/Obsidian");
+                BackendConfig::WebDav {
+                    url,
+                    username,
+                    password,
+                } => {
+                    ui::field(
+                        ui,
+                        "WebDAV 주소",
+                        url,
+                        false,
+                        "https://내NAS주소:5006/home/Obsidian",
+                    );
                     ui::field(ui, "NAS 아이디", username, false, "");
                     ui::field(ui, "NAS 비밀번호", password, secret, "");
                 }
-                BackendConfig::S3 { endpoint, region, bucket, prefix, access_key, secret_key } => {
+                BackendConfig::S3 {
+                    endpoint,
+                    region,
+                    bucket,
+                    prefix,
+                    access_key,
+                    secret_key,
+                } => {
                     ui.label("");
                     ui.horizontal(|ui| {
                         if ui.small_button("네이버 클라우드").clicked() {
@@ -518,32 +648,60 @@ impl App {
                         }
                     });
                     ui.end_row();
-                    ui::field(ui, "엔드포인트", endpoint, false, "https://kr.object.ncloudstorage.com");
+                    ui::field(
+                        ui,
+                        "엔드포인트",
+                        endpoint,
+                        false,
+                        "https://kr.object.ncloudstorage.com",
+                    );
                     ui::field(ui, "리전", region, false, "kr-standard");
                     ui::field(ui, "버킷 이름", bucket, false, "my-obsidian");
                     ui::field(ui, "저장 폴더", prefix, false, "obsidian");
                     ui::field(ui, "Access Key", access_key, false, "");
                     ui::field(ui, "Secret Key", secret_key, secret, "");
                 }
-                BackendConfig::OneDrive { client_id, folder, .. } => {
-                    ui::field(ui, "앱 Client ID", client_id, false, "Azure 앱 등록에서 받은 애플리케이션 ID");
+                BackendConfig::OneDrive {
+                    client_id, folder, ..
+                } => {
+                    ui::field(
+                        ui,
+                        "앱 Client ID",
+                        client_id,
+                        false,
+                        "Azure 앱 등록에서 받은 애플리케이션 ID",
+                    );
                     ui::field(ui, "OneDrive 폴더", folder, false, "ObsidianSync");
                 }
-                BackendConfig::GoogleDrive { client_id, client_secret, folder } => {
-                    ui::field(ui, "Client ID", client_id, false, "OAuth 클라이언트 ID (TV 및 입력 제한 기기)");
+                BackendConfig::GoogleDrive {
+                    client_id,
+                    client_secret,
+                    folder,
+                } => {
+                    ui::field(
+                        ui,
+                        "Client ID",
+                        client_id,
+                        false,
+                        "OAuth 클라이언트 ID (TV 및 입력 제한 기기)",
+                    );
                     ui::field(ui, "Client Secret", client_secret, secret, "");
                     ui::field(ui, "Drive 폴더", folder, false, "ObsidianSync");
                 }
-            }
-        });
+            });
         if pick_path {
-            if let (Some(p), BackendConfig::LocalFolder { path }) = (platform::pick_folder(), &mut self.cfg.backend) {
+            if let (Some(p), BackendConfig::LocalFolder { path }) =
+                (platform::pick_folder(), &mut self.cfg.backend)
+            {
                 *path = p;
             }
         }
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.show_secret, "비밀번호 표시");
-            ui.hyperlink_to(RichText::new("❓ 이 저장소 설정 방법").small(), backend_help(&self.cfg.backend));
+            ui.hyperlink_to(
+                RichText::new("❓ 이 저장소 설정 방법").small(),
+                backend_help(&self.cfg.backend),
+            );
         });
     }
 
@@ -562,7 +720,13 @@ impl App {
                     ui::inset(ui, |ui| {
                         ui.label("브라우저가 열리면 아래 코드를 입력하고 계정을 승인해 주세요.");
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(user_code).size(28.0).strong().monospace().color(ACCENT));
+                            ui.label(
+                                RichText::new(user_code)
+                                    .size(28.0)
+                                    .strong()
+                                    .monospace()
+                                    .color(ACCENT),
+                            );
                             if ui.button("📋 복사").clicked() {
                                 ui.output_mut(|o| o.copied_text = user_code.clone());
                             }
@@ -588,7 +752,10 @@ impl App {
             let st = login.state.lock().unwrap();
             self.message = Some(match &*st {
                 LoginState::Failed(e) => (friendly_error(e), true),
-                _ => ("로그인했습니다. '연결 테스트'로 확인해 보세요.".into(), false),
+                _ => (
+                    "로그인했습니다. '연결 테스트'로 확인해 보세요.".into(),
+                    false,
+                ),
             });
         }
         if self.login.is_none() {
@@ -604,23 +771,48 @@ impl App {
                     }
                 } else {
                     let ok = self.cfg.backend.validate().is_ok();
-                    if ui.add_enabled(ok, egui::Button::new("🔑  로그인")).clicked() {
+                    if ui
+                        .add_enabled(ok, egui::Button::new("🔑  로그인"))
+                        .clicked()
+                    {
                         self.start_login(ui.ctx());
                     }
-                    ui.label(RichText::new(if ok { "브라우저에서 계정을 승인합니다" } else { "위 항목을 먼저 입력하세요" }).color(MUTED));
+                    ui.label(
+                        RichText::new(if ok {
+                            "브라우저에서 계정을 승인합니다"
+                        } else {
+                            "위 항목을 먼저 입력하세요"
+                        })
+                        .color(MUTED),
+                    );
                 }
             });
         }
     }
 
     fn advanced(&mut self, ui: &mut egui::Ui) {
-        ui.checkbox(&mut self.cfg.watch_local, "저장하자마자 바로 업로드 (실시간 감시)");
-        ui.checkbox(&mut self.cfg.sync_obsidian_folder, ".obsidian 설정 폴더도 동기화 (플러그인, 테마, 단축키)");
-        ui.checkbox(&mut self.cfg.propagate_deletes, "삭제도 동기화 (지워진 파일은 .trash 폴더로 이동)");
-        ui.checkbox(&mut self.cfg.start_on_launch, "앱을 켜면 자동으로 동기화 시작");
+        ui.checkbox(
+            &mut self.cfg.watch_local,
+            "저장하자마자 바로 업로드 (실시간 감시)",
+        );
+        ui.checkbox(
+            &mut self.cfg.sync_obsidian_folder,
+            ".obsidian 설정 폴더도 동기화 (플러그인, 테마, 단축키)",
+        );
+        ui.checkbox(
+            &mut self.cfg.propagate_deletes,
+            "삭제도 동기화 (지워진 파일은 .trash 폴더로 이동)",
+        );
+        ui.checkbox(
+            &mut self.cfg.start_on_launch,
+            "앱을 켜면 자동으로 동기화 시작",
+        );
         if cfg!(windows) {
             let mut a = self.autostart;
-            if ui.checkbox(&mut a, "Windows 시작 시 자동 실행 (트레이에서 조용히)").changed() {
+            if ui
+                .checkbox(&mut a, "Windows 시작 시 자동 실행 (트레이에서 조용히)")
+                .changed()
+            {
                 match platform::set_autostart(a) {
                     Ok(()) => self.autostart = a,
                     Err(e) => self.set_msg(format!("{e:#}"), true),
@@ -628,24 +820,39 @@ impl App {
             }
         }
         ui.add_space(4.0);
-        egui::Grid::new("adv").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-            ui.label("원격 확인 주기");
-            ui.add(egui::DragValue::new(&mut self.cfg.poll_interval_secs).range(10..=3600).suffix(" 초"));
-            ui.end_row();
-            ui.label("저장 후 대기");
-            ui.add(egui::DragValue::new(&mut self.cfg.debounce_ms).range(200..=60000).suffix(" ms"));
-            ui.end_row();
-            ui.label("기기 이름");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.cfg.device_name)
-                    .hint_text(self.saved.effective_device_name())
-                    .desired_width(200.0),
-            );
-            ui.end_row();
-        });
+        egui::Grid::new("adv")
+            .num_columns(2)
+            .spacing([12.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("원격 확인 주기");
+                ui.add(
+                    egui::DragValue::new(&mut self.cfg.poll_interval_secs)
+                        .range(10..=3600)
+                        .suffix(" 초"),
+                );
+                ui.end_row();
+                ui.label("저장 후 대기");
+                ui.add(
+                    egui::DragValue::new(&mut self.cfg.debounce_ms)
+                        .range(200..=60000)
+                        .suffix(" ms"),
+                );
+                ui.end_row();
+                ui.label("기기 이름");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.cfg.device_name)
+                        .hint_text(self.saved.effective_device_name())
+                        .desired_width(200.0),
+                );
+                ui.end_row();
+            });
         ui.add_space(4.0);
         ui.label("동기화하지 않을 파일/폴더 (한 줄에 하나, 예: Private, *.mp4)");
-        ui.add(egui::TextEdit::multiline(&mut self.ignore_text).desired_rows(3).desired_width(f32::INFINITY));
+        ui.add(
+            egui::TextEdit::multiline(&mut self.ignore_text)
+                .desired_rows(3)
+                .desired_width(f32::INFINITY),
+        );
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             if ui
@@ -675,22 +882,35 @@ impl App {
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("최근 기록 {}건", logs.len())).color(MUTED));
             if ui.small_button("📋 전체 복사").clicked() {
-                let text: String = logs.iter().map(|l| format!("{} {}\n", l.time, l.text)).collect();
+                let text: String = logs
+                    .iter()
+                    .map(|l| format!("{} {}\n", l.time, l.text))
+                    .collect();
                 ui.output_mut(|o| o.copied_text = text);
             }
         });
         ui::card(ui, |ui| {
-            egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink(false).show(ui, |ui| {
-                if logs.is_empty() {
-                    ui.label(RichText::new("동기화를 시작하면 여기에 기록이 표시됩니다").color(MUTED));
-                }
-                for l in &logs {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(&l.time).color(MUTED).monospace().size(12.0));
-                        ui.label(RichText::new(&l.text).size(13.0).color(if l.error { DANGER } else { ui::TEXT }));
-                    });
-                }
-            });
+            egui::ScrollArea::vertical()
+                .stick_to_bottom(true)
+                .auto_shrink(false)
+                .show(ui, |ui| {
+                    if logs.is_empty() {
+                        ui.label(
+                            RichText::new("동기화를 시작하면 여기에 기록이 표시됩니다")
+                                .color(MUTED),
+                        );
+                    }
+                    for l in &logs {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new(&l.time).color(MUTED).monospace().size(12.0));
+                            ui.label(RichText::new(&l.text).size(13.0).color(if l.error {
+                                DANGER
+                            } else {
+                                ui::TEXT
+                            }));
+                        });
+                    }
+                });
         });
     }
 }
@@ -699,7 +919,12 @@ fn backend_summary(b: &BackendConfig) -> String {
     match b {
         BackendConfig::LocalFolder { path } => format!("폴더 · {path}"),
         BackendConfig::WebDav { url, .. } => format!("WebDAV · {url}"),
-        BackendConfig::S3 { endpoint, bucket, prefix, .. } => format!("S3 · {endpoint} / {bucket}/{prefix}"),
+        BackendConfig::S3 {
+            endpoint,
+            bucket,
+            prefix,
+            ..
+        } => format!("S3 · {endpoint} / {bucket}/{prefix}"),
         BackendConfig::OneDrive { folder, .. } => format!("OneDrive · /{folder}"),
         BackendConfig::GoogleDrive { folder, .. } => format!("Google Drive · /{folder}"),
     }
@@ -718,11 +943,16 @@ fn backend_help(b: &BackendConfig) -> String {
 
 /// 기술적인 오류 메시지를 이해하기 쉬운 안내로 변환
 fn friendly_error(raw: &str) -> String {
-    let hint = if raw.contains("HTTP 401") || raw.contains("HTTP 403") || raw.contains("SignatureDoesNotMatch") || raw.contains("InvalidAccessKeyId") {
+    let hint = if raw.contains("HTTP 401")
+        || raw.contains("HTTP 403")
+        || raw.contains("SignatureDoesNotMatch")
+        || raw.contains("InvalidAccessKeyId")
+    {
         "아이디/비밀번호 또는 키가 맞지 않거나 권한이 없습니다."
     } else if raw.contains("HTTP 404") || raw.contains("NoSuchBucket") {
         "주소나 버킷/폴더 이름을 찾을 수 없습니다."
-    } else if raw.contains("네트워크 오류") || raw.contains("dns") || raw.contains("Connection") {
+    } else if raw.contains("네트워크 오류") || raw.contains("dns") || raw.contains("Connection")
+    {
         "서버에 연결할 수 없습니다. 주소, 포트, 인터넷 연결을 확인하세요."
     } else if raw.contains("invalid_grant") || raw.contains("다시 로그인") {
         "로그인이 만료되었습니다. 설정에서 다시 로그인해 주세요."
@@ -756,22 +986,38 @@ impl eframe::App for App {
         egui::SidePanel::left("nav")
             .resizable(false)
             .exact_width(170.0)
-            .frame(egui::Frame::none().fill(ui::SIDEBAR).inner_margin(egui::Margin::symmetric(12.0, 16.0)))
+            .frame(
+                egui::Frame::none()
+                    .fill(ui::SIDEBAR)
+                    .inner_margin(egui::Margin::symmetric(12.0, 16.0)),
+            )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui::status_dot(ui, ACCENT, 10.0);
                     ui.label(RichText::new("Obsidian Sync").size(17.0).strong());
                 });
-                ui.label(RichText::new(format!("v{}", obsidian_sync_core::VERSION)).small().color(MUTED));
+                ui.label(
+                    RichText::new(format!("v{}", obsidian_sync_core::VERSION))
+                        .small()
+                        .color(MUTED),
+                );
                 ui.add_space(18.0);
-                for (page, label) in [(Page::Home, "🏠  홈"), (Page::Settings, "⚙  설정"), (Page::Log, "📜  기록")] {
+                for (page, label) in [
+                    (Page::Home, "🏠  홈"),
+                    (Page::Settings, "⚙  설정"),
+                    (Page::Log, "📜  기록"),
+                ] {
                     if ui::nav_button(ui, label, self.page == page).clicked() {
                         self.page = page;
                     }
                 }
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                     if self.has_tray {
-                        ui.label(RichText::new("창을 닫아도 트레이에서 계속 동기화합니다").small().color(MUTED));
+                        ui.label(
+                            RichText::new("창을 닫아도 트레이에서 계속 동기화합니다")
+                                .small()
+                                .color(MUTED),
+                        );
                     }
                     ui.hyperlink_to(RichText::new("도움말").small(), SETUP_DOC);
                     let (txt, color) = match &status {
@@ -789,7 +1035,11 @@ impl eframe::App for App {
 
         if let Some((m, err)) = self.message.clone() {
             egui::TopBottomPanel::bottom("msg")
-                .frame(egui::Frame::none().fill(if err { ui::DANGER_BG } else { ui::OK_BG }).inner_margin(egui::Margin::symmetric(16.0, 10.0)))
+                .frame(
+                    egui::Frame::none()
+                        .fill(if err { ui::DANGER_BG } else { ui::OK_BG })
+                        .inner_margin(egui::Margin::symmetric(16.0, 10.0)),
+                )
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(&m).color(if err { DANGER } else { OK }));
@@ -803,7 +1053,11 @@ impl eframe::App for App {
         }
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(ui::BG).inner_margin(egui::Margin::symmetric(20.0, 16.0)))
+            .frame(
+                egui::Frame::none()
+                    .fill(ui::BG)
+                    .inner_margin(egui::Margin::symmetric(20.0, 16.0)),
+            )
             .show(ctx, |ui| {
                 let title = match self.page {
                     Page::Home => "홈",
@@ -816,14 +1070,16 @@ impl eframe::App for App {
                     self.log_page(ui, &status);
                     return;
                 }
-                egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                    ui.set_max_width((ui.available_width() - 16.0).min(720.0));
-                    match self.page {
-                        Page::Home => self.home_page(ui, &status),
-                        _ => self.settings_page(ui),
-                    }
-                    ui.add_space(12.0);
-                });
+                egui::ScrollArea::vertical()
+                    .auto_shrink(false)
+                    .show(ui, |ui| {
+                        ui.set_max_width((ui.available_width() - 16.0).min(720.0));
+                        match self.page {
+                            Page::Home => self.home_page(ui, &status),
+                            _ => self.settings_page(ui),
+                        }
+                        ui.add_space(12.0);
+                    });
             });
     }
 }

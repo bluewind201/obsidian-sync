@@ -204,7 +204,11 @@ impl Backend for S3Backend {
                         .text_at(&["Size"])
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0),
-                    rev: c.text_at(&["ETag"]).unwrap_or("").trim_matches('"').to_string(),
+                    rev: c
+                        .text_at(&["ETag"])
+                        .unwrap_or("")
+                        .trim_matches('"')
+                        .to_string(),
                 });
             }
             let truncated = res
@@ -287,14 +291,24 @@ mod tests {
             now,
         );
         let auth = &headers.iter().find(|h| h.0 == "Authorization").unwrap().1;
-        assert!(auth.ends_with(
-            "Signature=34b48302e7b5fa45bde8084f4b7868a86f0a534bc59db6670ed5711ef69dc6f7"
-        ), "{auth}");
+        assert!(
+            auth.ends_with(
+                "Signature=34b48302e7b5fa45bde8084f4b7868a86f0a534bc59db6670ed5711ef69dc6f7"
+            ),
+            "{auth}"
+        );
     }
 
     #[test]
     fn key_encoding() {
-        let b = S3Backend::new("kr.object.ncloudstorage.com", "kr-standard", "bk", "/vault/", "a", "s");
+        let b = S3Backend::new(
+            "kr.object.ncloudstorage.com",
+            "kr-standard",
+            "bk",
+            "/vault/",
+            "a",
+            "s",
+        );
         assert_eq!(b.host, "kr.object.ncloudstorage.com");
         assert_eq!(b.key("노트 1.md"), "vault/노트 1.md");
         let now = chrono::Utc::now();

@@ -70,7 +70,9 @@ impl OAuthProvider {
         };
         Self {
             name: "onedrive",
-            device_url: format!("https://login.microsoftonline.com/{tenant}/oauth2/v2.0/devicecode"),
+            device_url: format!(
+                "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/devicecode"
+            ),
             token_url: format!("https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"),
             client_id: client_id.trim().to_string(),
             client_secret: None,
@@ -248,8 +250,8 @@ pub fn login_device(
     on_code: impl FnOnce(&DeviceCode),
     cancel: &AtomicBool,
 ) -> Result<()> {
-    let provider =
-        OAuthProvider::for_backend(cfg).ok_or_else(|| anyhow!("로그인이 필요 없는 저장소입니다"))?;
+    let provider = OAuthProvider::for_backend(cfg)
+        .ok_or_else(|| anyhow!("로그인이 필요 없는 저장소입니다"))?;
     cfg.validate()?;
     let dc = provider.start_device()?;
     on_code(&dc);
@@ -267,7 +269,8 @@ pub struct TokenManager {
 
 impl TokenManager {
     pub fn new(data_dir: &Path, cfg: &BackendConfig) -> Result<Self> {
-        let provider = OAuthProvider::for_backend(cfg).ok_or_else(|| anyhow!("OAuth 저장소 아님"))?;
+        let provider =
+            OAuthProvider::for_backend(cfg).ok_or_else(|| anyhow!("OAuth 저장소 아님"))?;
         let path = token_path(data_dir, cfg).unwrap();
         let token = load_token(&path);
         Ok(Self {

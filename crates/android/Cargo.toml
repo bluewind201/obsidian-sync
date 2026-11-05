@@ -1,0 +1,16 @@
+[package]
+name = "obsidian-sync-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Obsidian Sync - Android JNI 연결부"
+
+[lib]
+name = "obsidian_sync"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+obsidian-sync-core = { path = "../core" }
+anyhow = "1"
+serde_json = "1"
+jni = { version = "0.21", default-features = false }

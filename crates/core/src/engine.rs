@@ -113,7 +113,11 @@ impl SyncEngine {
         Self::with_backend(cfg, backend, data_dir)
     }
 
-    pub fn with_backend(cfg: AppConfig, backend: Box<dyn Backend>, data_dir: &Path) -> Result<Self> {
+    pub fn with_backend(
+        cfg: AppConfig,
+        backend: Box<dyn Backend>,
+        data_dir: &Path,
+    ) -> Result<Self> {
         let vault = PathBuf::from(cfg.vault_path.trim());
         let ignore = Ignore::new(&cfg).context("제외 패턴 오류")?;
         let id = backend.id();
@@ -372,7 +376,12 @@ impl SyncEngine {
     }
 
     /// 다운로드. 스캔 이후 로컬 파일이 바뀌었으면 덮어쓰지 않고 건너뜀 (false 반환)
-    fn do_download(&mut self, p: &str, r: &RemoteEntry, expected: Option<&LocalFile>) -> Result<bool> {
+    fn do_download(
+        &mut self,
+        p: &str,
+        r: &RemoteEntry,
+        expected: Option<&LocalFile>,
+    ) -> Result<bool> {
         let full = self.full(p);
         let data = self.backend.download(p)?;
         let hash = hash_bytes(&data);
@@ -445,7 +454,12 @@ impl SyncEngine {
     }
 
     /// 양쪽이 모두 바뀐 경우. 내용이 같으면 None, 다르면 보존한 로컬 사본 이름 반환
-    fn do_conflict(&mut self, p: &str, r: &RemoteEntry, local_hash: &str) -> Result<Option<String>> {
+    fn do_conflict(
+        &mut self,
+        p: &str,
+        r: &RemoteEntry,
+        local_hash: &str,
+    ) -> Result<Option<String>> {
         let data = self.backend.download(p)?;
         let rhash = hash_bytes(&data);
         if rhash == local_hash {

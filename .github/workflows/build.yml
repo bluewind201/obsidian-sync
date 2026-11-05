@@ -10,6 +10,8 @@ permissions:
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: false
+env:
+  CARGO_TERM_COLOR: always
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -20,29 +22,37 @@ jobs:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
-      - run: cargo test --locked -p vault-sync-core
+      - run: cargo test --locked -p obsidian-sync-core -p obsidian-sync-android
+
   windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --locked --release -p obsidian-sync
-      - run: cargo test --locked -p vault-sync-core
-      - run: |
+      - run: cargo test --locked -p obsidian-sync-core
+      - run: cargo build --locked --release -p obsidian-sync-desktop
+      - name: Package
+        shell: pwsh
+        run: |
           New-Item -ItemType Directory dist
-          Copy-Item target/release/obsidian-sync.exe dist/
+          Copy-Item target/release/ObsidianSync.exe dist/
           Copy-Item README.md dist/
-          Copy-Item -Recurse docs dist/
-          Compress-Archive -Path dist/* -DestinationPath obsidian-sync-windows-x64.zip
+          Copy-Item docs/SETUP.md dist/
+          Compress-Archive -Path dist/* -DestinationPath ObsidianSync-windows-x64.zip
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x64
-          path: obsidian-sync-windows-x64.zip
+          path: ObsidianSync-windows-x64.zip
+
   android:
     runs-on: ubuntu-latest
+    env:
+      BUILD_NUMBER: ${{ github.run_number }}
     steps:
       - uses: actions/checkout@v4
+      - name: Version name
+        run: echo "VERSION_NAME=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)-b${{ github.run_number }}" >> "$GITHUB_ENV"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -59,13 +69,22 @@ jobs:
       - name: Build Rust JNI
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
-        run: cargo ndk -t arm64-v8a -t x86_64 -o android/app/src/main/jniLibs build --locked --release -p vault-sync-android
+        run: cargo ndk -t arm64-v8a -t x86_64 -o android/app/src/main/jniLibs build --locked --release -p obsidian-sync-android
+      - name: Signing key from secrets (optional)
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        if: env.KEYSTORE_B64 != ''
+        run: |
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.p12"
+          echo "ANDROID_KEYSTORE_FILE=$RUNNER_TEMP/release.p12" >> "$GITHUB_ENV"
+          echo "ANDROID_KEYSTORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> "$GITHUB_ENV"
+          echo "ANDROID_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }}" >> "$GITHUB_ENV"
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
-      - name: Build installable preview APK
+      - name: Build APK
         working-directory: android
-        run: gradle assembleDebug lintDebug --no-daemon
+        run: gradle assembleRelease assembleDebug lintDebug --no-daemon
       - name: Enable emulator acceleration
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -82,8 +101,9 @@ jobs:
             cd android && gradle connectedDebugAndroidTest --no-daemon
             adb install -r android/app/build/outputs/apk/debug/app-debug.apk
             adb shell am start -n io.bluewind.obsidiansync/.MainActivity
-            sleep 2
+            sleep 3
             adb exec-out screencap -p > android-preview.png
+      - run: cp android/app/build/outputs/apk/release/app-release.apk ObsidianSync-android.apk
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -94,31 +114,41 @@ jobs:
             android/app/build/reports/lint-results-debug.html
       - uses: actions/upload-artifact@v4
         with:
-          name: android-preview
-          path: android/app/build/outputs/apk/debug/*.apk
+          name: android-apk
+          path: ObsidianSync-android.apk
+
+  # main에 올라가면 자동으로 릴리즈 (태그 v* 를 직접 올려도 릴리즈)
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     needs: [test, windows, android]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: '*-preview'
-          merge-multiple: true
+          name: android-apk
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           name: windows-x64
-      - run: sha256sum artifacts/* > artifacts/SHA256SUMS.txt
-      - env:
+      - run: cd artifacts && sha256sum * > SHA256SUMS.txt
+      - name: Publish
+        env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
           GH_REPO: ${{ github.repository }}
-        run: >-
-          gh release create "$RELEASE_TAG" artifacts/*
-          --prerelease
-          --title "Obsidian Sync $RELEASE_TAG preview"
-          --notes 'Windows x64 portable app and Android arm64/x86_64 preview APK. Android is debug-signed for evaluation; future builds may require reinstalling. Back up your vault before first use. Cloud adapters require your own credentials and have not been tested against your accounts. See README and provider setup guide. Not affiliated with Obsidian.'
+        run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then TAG="$GITHUB_REF_NAME"; else TAG="v${VERSION}-b${GITHUB_RUN_NUMBER}"; fi
+          cat > notes.md <<NOTES
+          ## 받는 법
+          - **Windows**: \`ObsidianSync-windows-x64.zip\` 압축을 풀고 \`ObsidianSync.exe\` 실행
+          - **Android**: \`ObsidianSync-android.apk\` 설치 (이전 버전 위에 그대로 업데이트 설치됩니다)
+
+          처음 사용할 때는 볼트를 백업한 뒤 시작하세요. 저장소별 설정 방법은 [설정 안내](https://github.com/${GH_REPO}/blob/main/docs/SETUP.md)를 참고하세요.
+
+          커밋: ${GITHUB_SHA::7}
+          NOTES
+          gh release create "$TAG" artifacts/* --target "$GITHUB_SHA" --title "Obsidian Sync $TAG" --notes-file notes.md --latest

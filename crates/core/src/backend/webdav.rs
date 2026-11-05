@@ -36,7 +36,10 @@ fn url_path(url: &str) -> String {
 }
 
 fn norm_etag(s: &str) -> String {
-    s.trim().trim_start_matches("W/").trim_matches('"').to_string()
+    s.trim()
+        .trim_start_matches("W/")
+        .trim_matches('"')
+        .to_string()
 }
 
 impl WebDavBackend {
@@ -123,7 +126,10 @@ impl WebDavBackend {
                 .text_at(&["getcontentlength"])
                 .and_then(|s| s.trim().parse().ok())
                 .unwrap_or(0);
-            let etag = prop.text_at(&["getetag"]).map(norm_etag).unwrap_or_default();
+            let etag = prop
+                .text_at(&["getetag"])
+                .map(norm_etag)
+                .unwrap_or_default();
             let rev = if etag.is_empty() {
                 format!(
                     "{}-{}",
@@ -306,13 +312,18 @@ mod tests {
         let b = WebDavBackend::new("https://nas.local:5006/home/Obsidian%20Vault/", "u", "p");
         assert_eq!(b.base_path, "/home/Obsidian Vault");
         assert_eq!(
-            b.rel_from_href("/home/Obsidian%20Vault/notes/%ED%95%9C.md").as_deref(),
+            b.rel_from_href("/home/Obsidian%20Vault/notes/%ED%95%9C.md")
+                .as_deref(),
             Some("notes/한.md")
         );
         assert_eq!(
-            b.rel_from_href("https://nas.local:5006/home/Obsidian%20Vault/").as_deref(),
+            b.rel_from_href("https://nas.local:5006/home/Obsidian%20Vault/")
+                .as_deref(),
             Some("")
         );
-        assert_eq!(b.url("a b/c.md"), "https://nas.local:5006/home/Obsidian%20Vault/a%20b/c.md");
+        assert_eq!(
+            b.url("a b/c.md"),
+            "https://nas.local:5006/home/Obsidian%20Vault/a%20b/c.md"
+        );
     }
 }

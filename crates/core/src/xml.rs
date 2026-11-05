@@ -12,7 +12,9 @@ pub struct XmlNode {
 
 impl XmlNode {
     pub fn child(&self, name: &str) -> Option<&XmlNode> {
-        self.children.iter().find(|c| c.name.eq_ignore_ascii_case(name))
+        self.children
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(name))
     }
     pub fn children_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a XmlNode> {
         self.children

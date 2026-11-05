@@ -6,10 +6,32 @@ android {
         applicationId 'io.bluewind.obsidiansync'
         minSdk 30
         targetSdk 35
-        versionCode 1
-        versionName '0.1.0-preview'
+        // CI에서 빌드 번호를 넘겨주면 업데이트 설치가 가능하도록 버전 코드가 증가합니다
+        versionCode((System.getenv('BUILD_NUMBER') ?: '1').toInteger())
+        versionName(System.getenv('VERSION_NAME') ?: '0.2.0-dev')
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
         ndk { abiFilters 'arm64-v8a', 'x86_64' }
+    }
+    // 서명 키: GitHub Secrets(ANDROID_KEYSTORE_*)로 넘겨받은 키를 사용합니다.
+    // 키가 매번 같아야 새 버전을 '업데이트'로 설치할 수 있습니다 (docs/SETUP.md 참고).
+    // 키가 없으면 디버그 키로 서명합니다 (이 경우 빌드 환경이 바뀌면 재설치가 필요할 수 있음).
+    def ksFile = System.getenv('ANDROID_KEYSTORE_FILE')
+    signingConfigs {
+        if (ksFile) {
+            release {
+                storeFile file(ksFile)
+                storePassword System.getenv('ANDROID_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('ANDROID_KEY_ALIAS')
+                keyPassword System.getenv('ANDROID_KEY_PASSWORD') ?: System.getenv('ANDROID_KEYSTORE_PASSWORD')
+            }
+        }
+    }
+    buildTypes {
+        release {
+            signingConfig ksFile ? signingConfigs.release : signingConfigs.debug
+            minifyEnabled false
+        }
+        debug { if (ksFile) signingConfig signingConfigs.release }
     }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
     packaging { jniLibs { useLegacyPackaging = false } }
