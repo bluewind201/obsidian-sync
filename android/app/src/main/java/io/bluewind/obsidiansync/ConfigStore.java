@@ -33,7 +33,7 @@ final class ConfigStore {
         cipher.init(Cipher.DECRYPT_MODE, key(), new GCMParameterSpec(128, Base64.decode(prefs.getString("iv", ""), Base64.NO_WRAP)));
         return new String(cipher.doFinal(Base64.decode(prefs.getString("data", ""), Base64.NO_WRAP)), java.nio.charset.StandardCharsets.UTF_8);
     }
-    static synchronized String run(Context c) {
+    static String run(Context c) {
         try {
             String config = load(c);
             if (config.isEmpty()) return "{\"ok\":false,\"error\":\"Save connection settings first\"}";
@@ -41,5 +41,13 @@ final class ConfigStore {
             c.getSharedPreferences("status", 0).edit().putString("last", result).apply();
             return result;
         } catch (Exception | LinkageError e) { return "{\"ok\":false,\"error\":\"Check storage permission and connection settings\"}"; }
+    }
+    static String describe(String raw) {
+        try {
+            org.json.JSONObject result = new org.json.JSONObject(raw);
+            if (!result.optBoolean("ok")) return "동기화를 중단했습니다. 폴더 권한·인증 정보·네트워크·파일명·원격 이력을 확인하세요.";
+            org.json.JSONObject report = result.getJSONObject("report");
+            return "동기화 완료 · 업로드 " + report.optInt("uploaded") + " · 다운로드 " + report.optInt("downloaded") + " · 삭제 " + report.optInt("deleted") + " · 충돌 " + report.optInt("conflicts") + " · 다음 확인 " + report.optInt("deferred");
+        } catch (Exception e) { return raw; }
     }
 }

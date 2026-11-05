@@ -318,9 +318,19 @@ async fn sync_with(config: &Config, state_root: &Path, op: Operator) -> Result<R
     let mut report = Report::default();
     // A listing failure aborts the run. Missing history never means delete everything.
     if config.backend == "onedrive" {
-        op.create_dir(&format!("{PREFIX}/")).await?;
-        op.create_dir(&format!("{PREFIX}/blobs/")).await?;
-        op.create_dir(&format!("{PREFIX}/events/")).await?;
+        for dir in [
+            format!("{PREFIX}/"),
+            format!("{PREFIX}/blobs/"),
+            format!("{PREFIX}/events/"),
+        ] {
+            match op.stat(&dir).await {
+                Ok(meta) => ensure!(meta.is_dir(), "Remote history path is not a folder"),
+                Err(error) if error.kind() == opendal::ErrorKind::NotFound => {
+                    op.create_dir(&dir).await?
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
     let entries = op
         .list_with(&format!("{PREFIX}/events/"))

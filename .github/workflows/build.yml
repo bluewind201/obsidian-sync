@@ -28,6 +28,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked --release -p obsidian-sync
+      - run: cargo test --locked -p vault-sync-core
       - run: |
           New-Item -ItemType Directory dist
           Copy-Item target/release/obsidian-sync.exe dist/
@@ -65,6 +66,31 @@ jobs:
       - name: Build installable preview APK
         working-directory: android
         run: gradle assembleDebug lintDebug --no-daemon
+      - name: Enable emulator acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Android JNI and launch tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          script: |
+            cd android && gradle connectedDebugAndroidTest --no-daemon
+            adb shell am start -n io.bluewind.obsidiansync/.MainActivity
+            sleep 2
+            adb exec-out screencap -p > android-preview.png
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-validation
+          path: |
+            android-preview.png
+            android/app/build/reports/androidTests/
+            android/app/build/reports/lint-results-debug.html
       - uses: actions/upload-artifact@v4
         with:
           name: android-preview
@@ -79,7 +105,12 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: '*-preview'
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          name: windows-x64
       - run: sha256sum artifacts/* > artifacts/SHA256SUMS.txt
       - env:
           GH_TOKEN: ${{ github.token }}

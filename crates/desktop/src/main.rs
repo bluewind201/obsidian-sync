@@ -193,8 +193,18 @@ impl eframe::App for App {
         }
         while let Ok(result) = self.result_rx.try_recv() {
             self.busy = false;
-            self.status = result.clone();
-            self.history.insert(0, result);
+            let parsed = serde_json::from_str::<serde_json::Value>(&result).unwrap_or_default();
+            self.status = if parsed["ok"] == true {
+                let r = &parsed["report"];
+                format!(
+                    "동기화 완료 · 업로드 {} · 다운로드 {} · 삭제 {} · 충돌 {} · 다음 확인 {}",
+                    r["uploaded"], r["downloaded"], r["deleted"], r["conflicts"], r["deferred"]
+                )
+            } else {
+                "동기화 중단: 폴더 권한, 인증 정보, 네트워크, 파일명, 원격 이력을 확인하세요."
+                    .into()
+            };
+            self.history.insert(0, self.status.clone());
             self.history.truncate(40);
             self.next = Instant::now() + Duration::from_secs(self.config.interval_seconds.max(5));
         }

@@ -46,7 +46,7 @@ public final class MainActivity extends Activity {
         button("지금 동기화", v -> {
             if (busy || !save()) return;
             busy = true; status.setText("동기화 중…");
-            executor.execute(() -> { String result = ConfigStore.run(this); runOnUiThread(() -> { busy = false; status.setText(result); }); });
+            executor.execute(() -> { String result = ConfigStore.run(this); runOnUiThread(() -> { busy = false; status.setText(ConfigStore.describe(result)); }); });
         });
         button("실시간 동기화 시작", v -> {
             if (!save()) return;
@@ -93,6 +93,6 @@ public final class MainActivity extends Activity {
     private TextView label(String text) { TextView view = new TextView(this); view.setText(text); view.setTextSize(16); view.setPadding(0,12,0,12); body.addView(view); return view; }
     private EditText input(LinearLayout parent, String text, boolean secret) { EditText edit = new EditText(this); edit.setSingleLine(true); edit.setInputType(android.text.InputType.TYPE_CLASS_TEXT | (secret ? android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD : android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS)); edit.setText(text); parent.addView(edit); return edit; }
     private void button(String text, View.OnClickListener listener) { Button button = new Button(this); button.setText(text); button.setOnClickListener(listener); body.addView(button); }
-    @Override protected void onResume() { super.onResume(); if (status != null && !busy) status.setText(getSharedPreferences("status", 0).getString("last", "연결 설정을 저장한 뒤 동기화하세요.")); }
+    @Override protected void onResume() { super.onResume(); if (status != null && !busy) status.setText(ConfigStore.describe(getSharedPreferences("status", 0).getString("last", "연결 설정을 저장한 뒤 동기화하세요."))); }
     @Override protected void onDestroy() { executor.shutdown(); super.onDestroy(); }
 }

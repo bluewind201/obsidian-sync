@@ -127,6 +127,76 @@ fn rejects_traversal_and_windows_aliases() {
     }
     assert!(validate_path("한글/notes.md").is_ok());
 }
+
+#[tokio::test]
+async fn concurrent_delete_and_edit_preserves_edit() {
+    let dir = TempDir::new().unwrap();
+    let d = dir.path();
+    let mut a = setup(&d.join("a"), &d.join("remote"));
+    let mut b = setup(&d.join("b"), &d.join("remote"));
+    a.propagate_deletes = true;
+    b.propagate_deletes = true;
+    fs::write(a.vault.join("note.md"), "base").unwrap();
+    sync(&a, &d.join("sa")).await.unwrap();
+    sync(&b, &d.join("sb")).await.unwrap();
+    fs::remove_file(a.vault.join("note.md")).unwrap();
+    fs::write(b.vault.join("note.md"), "edited offline").unwrap();
+    sync(&a, &d.join("sa")).await.unwrap();
+    sync(&b, &d.join("sb")).await.unwrap();
+    sync(&a, &d.join("sa")).await.unwrap();
+    assert_eq!(
+        fs::read(a.vault.join("note.md")).unwrap(),
+        b"edited offline"
+    );
+}
+
+#[tokio::test]
+async fn empty_client_can_recover_remote_vault() {
+    let dir = TempDir::new().unwrap();
+    let d = dir.path();
+    let a = setup(&d.join("a"), &d.join("remote"));
+    let b = setup(&d.join("b"), &d.join("remote"));
+    fs::write(a.vault.join("note.md"), "recover").unwrap();
+    sync(&a, &d.join("sa")).await.unwrap();
+    sync(&b, &d.join("fresh-state")).await.unwrap();
+    assert_eq!(fs::read(b.vault.join("note.md")).unwrap(), b"recover");
+}
+
+#[tokio::test]
+async fn remote_case_collision_aborts_before_upload() {
+    let dir = TempDir::new().unwrap();
+    let d = dir.path();
+    let a = setup(&d.join("a"), &d.join("remote"));
+    let b = setup(&d.join("b"), &d.join("remote"));
+    fs::write(a.vault.join("Note.md"), "remote").unwrap();
+    sync(&a, &d.join("sa")).await.unwrap();
+    fs::write(b.vault.join("note.md"), "local").unwrap();
+    assert!(sync(&b, &d.join("sb")).await.is_err());
+    assert_eq!(
+        fs::read_dir(d.join("remote/vault-sync-v1/events"))
+            .unwrap()
+            .count(),
+        1
+    );
+    assert_eq!(fs::read(b.vault.join("note.md")).unwrap(), b"local");
+}
+
+#[tokio::test]
+async fn internal_files_never_upload() {
+    let dir = TempDir::new().unwrap();
+    let d = dir.path();
+    let a = setup(&d.join("a"), &d.join("remote"));
+    let b = setup(&d.join("b"), &d.join("remote"));
+    fs::create_dir_all(a.vault.join(".obsidian")).unwrap();
+    fs::write(a.vault.join(".obsidian/workspace.json"), "private UI state").unwrap();
+    fs::write(a.vault.join(".obsidian/app.json"), "settings").unwrap();
+    fs::write(a.vault.join("scratch.tmp"), "incomplete").unwrap();
+    sync(&a, &d.join("sa")).await.unwrap();
+    sync(&b, &d.join("sb")).await.unwrap();
+    assert!(!b.vault.join(".obsidian/workspace.json").exists());
+    assert!(!b.vault.join("scratch.tmp").exists());
+    assert!(b.vault.join(".obsidian/app.json").exists());
+}
 #[tokio::test]
 async fn corrupt_blob_does_not_replace_local_file() {
     let dir = TempDir::new().unwrap();
