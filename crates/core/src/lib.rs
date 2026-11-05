@@ -1,5 +1,5 @@
 //! Append-only vault replication. Remote history is never overwritten or deleted.
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 use fs2::FileExt;
 use opendal::{Operator, Scheme};
 use serde::{Deserialize, Serialize};
@@ -65,9 +65,14 @@ impl Config {
                 "Vault and remote folders must not overlap"
             );
         }
+        let mut options = self.options.clone();
+        options.retain(|_, value| !value.is_empty());
+        if options.contains_key("refresh_token") {
+            options.remove("access_token");
+        }
         Ok(Operator::via_map(
             Scheme::from_str(&self.backend)?,
-            self.options.clone(),
+            options,
         )?)
     }
     fn identity(&self) -> Result<String> {
@@ -312,6 +317,11 @@ async fn sync_with(config: &Config, state_root: &Path, op: Operator) -> Result<R
     let mut events: BTreeMap<String, Event> = BTreeMap::new();
     let mut report = Report::default();
     // A listing failure aborts the run. Missing history never means delete everything.
+    if config.backend == "onedrive" {
+        op.create_dir(&format!("{PREFIX}/")).await?;
+        op.create_dir(&format!("{PREFIX}/blobs/")).await?;
+        op.create_dir(&format!("{PREFIX}/events/")).await?;
+    }
     let entries = op
         .list_with(&format!("{PREFIX}/events/"))
         .recursive(true)
@@ -359,6 +369,22 @@ async fn sync_with(config: &Config, state_root: &Path, op: Operator) -> Result<R
                 events.get(parent).is_some_and(|p| p.path == event.path),
                 "Incomplete remote history; retry later"
             );
+        }
+    }
+    let mut names = BTreeMap::new();
+    for path in local.keys().chain(events.values().map(|e| &e.path)) {
+        if let Some(previous) = names.insert(path.to_lowercase(), path) {
+            ensure!(previous == path, "Remote filename case collision");
+        }
+    }
+    for path in names.keys() {
+        let mut parent = path.as_str();
+        while let Some((prefix, _)) = parent.rsplit_once('/') {
+            ensure!(
+                !names.contains_key(prefix),
+                "File and folder path collision"
+            );
+            parent = prefix;
         }
     }
     let paths: BTreeSet<_> = local.keys().chain(state.files.keys()).cloned().collect();

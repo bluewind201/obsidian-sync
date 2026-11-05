@@ -44,7 +44,7 @@ Windows OneDrive 클라이언트를 이미 사용한다면 `fs` 연결의 root�
 API 연결은 각각 `onedrive`, `gdrive`를 선택하고 `root`, `access_token`을 입력합니다.
 토큰은 해당 계정 파일 읽기·쓰기 권한이 필요하며 만료되면 동기화가 중단됩니다.
 Windows 고급 JSON 또는 Android 입력 필드에 `refresh_token`, `client_id`, `client_secret`을 추가할 수 있습니다.
-OpenDAL의 공급자별 refresh-token 구성에 맞춰 모두 설정해야 합니다. 이 앱은 OAuth 앱 등록이나 브라우저 로그인, 토큰 발급을 대신하지 않습니다.
+refresh_token을 입력하면 access_token보다 우선합니다. OneDrive는 client_id가 필요하고 네이티브 앱에서는 client_secret을 비워둡니다. Google Drive의 refresh-token 방식은 client_id와 client_secret이 모두 필요합니다. 이 앱은 OAuth 앱 등록이나 브라우저 로그인, 토큰 발급을 대신하지 않습니다.
 사용자가 관리하는 자격 증명만 사용하고 설정 JSON/토큰을 GitHub에 업로드하지 마세요.
 
 ## Android
