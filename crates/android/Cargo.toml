@@ -1,14 +1,16 @@
 [package]
-name = "vault-sync-android"
+name = "obsidian-sync-android"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Obsidian Sync - Android JNI 연결부"
 
 [lib]
-crate-type = ["cdylib"]
+name = "obsidian_sync"
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-vault-sync-core = { path = "../core" }
-tokio.workspace = true
-serde_json.workspace = true
-jni = "0.21"
+obsidian-sync-core = { path = "../core" }
+anyhow = "1"
+serde_json = "1"
+jni = { version = "0.21", default-features = false }

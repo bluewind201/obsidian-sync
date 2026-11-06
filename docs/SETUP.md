@@ -1,74 +1,103 @@
-# 연결과 복구
+# 저장소별 설정 안내
 
-## 공통
+모든 기기에서 **같은 저장소, 같은 폴더**를 지정해야 노트가 서로 맞춰집니다.
+볼트마다 다른 폴더를 쓰세요 (예: `ObsidianSync/개인`, `ObsidianSync/회사`).
 
-각 보관함에는 고유한 원격 root를 사용하세요. 예: `/ObsidianSync/personal/`.
-앱이 만든 `vault-sync-v1` 내부는 수정하거나 삭제하지 마세요. 원격 이력에는 모든 파일 버전이 남습니다.
-연결 대상 변경은 자동 동기화를 끈 뒤 수행하세요. 새 연결은 기존 연결과 별도 상태로 관리합니다.
-동기화 전에 원격 root를 직접 생성하세요. NAS 마운트가 끊기면 재연결한 뒤 실행하세요.
+## Synology NAS (WebDAV)
 
-## Synology WebDAV
+1. DSM → **패키지 센터**에서 *WebDAV Server* 설치 → 실행 후 **HTTPS 사용**(기본 포트 5006)을 켭니다.
+2. 노트를 둘 공유폴더를 정합니다 (예: `home` 안의 `Obsidian` 폴더). 폴더가 없으면 앱이 만들어 줍니다.
+3. 앱에 입력
+   - WebDAV 주소: `https://NAS주소:5006/home/Obsidian`
+     - 집 안에서만 쓰면 `https://192.168.0.10:5006/...`, 밖에서도 쓰려면 DDNS 주소(`https://내이름.synology.me:5006/...`)
+   - NAS 아이디 / 비밀번호: 해당 폴더 읽기·쓰기 권한이 있는 계정
+4. **연결 테스트**를 누릅니다.
 
-DSM에서 WebDAV Server를 활성화하고 HTTPS 주소를 사용합니다. 일반적인 HTTPS 포트는 5006입니다.
-공인 또는 기기에서 신뢰하는 인증서가 필요합니다. 인증서 검증을 비활성화하는 옵션은 제공하지 않습니다.
+> 인증서 오류가 나면 DSM → 보안 → 인증서에서 Let's Encrypt 인증서를 발급해 DDNS 주소로 접속하세요.
+> 집 안 네트워크에서만 쓴다면 `http://NAS주소:5005/...`(HTTP)도 사용할 수 있지만 권장하지 않습니다.
 
-- backend: `webdav`
-- endpoint: `https://nas.example.com:5006`
-- root: `/공유폴더/ObsidianSync/`
-- username / password: 해당 폴더 읽기·쓰기 권한이 있는 별도 계정
+## 폴더 / 공유 드라이브
 
-## Google Cloud Storage
+Windows에서 NAS 공유폴더를 그대로 쓰거나, 다른 동기화 프로그램(Synology Drive Client, OneDrive 앱 등)이 관리하는 폴더를 지정합니다.
 
-- backend: `s3`
-- endpoint: `https://storage.googleapis.com`
-- region: `auto`
-- bucket: 생성한 버킷 이름
-- root: `/ObsidianSync/personal/`
-- access_key_id / secret_access_key: Cloud Storage HMAC 키
+- 예: `\\NAS\home\Obsidian`, `Z:\Obsidian`, `D:\Backup\Obsidian`
+- 볼트 폴더 **안쪽**이나 볼트를 **포함하는** 폴더는 지정하지 마세요.
 
-서비스 계정에 대상 버킷 객체 생성·읽기·목록 권한이 필요합니다. 객체 삭제 권한은 이 엔진의 일반 동기화에 사용하지 않습니다.
-Google Drive와 Google Cloud Storage는 서로 다른 서비스입니다.
+## OneDrive
 
-## 네이버 클라우드 플랫폼
+OneDrive는 Microsoft에 "앱 등록"을 한 번 해야 로그인 버튼을 쓸 수 있습니다 (무료, 5분).
 
-- backend: `s3`
-- endpoint: 사용 중인 Object Storage 리전의 HTTPS endpoint (예: `https://kr.object.ncloudstorage.com`)
-- region: 해당 리전 (예: `kr-standard`)
-- bucket / root / access_key_id / secret_access_key 설정
+1. https://entra.microsoft.com → **앱 등록** → *새 등록*
+   - 이름: `Obsidian Sync` (아무거나)
+   - 지원되는 계정 유형: **모든 조직 디렉터리의 계정 및 개인 Microsoft 계정**
+   - 리디렉션 URI: 비워 둠
+2. 만든 앱 → **인증** → *공용 클라이언트 흐름 허용* = **예** → 저장
+3. **API 권한** → *Microsoft Graph* → *위임된 권한* → `Files.ReadWrite`, `offline_access` 추가
+4. **개요**의 *애플리케이션(클라이언트) ID*를 복사해 앱의 **앱 Client ID**에 붙여넣기
+5. **로그인** → 브라우저에서 표시된 코드 입력 → 계정 승인 → **연결 테스트**
 
-새 Ncloud Storage 상품이나 다른 리전은 계정 콘솔에서 제공하는 endpoint를 사용하세요. MYBOX 계정으로는 연결되지 않습니다.
+노트는 OneDrive의 `ObsidianSync` 폴더(변경 가능)에 저장됩니다.
+Windows에 OneDrive 앱이 이미 있다면 **폴더 / 공유 드라이브**로 OneDrive 폴더를 지정하는 방법도 있습니다.
 
-## OneDrive / Google Drive
+## Google Drive
 
-Windows OneDrive 클라이언트를 이미 사용한다면 `fs` 연결의 root를 OneDrive 안의 전용 폴더로 지정할 수 있습니다.
-API 연결은 각각 `onedrive`, `gdrive`를 선택하고 `root`, `access_token`을 입력합니다.
-토큰은 해당 계정 파일 읽기·쓰기 권한이 필요하며 만료되면 동기화가 중단됩니다.
-Windows 고급 JSON 또는 Android 입력 필드에 `refresh_token`, `client_id`, `client_secret`을 추가할 수 있습니다.
-refresh_token을 입력하면 access_token보다 우선합니다. OneDrive는 client_id가 필요하고 네이티브 앱에서는 client_secret을 비워둡니다. Google Drive의 refresh-token 방식은 client_id와 client_secret이 모두 필요합니다. 이 앱은 OAuth 앱 등록이나 브라우저 로그인, 토큰 발급을 대신하지 않습니다.
-사용자가 관리하는 자격 증명만 사용하고 설정 JSON/토큰을 GitHub에 업로드하지 마세요.
+Google Cloud 콘솔에서 OAuth 클라이언트를 한 번 만들어야 합니다 (무료).
 
-## Android
+1. https://console.cloud.google.com → 새 프로젝트 생성
+2. **API 및 서비스 → 라이브러리** → *Google Drive API* 사용 설정
+3. **OAuth 동의 화면** → 외부 → 앱 이름/이메일 입력 → *테스트 사용자*에 본인 Gmail 추가
+4. **사용자 인증 정보 → 사용자 인증 정보 만들기 → OAuth 클라이언트 ID**
+   - 애플리케이션 유형: **TV 및 입력 제한 기기**
+5. 나온 *클라이언트 ID*와 *클라이언트 보안 비밀*을 앱에 입력 → **로그인** → 코드 입력 → **연결 테스트**
 
-Android 11(API 30) 이상, arm64 또는 x86_64 기기를 지원합니다.
-Obsidian과 동일한 공유 저장소 폴더에 접근하기 위해 '모든 파일 접근' 권한을 사용합니다.
-예: `/storage/emulated/0/Documents/Obsidian`. SAF URI(`content://...`)나 다른 앱의 전용 저장소는 지원하지 않습니다.
-현재 APK는 GitHub 직접 설치용 프리뷰입니다. Google Play의 모든 파일 접근 정책 승인을 받은 앱이 아닙니다.
+- Windows와 Android에 **같은 Client ID**를 넣어야 서로의 파일이 보입니다 (보안상 이 앱이 만든 파일만 접근합니다).
+- 노트는 내 드라이브의 `ObsidianSync` 폴더에 저장되며, 지운 파일은 Drive 휴지통으로 갑니다.
+- 동의 화면이 "테스트" 상태이면 7일마다 다시 로그인해야 할 수 있습니다. 계속 쓰려면 *앱 게시*를 누르세요.
 
-실시간 동기화는 앱에서 직접 시작해야 하며 부팅 후 자동으로 시작하지 않습니다.
-Android 15 이상은 dataSync 서비스의 백그라운드 실행을 24시간당 총 6시간으로 제한합니다.
-앱은 한 세션을 최대 5시간으로 제한하고 timeout 콜백에서도 중지합니다. 백그라운드 주기 동기화는 별도로 켤 수 있습니다.
+## 네이버 클라우드 / Google Cloud Storage
 
-## 충돌과 복구
+S3 호환 오브젝트 스토리지입니다. 앱에서 **네이버 클라우드** 또는 **Google Cloud** 버튼을 누르면 주소가 자동으로 채워집니다.
 
-충돌 시 모든 내용 버전을 `.sync-conflicts`에 저장하고 동일한 이벤트 정렬 규칙으로 주 파일을 선택합니다.
-삭제와 수정이 충돌하면 수정본을 보존합니다. 충돌을 해결하려면 주 파일을 원하는 내용으로 수정하고 동기화하세요.
-각 복구 파일 옆의 `.json`에서 `original_path`를 확인합니다. 복구 대상에 복사한 뒤 동기화하면 새 수정본으로 전파됩니다.
-원격 blobs와 events는 삭제하지 않으므로 로컬 상태가 없어도 빈 보관함에 다시 다운로드할 수 있습니다.
-삭제 이벤트가 최신인 파일의 옛 버전은 원격 events의 경로와 blob 해시를 통해 수동 복구할 수 있습니다. 자동 버전 탐색 UI는 아직 없습니다.
+### 네이버 클라우드 플랫폼 Object Storage
+1. 콘솔 → Object Storage → 버킷 생성
+2. 마이페이지 → 인증키 관리 → API 인증키(Access Key / Secret Key) 확인
+3. 앱 입력: 엔드포인트 `https://kr.object.ncloudstorage.com`, 리전 `kr-standard`, 버킷 이름, 키
 
-## 오류가 날 때
+> 네이버 MYBOX(개인 클라우드)는 공개 API가 없어 연결할 수 없습니다.
 
-앱 로그는 인증 정보 유출을 막기 위해 공급자 오류 본문을 표시하지 않습니다.
-보관함/원격 폴더 권한, HTTPS 인증서, 토큰 만료, 파일 크기, 비호환 파일명, 원격 이력 손상을 차례로 확인하세요.
-네트워크 중단 시 다음 실행이 재시도합니다. 원격 이력 누락이나 손상을 삭제로 간주하지 않습니다.
-자동 동기화를 중지해도 이미 시작한 한 차례 작업은 완료될 수 있습니다.
+### Google Cloud Storage
+1. 콘솔 → Cloud Storage → 버킷 생성
+2. Cloud Storage → 설정 → **상호 운용성** → HMAC 키 생성
+3. 앱 입력: 엔드포인트 `https://storage.googleapis.com`, 리전 `auto`, 버킷 이름, HMAC 키
+
+## Android 참고
+
+- 처음 실행 시 **모든 파일 접근 권한**을 허용해야 Obsidian 볼트 폴더를 읽고 쓸 수 있습니다.
+- 볼트 폴더는 보통 `내장 저장공간/Documents/볼트이름` 입니다. **폴더 선택**으로 고르면 됩니다.
+- 알림을 끄면 상태를 볼 수 없으니 알림은 허용해 주세요.
+- 배터리 절약이 강한 기기(삼성 등)는 설정 → 애플리케이션 → Obsidian Sync → 배터리 → **제한 없음**.
+
+## 문제가 생기면
+
+| 메시지 | 확인할 것 |
+| --- | --- |
+| 아이디/비밀번호 또는 키가 맞지 않습니다 | 입력값, 계정 권한 |
+| 주소나 버킷/폴더 이름을 찾을 수 없습니다 | 주소 오타, 버킷 이름 |
+| 서버에 연결할 수 없습니다 | 인터넷, NAS 전원, 포트(5006), 외부 접속 설정 |
+| 로그인이 만료되었습니다 | 설정 → 다시 로그인 |
+| 원격 저장소가 비어 있습니다 / 많은 파일이 삭제될 예정 | 의도한 상황이면 `동기화 기록 초기화` 후 다시 시작 (파일은 지워지지 않고 양쪽이 합쳐집니다) |
+
+설정 파일 위치: Windows `%APPDATA%\ObsidianSync\config.json` (exe 옆에 `portable.txt`를 두면 exe 폴더의 `data`에 저장).
+
+## (관리자용) Android 서명 키 고정
+
+APK를 항상 같은 키로 서명해야 새 버전이 기존 앱 위에 업데이트 설치됩니다. 한 번만 설정하면 됩니다.
+
+```sh
+keytool -genkeypair -keystore release.p12 -storetype PKCS12 -alias obsidiansync -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Obsidian Sync"
+base64 -w0 release.p12   # Windows PowerShell: [Convert]::ToBase64String([IO.File]::ReadAllBytes("release.p12"))
+```
+
+GitHub 저장소 → Settings → Secrets and variables → Actions 에 추가:
+`ANDROID_KEYSTORE_BASE64`(위 base64 결과), `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`(`obsidiansync`).
+키 파일은 저장소에 올리지 말고 안전한 곳에 보관하세요.

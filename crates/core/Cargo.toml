@@ -1,19 +1,26 @@
 [package]
-name = "vault-sync-core"
+name = "obsidian-sync-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Obsidian vault sync engine with pluggable cloud backends"
 
 [dependencies]
-anyhow.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-tokio.workspace = true
-opendal = { version = "0.54.1", default-features = false, features = ["executors-tokio", "services-fs", "services-memory", "services-webdav", "services-s3", "services-onedrive", "services-gdrive"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-sha2 = "0.10"
-uuid = { version = "1", features = ["v4"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2.10", default-features = false, features = ["tls", "json"] }
+quick-xml = "0.36"
+notify = { version = "6.1", default-features = false }
 walkdir = "2"
-tempfile = "3"
-fs2 = "0.4"
+globset = "0.4"
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+percent-encoding = "2"
+log = "0.4"
 
+[dev-dependencies]
+tempfile = "3"
