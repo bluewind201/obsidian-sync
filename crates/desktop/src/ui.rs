@@ -106,6 +106,13 @@ pub fn primary_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     )
 }
 
+pub fn primary_button_widget(text: &str) -> egui::Button<'_> {
+    egui::Button::new(RichText::new(text).color(Color32::WHITE).strong())
+        .fill(ACCENT)
+        .rounding(Rounding::same(8.0))
+        .min_size(egui::vec2(0.0, 36.0))
+}
+
 pub fn big_button(text: &str) -> egui::Button<'_> {
     egui::Button::new(text)
         .rounding(Rounding::same(8.0))

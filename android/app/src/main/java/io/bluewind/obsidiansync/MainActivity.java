@@ -515,7 +515,10 @@ public final class MainActivity extends Activity {
                 field("username", "아이디", "DSM 로그인 아이디", false, saved);
                 field("password", "비밀번호", "", true, saved);
                 field("folder", "NAS 폴더", folderKind ? "/photo/휴대폰" : "/home/Obsidian", false, saved);
-                fieldBox.addView(text("공유 폴더 이름부터 적습니다. 없는 하위 폴더는 자동으로 만듭니다.", 12, MUTED));
+                Button pickNas = secondary("NAS에서 폴더 고르기");
+                pickNas.setOnClickListener(v -> openNasPicker());
+                fieldBox.addView(pickNas);
+                fieldBox.addView(text("목록에서 고르면 오타가 없습니다. 직접 적을 때는 공유 폴더 이름부터 적습니다.", 12, MUTED));
                 break;
             case "s3":
                 LinearLayout presets = hbox();
@@ -548,6 +551,160 @@ public final class MainActivity extends Activity {
         testResult.setText("");
         otpBox.setVisibility(View.GONE);
         refreshLogin();
+    }
+
+    // ─────────────────────────── NAS 폴더 선택 ───────────────────────────
+    private void openNasPicker() {
+        EditText url = fields.get("url"), user = fields.get("username");
+        if (url == null || user == null || url.getText().toString().trim().isEmpty() || user.getText().toString().trim().isEmpty()) {
+            toast("NAS 주소와 아이디를 먼저 입력하세요");
+            return;
+        }
+        String cur = fields.get("folder").getText().toString().trim().replaceAll("/+$", "");
+        int i = cur.lastIndexOf('/');
+        new NasPicker().show(i > 0 ? cur.substring(0, i) : "/");
+    }
+
+    /** NAS 폴더를 목록에서 골라 '저장소 폴더' 칸에 넣는 창 */
+    private final class NasPicker {
+        final String backend = backendStr();
+        final String dir = ConfigStore.dataDir(MainActivity.this);
+        String path = "/";
+        AlertDialog dialog;
+        TextView pathView, msg;
+        LinearLayout list, otpRow, newRow;
+        EditText otpIn, newName;
+        Button up, use;
+
+        void show(String start) {
+            LinearLayout box = vbox();
+            box.setPadding(dp(20), dp(8), dp(20), 0);
+            LinearLayout head = hbox();
+            up = secondary("위로");
+            up.setOnClickListener(v -> load(parent(path), null, null));
+            head.addView(up);
+            pathView = text("", 15, TEXT);
+            pathView.setTypeface(Typeface.DEFAULT_BOLD);
+            pathView.setPadding(dp(10), 0, 0, 0);
+            head.addView(pathView, weight());
+            box.addView(head);
+            msg = text("", 13, MUTED);
+            box.addView(msg);
+            list = vbox();
+            ScrollView sv = new ScrollView(MainActivity.this);
+            sv.addView(list);
+            box.addView(sv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(280)));
+            otpRow = hbox();
+            otpIn = input("", "인증 코드 6자리", false);
+            otpIn.setInputType(InputType.TYPE_CLASS_NUMBER);
+            otpRow.addView(otpIn, weight());
+            Button ok = primary("인증");
+            ok.setOnClickListener(v -> {
+                String code = otpIn.getText().toString().trim();
+                if (!code.isEmpty()) load(path, null, code);
+            });
+            otpRow.addView(ok);
+            box.addView(otpRow);
+            newRow = hbox();
+            newName = input("", "새 폴더 이름", false);
+            newRow.addView(newName, weight());
+            Button mk = secondary("+ 새 폴더");
+            mk.setOnClickListener(v -> {
+                String n = newName.getText().toString().trim();
+                if (n.isEmpty()) { toast("새 폴더 이름을 입력하세요"); return; }
+                load(path, n, null);
+            });
+            newRow.addView(mk);
+            box.addView(newRow);
+            dialog = new AlertDialog.Builder(MainActivity.this)
+                    .setTitle("NAS 폴더 선택")
+                    .setView(box)
+                    .setPositiveButton("이 폴더 사용", null)
+                    .setNegativeButton("취소", null)
+                    .create();
+            dialog.setOnShowListener(x -> {
+                use = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+                use.setOnClickListener(v -> {
+                    EditText f = fields.get("folder");
+                    if (f != null) f.setText(path);
+                    testResult.setText("");
+                    dialog.dismiss();
+                });
+                load(start, null, null);
+            });
+            dialog.show();
+        }
+
+        String parent(String p) {
+            int i = p.lastIndexOf('/');
+            return i > 0 ? p.substring(0, i) : "/";
+        }
+
+        /** 폴더 목록 불러오기. create가 있으면 새 폴더를 만들고 그 안으로, otp가 있으면 먼저 인증 */
+        void load(String p, String create, String otp) {
+            path = p;
+            boolean root = "/".equals(p);
+            pathView.setText(root ? "공유 폴더" : p);
+            up.setEnabled(!root);
+            use.setEnabled(false);
+            newRow.setVisibility(root ? View.GONE : View.VISIBLE);
+            otpRow.setVisibility(View.GONE);
+            list.removeAllViews();
+            msg.setTextColor(MUTED);
+            msg.setText("불러오는 중…");
+            bg.execute(() -> {
+                JSONObject r;
+                String target = p;
+                try {
+                    r = new JSONObject("{\"ok\":true}");
+                    if (otp != null) r = new JSONObject(Native.synologyLogin(backend, dir, otp));
+                    if (r.optBoolean("ok") && create != null) {
+                        r = new JSONObject(Native.synologyCreateFolder(backend, dir, p, create));
+                        if (r.optBoolean("ok")) target = r.optString("path", p);
+                    }
+                    if (r.optBoolean("ok")) r = new JSONObject(Native.synologyFolders(backend, dir, target));
+                } catch (Exception e) {
+                    r = new JSONObject();
+                }
+                JSONObject res = r;
+                String at = target;
+                ui.post(() -> show(at, res));
+            });
+        }
+
+        void show(String at, JSONObject r) {
+            if (!dialog.isShowing()) return;
+            path = at;
+            boolean root = "/".equals(at);
+            pathView.setText(root ? "공유 폴더" : at);
+            up.setEnabled(!root);
+            newRow.setVisibility(root ? View.GONE : View.VISIBLE);
+            if (r.optBoolean("ok")) {
+                newName.setText("");
+                JSONArray fs = r.optJSONArray("folders");
+                int n = fs == null ? 0 : fs.length();
+                msg.setText(root ? "공유 폴더를 눌러 들어간 뒤, 동기화할 폴더에서 [이 폴더 사용]을 누르세요."
+                        : n == 0 ? "하위 폴더가 없습니다" : "");
+                for (int i = 0; i < n; i++) {
+                    JSONObject f = fs.optJSONObject(i);
+                    if (f == null) continue;
+                    String fp = f.optString("path");
+                    TextView row = text(f.optString("name") + "   ›", 16, TEXT);
+                    row.setPadding(dp(4), dp(12), dp(4), dp(12));
+                    row.setOnClickListener(v -> load(fp, null, null));
+                    list.addView(row);
+                }
+                use.setEnabled(!root);
+            } else if (r.optBoolean("need_otp")) {
+                otpRow.setVisibility(View.VISIBLE);
+                msg.setTextColor(WARN);
+                msg.setText("2단계 인증이 필요합니다. OTP 앱의 6자리 코드를 입력하세요.");
+                otpIn.requestFocus();
+            } else {
+                msg.setTextColor(DANGER);
+                msg.setText("✖ " + friendly(r.optString("error", "NAS에 연결할 수 없습니다")));
+            }
+        }
     }
 
     private void field(String key, String label, String hint, boolean secret, JSONObject saved) { field(key, label, hint, secret, saved, ""); }

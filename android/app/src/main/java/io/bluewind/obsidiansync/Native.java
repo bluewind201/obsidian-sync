@@ -24,6 +24,10 @@ public final class Native {
     public static native String newProfileId();
     /** Synology 로그인. otp가 있으면 함께 보내고 이 기기를 기억. {"ok","error"?,"need_otp"?} */
     public static native String synologyLogin(String backend, String dataDir, String otp);
+    /** NAS 폴더 목록 (path가 ""면 공유 폴더). {"ok","folders":[{name,path}],"error"?,"need_otp"?} */
+    public static native String synologyFolders(String backend, String dataDir, String path);
+    /** NAS에 새 폴더 만들기. {"ok","path"?,"error"?} */
+    public static native String synologyCreateFolder(String backend, String dataDir, String parent, String name);
     public static native boolean synologyRemembered(String backend, String dataDir);
     public static native void synologyForget(String backend, String dataDir);
     /** OneDrive/Google Drive 로그인 1단계. {"ok","user_code","verification_uri"} */

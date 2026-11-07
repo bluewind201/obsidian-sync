@@ -102,6 +102,25 @@ pub fn synology_login(backend: &str, data_dir: &str, otp: &str) -> Value {
     }
 }
 
+/// NAS 폴더 목록 (`path`가 비면 공유 폴더). {"ok","folders":[{name,path}]}
+pub fn synology_folders(backend: &str, data_dir: &str, path: &str) -> Value {
+    match parse_backend(backend).and_then(|b| synology::list_folders(&b, Path::new(data_dir), path))
+    {
+        Ok(f) => json!({"ok": true, "folders": f}),
+        Err(e) => err(e),
+    }
+}
+
+/// NAS에 새 폴더 만들기. {"ok","path"}
+pub fn synology_create_folder(backend: &str, data_dir: &str, parent: &str, name: &str) -> Value {
+    match parse_backend(backend)
+        .and_then(|b| synology::create_folder(&b, Path::new(data_dir), parent, name))
+    {
+        Ok(p) => json!({"ok": true, "path": p}),
+        Err(e) => err(e),
+    }
+}
+
 /// Synology 2단계 인증을 통과해 이 기기가 기억되어 있는지
 pub fn synology_remembered(backend: &str, data_dir: &str) -> bool {
     parse_backend(backend)
@@ -266,6 +285,27 @@ macro_rules! jni_json3 {
 }
 
 jni_json3!(Java_io_bluewind_obsidiansync_Native_resetState, reset_state);
+jni_json3!(
+    Java_io_bluewind_obsidiansync_Native_synologyFolders,
+    synology_folders
+);
+
+#[no_mangle]
+pub extern "system" fn Java_io_bluewind_obsidiansync_Native_synologyCreateFolder<'l>(
+    mut env: JNIEnv<'l>,
+    _c: JClass<'l>,
+    a: JString<'l>,
+    b: JString<'l>,
+    c: JString<'l>,
+    d: JString<'l>,
+) -> jstring {
+    let (a, b) = (s(&mut env, &a), s(&mut env, &b));
+    let (c, d) = (s(&mut env, &c), s(&mut env, &d));
+    let v = guard(PANIC.to_string(), || {
+        synology_create_folder(&a, &b, &c, &d).to_string()
+    });
+    out(&mut env, v)
+}
 jni_json3!(
     Java_io_bluewind_obsidiansync_Native_synologyLogin,
     synology_login
