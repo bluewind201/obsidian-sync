@@ -818,6 +818,27 @@ impl Backend for SynologyBackend {
         })
     }
 
+    fn delete_many(&mut self, paths: &[String]) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let mut abs = Vec::with_capacity(paths.len());
+        for p in paths {
+            check_path(p)?;
+            abs.push(self.abs(p));
+        }
+        let list = serde_json::to_string(&abs)?;
+        match self.call(
+            "SYNO.FileStation.Delete",
+            "delete",
+            &[("path", &list), ("recursive", "false")],
+        ) {
+            Ok(_) => Ok(()),
+            Err(e) if syno_code(&e).is_some_and(|s| s.not_found()) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
     fn delete(&mut self, path: &str) -> Result<()> {
         check_path(path)?;
         let abs = self.abs(path);
@@ -885,6 +906,7 @@ mod tests {
     struct Fake {
         files: HashMap<String, (Vec<u8>, i64)>,
         logins: Vec<String>,
+        deletes: usize,
         tick: i64,
     }
 
@@ -1123,11 +1145,22 @@ mod tests {
                 }
             }
             ("SYNO.FileStation.Delete", Some("delete")) => {
-                let path = json_path(&p["path"]);
-                if f.files.remove(&path).is_some() {
+                let paths: Vec<String> = serde_json::from_str(&p["path"]).unwrap();
+                f.deletes += 1;
+                let missing: Vec<Value> = paths
+                    .iter()
+                    .filter(|path| f.files.remove(*path).is_none())
+                    .map(|path| json!({"code": 408, "path": path}))
+                    .collect();
+                if missing.is_empty() {
                     (j, ok(Value::Null))
                 } else {
-                    (j, json!({"success": false, "error": {"code": 900, "errors": [{"code": 408, "path": path}]}}).to_string().into_bytes())
+                    (
+                        j,
+                        json!({"success": false, "error": {"code": 900, "errors": missing}})
+                            .to_string()
+                            .into_bytes(),
+                    )
                 }
             }
             _ => (j, fail(103)),
@@ -1208,6 +1241,16 @@ mod tests {
 
         b.delete("노트.md").unwrap();
         b.delete("노트.md").unwrap(); // 이미 없음 → 성공
+        assert_eq!(b.list().unwrap().len(), 2);
+
+        // 여러 파일을 한 번의 요청으로 삭제 (없는 파일은 성공으로 처리)
+        for i in 0..5 {
+            b.upload(&format!("del/{i}.md"), b"x").unwrap();
+        }
+        let before = fake.lock().unwrap().deletes;
+        let paths: Vec<String> = (0..6).map(|i| format!("del/{i}.md")).collect();
+        b.delete_many(&paths).unwrap();
+        assert_eq!(fake.lock().unwrap().deletes, before + 1);
         assert_eq!(b.list().unwrap().len(), 2);
         drop(b);
 

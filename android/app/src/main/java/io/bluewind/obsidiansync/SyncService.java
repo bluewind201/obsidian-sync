@@ -12,6 +12,8 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import org.json.JSONObject;
 
 /**
@@ -22,7 +24,10 @@ public final class SyncService extends Service {
     static final String STOP = "stop";
     private static final int ID = 1;
     private final Handler handler = new Handler(Looper.getMainLooper());
+    /** 엔진 시작/중지는 진행 중인 동기화를 기다릴 수 있어 메인 스레드에서 하지 않습니다 (순서 보장용 단일 스레드). */
+    private static final ExecutorService ENGINE = Executors.newSingleThreadExecutor();
     private String lastText = "";
+    private volatile boolean destroyed;
 
     static void start(Context c) {
         ConfigStore.setEnabled(c, true);
@@ -56,7 +61,8 @@ public final class SyncService extends Service {
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && STOP.equals(intent.getAction())) {
             ConfigStore.setEnabled(this, false);
-            Native.stop();
+            handler.removeCallbacksAndMessages(null);
+            ENGINE.execute(Native::stop);
             stopForeground(STOP_FOREGROUND_REMOVE);
             stopSelf();
             return START_NOT_STICKY;
@@ -66,20 +72,29 @@ public final class SyncService extends Service {
         else startForeground(ID, n);
 
         String config = ConfigStore.load(this);
-        String result = config.isEmpty() ? "{\"ok\":false,\"error\":\"설정이 없습니다\"}" : Native.start(config, ConfigStore.dataDir(this));
+        String dataDir = ConfigStore.dataDir(this);
+        handler.removeCallbacksAndMessages(null);
+        ENGINE.execute(() -> {
+            String result = config.isEmpty() ? "{\"ok\":false,\"error\":\"설정이 없습니다\"}" : Native.start(config, dataDir);
+            handler.post(() -> started(result));
+        });
+        // 시스템이 종료시켜도 다시 시작
+        return START_STICKY;
+    }
+
+    private void started(String result) {
+        if (destroyed) return;
         try {
             JSONObject r = new JSONObject(result);
             if (!r.optBoolean("ok")) {
                 update("시작 실패: " + r.optString("error"));
                 getSharedPreferences("state", 0).edit().putString("start_error", r.optString("error")).apply();
-                return START_NOT_STICKY;
+                return;
             }
         } catch (Exception ignored) { }
         getSharedPreferences("state", 0).edit().remove("start_error").apply();
         handler.removeCallbacksAndMessages(null);
         handler.post(this::refresh);
-        // 시스템이 종료시켜도 다시 시작
-        return START_STICKY;
     }
 
     private void refresh() {
@@ -102,8 +117,9 @@ public final class SyncService extends Service {
     }
 
     @Override public void onDestroy() {
+        destroyed = true;
         handler.removeCallbacksAndMessages(null);
-        Native.stop();
+        ENGINE.execute(Native::stop);
         super.onDestroy();
     }
 

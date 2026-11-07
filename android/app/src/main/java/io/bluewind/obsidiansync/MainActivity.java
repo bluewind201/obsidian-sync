@@ -72,7 +72,7 @@ public final class MainActivity extends Activity {
     // 목록 화면
     private TextView statusTitle, statusSub, permWarn;
     private View statusDot;
-    private Button toggleBtn, syncBtn;
+    private Button toggleBtn, syncBtn, deleteBtn;
     private LinearLayout logBox, profileBox;
     private final List<TextView> profileLines = new ArrayList<>();
     // 편집 화면
@@ -181,6 +181,17 @@ public final class MainActivity extends Activity {
         btns.addView(toggleBtn, weight());
         btns.addView(syncBtn, weight());
         status.addView(btns);
+        // 대량 삭제 확인: 의도한 삭제일 때만 누르도록 평소엔 숨김
+        deleteBtn = secondary("삭제 진행");
+        deleteBtn.setVisibility(View.GONE);
+        deleteBtn.setOnClickListener(v -> {
+            deleteBtn.setEnabled(false);
+            bg.execute(() -> {
+                boolean ok = Native.allowDeletes("");
+                ui.post(() -> toast(ok ? "삭제를 진행합니다" : "동기화가 켜져 있을 때만 진행할 수 있습니다"));
+            });
+        });
+        status.addView(deleteBtn);
         permWarn = text("⚠ 폴더의 파일을 읽고 쓰려면 '모든 파일 접근' 권한이 필요합니다. 눌러서 허용하세요.", 14, WARN);
         permWarn.setPadding(0, dp(8), 0, 0);
         permWarn.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:" + getPackageName()))));
@@ -1083,6 +1094,12 @@ public final class MainActivity extends Activity {
 
             // 프로필별 상태
             JSONArray pst = s.optJSONArray("profiles");
+            int pending = 0;
+            if (pst != null) for (int i = 0; i < pst.length(); i++)
+                if (!pst.getJSONObject(i).isNull("pending_deletes")) pending += pst.getJSONObject(i).optInt("pending_deletes");
+            deleteBtn.setVisibility(pending > 0 ? View.VISIBLE : View.GONE);
+            deleteBtn.setEnabled(pending > 0);
+            if (pending > 0) deleteBtn.setText("삭제 진행 (" + pending + "개)");
             for (TextView line : profileLines) {
                 JSONObject st = null;
                 if (pst != null) for (int i = 0; i < pst.length(); i++)

@@ -36,11 +36,15 @@ fn err(e: anyhow::Error) -> Value {
 pub fn start(config: &str, data_dir: &str) -> Value {
     let r = (|| {
         let cfg = parse(config)?;
-        let mut guard = SERVICE.lock().unwrap();
-        if let Some(old) = guard.take() {
+        // 이전 서비스는 잠금을 놓은 뒤에 멈춰야 상태 조회(화면)가 멈추지 않습니다
+        let old = SERVICE.lock().unwrap().take();
+        if let Some(old) = old {
             old.stop();
         }
-        *guard = Some(SyncService::start(cfg, Path::new(data_dir))?);
+        let new = SyncService::start(cfg, Path::new(data_dir))?;
+        if let Some(raced) = SERVICE.lock().unwrap().replace(new) {
+            raced.stop();
+        }
         Ok::<_, anyhow::Error>(())
     })();
     match r {
@@ -50,8 +54,21 @@ pub fn start(config: &str, data_dir: &str) -> Value {
 }
 
 pub fn stop() {
-    if let Some(s) = SERVICE.lock().unwrap().take() {
+    // 잠금을 잡은 채로 멈추면 그동안 status()/sync_now()가 모두 대기합니다
+    let s = SERVICE.lock().unwrap().take();
+    if let Some(s) = s {
         s.stop();
+    }
+}
+
+/// 대량 삭제 확인 대기 중인 프로필의 삭제를 한 번 허용 (빈 id = 대기 중인 전체)
+pub fn allow_deletes(profile_id: &str) -> bool {
+    match SERVICE.lock().unwrap().as_ref() {
+        Some(s) => {
+            s.allow_deletes(profile_id);
+            true
+        }
+        None => false,
     }
 }
 
@@ -390,6 +407,16 @@ pub extern "system" fn Java_io_bluewind_obsidiansync_Native_stop<'l>(
     _c: JClass<'l>,
 ) {
     guard((), stop);
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_bluewind_obsidiansync_Native_allowDeletes<'l>(
+    mut env: JNIEnv<'l>,
+    _c: JClass<'l>,
+    profile_id: JString<'l>,
+) -> jboolean {
+    let id = s(&mut env, &profile_id);
+    guard(false, || allow_deletes(&id)) as jboolean
 }
 
 #[no_mangle]
