@@ -12,7 +12,7 @@ Obsidian 공식 제품이 아닌 개인 프로젝트입니다.
 | 기기 | 파일 | 설치 |
 | --- | --- | --- |
 | Windows 10/11 | `ObsidianSync-windows-x64.zip` | 압축 해제 후 `ObsidianSync.exe` 실행 (설치 필요 없음) |
-| Android 11+ | `ObsidianSync-android.apk` | 파일을 열어 설치. 새 버전은 기존 앱 위에 그대로 업데이트됩니다 |
+| Android 11+ | `ObsidianSync-android.apk` | 파일을 열어 설치. 그다음부터는 앱이 새 릴리즈를 찾아 자동으로 업데이트합니다 (아래 "앱 업데이트") |
 
 ## 연결할 수 있는 저장소
 

@@ -139,13 +139,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          HAS_KEY: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
         run: |
           VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [[ "$HAS_KEY" == "true" ]]; then SIGN_NOTE=""; else SIGN_NOTE="  - ⚠ 이 APK는 임시 키로 서명되어 이전 버전 위에 업데이트할 수 없습니다. 기존 앱을 지운 뒤 설치하세요 (서명 키 설정: docs/SETUP.md)."; fi
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then TAG="$GITHUB_REF_NAME"; else TAG="v${VERSION}-b${GITHUB_RUN_NUMBER}"; fi
           cat > notes.md <<NOTES
           ## 받는 법
           - **Windows**: \`ObsidianSync-windows-x64.zip\` 압축을 풀고 \`ObsidianSync.exe\` 실행
-          - **Android**: \`ObsidianSync-android.apk\` 설치 (이전 버전 위에 그대로 업데이트 설치됩니다)
+          - **Android**: \`ObsidianSync-android.apk\` 설치. 앱의 "앱 업데이트"에서 새 버전을 자동으로 받아 설치할 수 있습니다.
+          ${SIGN_NOTE}
 
           처음 사용할 때는 볼트를 백업한 뒤 시작하세요. 저장소별 설정 방법은 [설정 안내](https://github.com/${GH_REPO}/blob/main/docs/SETUP.md)를 참고하세요.
 

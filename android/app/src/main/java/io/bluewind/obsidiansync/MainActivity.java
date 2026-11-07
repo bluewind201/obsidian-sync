@@ -89,6 +89,11 @@ public final class MainActivity extends Activity {
     private CheckBox chkEnabled, chkDeletes, chkObsidian, chkTarget;
     private LinearLayout twoWayBox;
     private boolean loggingIn;
+    // 앱 업데이트
+    static volatile boolean visible;
+    private TextView updateLine;
+    private Button updateBtn;
+    private Updater.Release available;
 
     // ─────────────────────────── 시작 ───────────────────────────
     @Override public void onCreate(Bundle state) {
@@ -101,6 +106,7 @@ public final class MainActivity extends Activity {
         scroll.addView(root);
         setContentView(scroll);
         showList();
+        scheduleUpdateCheck();
     }
 
     private void loadConfig() {
@@ -121,11 +127,13 @@ public final class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        visible = true;
         if (permWarn != null) permWarn.setVisibility(Environment.isExternalStorageManager() ? View.GONE : View.VISIBLE);
         if (editing) refreshLogin(); else tick();
     }
 
     @Override protected void onPause() {
+        visible = false;
         ui.removeCallbacksAndMessages(null);
         super.onPause();
     }
@@ -213,6 +221,22 @@ public final class MainActivity extends Activity {
         help.setOnClickListener(v -> startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/bluewind201/obsidian-sync/blob/main/docs/SETUP.md"))));
         more.addView(help, weight());
         root.addView(more);
+
+        // 앱 업데이트
+        LinearLayout uc = card(root);
+        TextView ut = text("앱 업데이트", 16, TEXT);
+        ut.setTypeface(Typeface.DEFAULT_BOLD);
+        uc.addView(ut);
+        updateLine = text("버전 " + Updater.currentName(this), 14, MUTED);
+        uc.addView(updateLine);
+        updateBtn = secondary("업데이트 확인");
+        updateBtn.setOnClickListener(v -> updateNow());
+        uc.addView(updateBtn);
+        CheckBox auto = check("새 버전이 나오면 자동으로 받아서 설치", Updater.autoEnabled(this));
+        auto.setOnCheckedChangeListener((b, on) -> { Updater.setAutoEnabled(this, on); scheduleUpdateCheck(); });
+        uc.addView(auto);
+        checkUpdateQuietly();
+
         root.addView(text("충돌이 나면 두 버전을 모두 남깁니다: 노트 (충돌 기기 날짜).md", 12, MUTED));
         tick();
     }
@@ -660,6 +684,68 @@ public final class MainActivity extends Activity {
                 new PeriodicWorkRequest.Builder(SyncWorker.class, 15, TimeUnit.MINUTES).setConstraints(net).build());
         toast("실시간 동기화를 시작했습니다");
         ui.postDelayed(this::tick, 800);
+    }
+
+    // ─────────────────────────── 앱 업데이트 ───────────────────────────
+    private void scheduleUpdateCheck() {
+        WorkManager wm = WorkManager.getInstance(this);
+        if (!Updater.autoEnabled(this)) { wm.cancelUniqueWork("app-update"); return; }
+        Constraints net = new Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build();
+        wm.enqueueUniquePeriodicWork("app-update", ExistingPeriodicWorkPolicy.KEEP,
+                new PeriodicWorkRequest.Builder(UpdateWorker.class, 6, TimeUnit.HOURS).setConstraints(net).build());
+    }
+
+    private void showUpdateState() {
+        if (updateLine == null) return;
+        String v = "버전 " + Updater.currentName(this);
+        String msg = Updater.lastMessage(this);
+        if (available != null) {
+            updateLine.setText(v + "\n새 버전 " + available.tag + " 이 있습니다");
+            updateLine.setTextColor(ACCENT);
+            updateBtn.setText("지금 업데이트");
+        } else {
+            updateLine.setText(msg.isEmpty() ? v : v + "\n" + msg);
+            updateLine.setTextColor(MUTED);
+            updateBtn.setText("업데이트 확인");
+        }
+    }
+
+    /** 화면을 열 때 새 버전이 있는지만 확인합니다. */
+    private void checkUpdateQuietly() {
+        showUpdateState();
+        bg.execute(() -> {
+            try {
+                Updater.Release r = Updater.check(this);
+                ui.post(() -> { available = r; showUpdateState(); });
+            } catch (Exception ignored) { }
+        });
+    }
+
+    private void updateNow() {
+        if (!getPackageManager().canRequestPackageInstalls()) {
+            toast("'이 출처 허용'을 켠 뒤 돌아와서 다시 눌러 주세요");
+            startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName())));
+            return;
+        }
+        updateBtn.setEnabled(false);
+        updateLine.setText("새 버전 확인 중…");
+        bg.execute(() -> {
+            String result;
+            try {
+                String tag = Updater.run(this);
+                result = tag == null ? "이미 최신 버전입니다" : tag + " 설치를 시작했습니다";
+            } catch (Exception e) {
+                result = "업데이트 실패: " + e.getMessage();
+                Updater.setMessage(this, result);
+            }
+            String r = result;
+            ui.post(() -> {
+                updateBtn.setEnabled(true);
+                available = null;
+                showUpdateState();
+                toast(r);
+            });
+        });
     }
 
     private void toggle() {

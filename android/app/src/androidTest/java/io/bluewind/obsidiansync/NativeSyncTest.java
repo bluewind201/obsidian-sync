@@ -94,6 +94,18 @@ public final class NativeSyncTest {
         assertTrue(new File(local, "r.md").exists());
     }
 
+    @Test public void updaterReadsReleaseTags() throws Exception {
+        assertEquals(12, Updater.buildOf("v0.4.0-b12"));
+        assertEquals(-1, Updater.buildOf("v0.4.0"));
+        JSONObject rel = new JSONObject().put("tag_name", "v0.4.1-b20").put("assets", new org.json.JSONArray()
+                .put(new JSONObject().put("name", "SHA256SUMS.txt").put("browser_download_url", "https://x/sums"))
+                .put(new JSONObject().put("name", "ObsidianSync-android.apk").put("browser_download_url", "https://x/app.apk").put("size", 123)));
+        Updater.Release r = Updater.parse(rel);
+        assertEquals(20, r.build);
+        assertEquals("https://x/app.apk", r.url);
+        assertEquals(123, r.size);
+    }
+
     @Test public void legacyConfigIsNormalized() throws Exception {
         JSONObject r = new JSONObject(Native.normalize("{\"vault_path\":\"/sdcard/V\",\"backend\":{\"type\":\"web_dav\",\"url\":\"https://nas:5006/home/V\",\"username\":\"u\",\"password\":\"p\"}}"));
         assertTrue(r.getBoolean("ok"));
