@@ -25,6 +25,7 @@ jobs:
       - run: cargo test --locked -p obsidian-sync-core -p obsidian-sync-android
 
   windows:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,6 +47,7 @@ jobs:
           path: ObsidianSync-windows-x64.zip
 
   android:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     env:
       BUILD_NUMBER: ${{ github.run_number }}
@@ -117,9 +119,9 @@ jobs:
           name: android-apk
           path: ObsidianSync-android.apk
 
-  # main에 올라가면 자동으로 릴리즈 (태그 v* 를 직접 올려도 릴리즈)
+  # 태그 v* 를 직접 올리거나 workflow_dispatch 수동 실행 시 릴리즈
   release:
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
     needs: [test, windows, android]
     runs-on: ubuntu-latest
     permissions:
