@@ -101,6 +101,22 @@ enum Job {
     NeedOtp(String),
 }
 
+/// NAS 폴더 선택 창 상태
+enum BrowseState {
+    Loading,
+    Ready(Vec<synology::NasFolder>),
+    NeedOtp(String),
+    Failed(String),
+}
+
+struct NasBrowser {
+    /// 지금 보고 있는 NAS 폴더 ("/" = 공유 폴더 목록)
+    path: String,
+    state: Arc<Mutex<BrowseState>>,
+    new_name: String,
+    otp: String,
+}
+
 enum LoginState {
     Requesting,
     Code { user_code: String, uri: String },
@@ -129,6 +145,7 @@ struct App {
     login: Option<Login>,
     test: Option<Arc<Mutex<Job>>>,
     otp: String,
+    browser: Option<NasBrowser>,
     confirm_delete: bool,
     message: Option<(String, bool)>,
     autostart: bool,
@@ -197,6 +214,7 @@ impl App {
             login: None,
             test: None,
             otp: String::new(),
+            browser: None,
             confirm_delete: false,
             message: None,
             autostart: platform::autostart_enabled(),
@@ -370,6 +388,234 @@ impl App {
         });
         self.otp.clear();
         self.test = Some(job);
+    }
+
+    /// NAS 폴더 선택 창 열기 (지금 입력된 폴더의 상위에서 시작)
+    fn open_browser(&mut self, ctx: &egui::Context) {
+        let start = match &self.cur().backend {
+            BackendConfig::Synology { folder, .. } if !folder.trim().is_empty() => {
+                let f = format!("/{}", folder.trim().trim_matches('/'));
+                match f.rfind('/') {
+                    Some(0) | None => "/".to_string(),
+                    Some(i) => f[..i].to_string(),
+                }
+            }
+            _ => "/".to_string(),
+        };
+        self.browser = Some(NasBrowser {
+            path: start.clone(),
+            state: Arc::new(Mutex::new(BrowseState::Loading)),
+            new_name: String::new(),
+            otp: String::new(),
+        });
+        self.browse(ctx, start, None, None);
+    }
+
+    /// NAS 폴더 목록 불러오기. `create`가 있으면 그 이름으로 새 폴더를 만든 뒤 그 안으로 들어갑니다.
+    fn browse(
+        &mut self,
+        ctx: &egui::Context,
+        path: String,
+        create: Option<String>,
+        otp: Option<String>,
+    ) {
+        let Some(b) = &mut self.browser else { return };
+        let state = Arc::new(Mutex::new(BrowseState::Loading));
+        b.state = state.clone();
+        b.path = path.clone();
+        let (backend, dir, ctx) = (
+            self.cfg.profiles[self.sel].backend.clone(),
+            self.data_dir.clone(),
+            ctx.clone(),
+        );
+        let created = create.clone();
+        std::thread::spawn(move || {
+            let r = (|| {
+                if let Some(code) = &otp {
+                    synology::login(&backend, &dir, Some(code))?;
+                }
+                let mut at = path;
+                if let Some(name) = &create {
+                    at = synology::create_folder(&backend, &dir, &at, name)?;
+                }
+                synology::list_folders(&backend, &dir, &at)
+            })();
+            *state.lock().unwrap() = match r {
+                Ok(folders) => BrowseState::Ready(folders),
+                Err(e) if synology::needs_otp(&e) => BrowseState::NeedOtp(format!("{e:#}")),
+                Err(e) => BrowseState::Failed(friendly_error(&format!("{e:#}"))),
+            };
+            ctx.request_repaint();
+        });
+        if let Some(b) = &mut self.browser {
+            b.new_name.clear();
+            if let Some(name) = created {
+                // 새 폴더를 만들면 그 안을 보여 줍니다
+                let p = b.path.trim_end_matches('/').to_string();
+                b.path = format!("{p}/{}", name.trim());
+            }
+        }
+    }
+
+    fn browser_ui(&mut self, ctx: &egui::Context) {
+        let Some(b) = &mut self.browser else { return };
+        let mut open = true;
+        let mut go: Option<String> = None;
+        let mut create: Option<String> = None;
+        let mut otp: Option<String> = None;
+        let mut choose = false;
+        let mut cancel = false;
+        let path = b.path.clone();
+        let at_root = path == "/";
+        egui::Window::new("NAS 폴더 선택")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_size([440.0, 420.0])
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!at_root, egui::Button::new("⬆ 위로"))
+                        .clicked()
+                    {
+                        let up = match path.rfind('/') {
+                            Some(0) | None => "/".to_string(),
+                            Some(i) => path[..i].to_string(),
+                        };
+                        go = Some(up);
+                    }
+                    ui.label(
+                        RichText::new(if at_root {
+                            "공유 폴더".to_string()
+                        } else {
+                            path.clone()
+                        })
+                        .strong(),
+                    );
+                });
+                ui.separator();
+                let state = b.state.lock().unwrap();
+                match &*state {
+                    BrowseState::Loading => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("NAS 폴더를 불러오는 중…");
+                        });
+                    }
+                    BrowseState::Failed(m) => {
+                        ui.label(RichText::new(format!("✖ {m}")).color(DANGER));
+                        if ui.button("다시 시도").clicked() {
+                            go = Some(path.clone());
+                        }
+                    }
+                    BrowseState::NeedOtp(m) => {
+                        ui.label(RichText::new("🔐 2단계 인증").strong());
+                        ui.label(
+                            RichText::new(format!(
+                                "{}\nOTP 앱의 6자리 코드를 입력하세요.",
+                                m.lines().next().unwrap_or("")
+                            ))
+                            .small()
+                            .color(MUTED),
+                        );
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut b.otp)
+                                    .hint_text("123456")
+                                    .desired_width(120.0),
+                            );
+                            if ui::primary_button(ui, "인증").clicked() && !b.otp.trim().is_empty()
+                            {
+                                otp = Some(b.otp.trim().to_string());
+                            }
+                        });
+                    }
+                    BrowseState::Ready(folders) => {
+                        egui::ScrollArea::vertical()
+                            .max_height(260.0)
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                if folders.is_empty() {
+                                    ui.label(RichText::new("하위 폴더가 없습니다").color(MUTED));
+                                }
+                                for f in folders {
+                                    let r = ui.add(
+                                        egui::Button::new(format!("{}   ›", f.name))
+                                            .frame(false)
+                                            .min_size(egui::vec2(ui.available_width(), 24.0)),
+                                    );
+                                    if r.clicked() {
+                                        go = Some(f.path.clone());
+                                    }
+                                }
+                            });
+                    }
+                }
+                let ready = matches!(&*state, BrowseState::Ready(_));
+                drop(state);
+                ui.separator();
+                if !at_root {
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut b.new_name)
+                                .hint_text("새 폴더 이름")
+                                .desired_width(180.0),
+                        );
+                        if ui
+                            .add_enabled(
+                                ready && !b.new_name.trim().is_empty(),
+                                egui::Button::new("＋ 새 폴더"),
+                            )
+                            .clicked()
+                        {
+                            create = Some(b.new_name.trim().to_string());
+                        }
+                    });
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            !at_root && ready,
+                            ui::primary_button_widget(&format!("이 폴더 사용: {path}")),
+                        )
+                        .clicked()
+                    {
+                        choose = true;
+                    }
+                    if ui.button("취소").clicked() {
+                        cancel = true;
+                    }
+                });
+                if at_root {
+                    ui.label(
+                        RichText::new("공유 폴더를 눌러 들어간 뒤 동기화할 폴더를 고르세요.")
+                            .small()
+                            .color(MUTED),
+                    );
+                }
+            });
+        if choose {
+            if let BackendConfig::Synology { folder, .. } = &mut self.cfg.profiles[self.sel].backend
+            {
+                *folder = path.clone();
+            }
+            self.test = None;
+            self.browser = None;
+            return;
+        }
+        if cancel || !open {
+            self.browser = None;
+            return;
+        }
+        if let Some(code) = otp {
+            self.browse(ctx, path, None, Some(code));
+        } else if let Some(name) = create {
+            self.browse(ctx, path, Some(name), None);
+        } else if let Some(p) = go {
+            self.browse(ctx, p, None, None);
+        }
     }
 
     fn start_login(&mut self, ctx: &egui::Context) {
@@ -1028,6 +1274,7 @@ impl App {
     fn backend_fields(&mut self, ui: &mut egui::Ui) {
         let secret = !self.show_secret;
         let mut pick_path = false;
+        let mut pick_nas = false;
         let kind = self.cur().kind;
         egui::Grid::new("backend_fields")
             .num_columns(2)
@@ -1042,20 +1289,32 @@ impl App {
                     ui::field(ui, "NAS 주소", url, false, "https://내NAS주소:5001");
                     ui::field(ui, "아이디", username, false, "DSM 로그인 아이디");
                     ui::field(ui, "비밀번호", password, secret, "");
-                    ui::field(
-                        ui,
-                        "NAS 폴더",
-                        folder,
-                        false,
-                        match kind {
-                            ProfileKind::Obsidian => "/home/Obsidian",
-                            ProfileKind::Folder => "/photo/PC 사진",
-                        },
-                    );
+                    ui.label(RichText::new("NAS 폴더").color(MUTED));
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(folder)
+                                .hint_text(match kind {
+                                    ProfileKind::Obsidian => "/home/Obsidian",
+                                    ProfileKind::Folder => "/photo/PC 사진",
+                                })
+                                .desired_width(ui.available_width().min(420.0) - 130.0),
+                        );
+                        if ui
+                            .add_enabled(
+                                !url.trim().is_empty() && !username.trim().is_empty(),
+                                egui::Button::new("NAS에서 고르기…"),
+                            )
+                            .on_disabled_hover_text("NAS 주소와 아이디를 먼저 입력하세요")
+                            .clicked()
+                        {
+                            pick_nas = true;
+                        }
+                    });
+                    ui.end_row();
                     ui.label("");
                     ui.label(
                         RichText::new(
-                            "공유 폴더 이름부터 적습니다. 없는 하위 폴더는 자동으로 만듭니다.",
+                            "[NAS에서 고르기]로 목록에서 고르면 오타가 없습니다. 직접 적을 때는 공유 폴더 이름부터 적습니다.",
                         )
                         .small()
                         .color(MUTED),
@@ -1137,6 +1396,9 @@ impl App {
                     ui::field(ui, "Drive 폴더", folder, false, "ObsidianSync");
                 }
             });
+        if pick_nas {
+            self.open_browser(ui.ctx());
+        }
         if pick_path {
             if let (Some(p), BackendConfig::LocalFolder { path }) =
                 (platform::pick_folder(), &mut self.cur().backend)
@@ -1385,6 +1647,7 @@ impl eframe::App for App {
             platform::hide_window(self.hwnd);
         }
         ctx.request_repaint_after(Duration::from_millis(700));
+        self.browser_ui(ctx);
         let status = self.service.as_ref().map(|s| s.status());
 
         egui::SidePanel::left("nav")

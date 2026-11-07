@@ -5,6 +5,7 @@
 //! - 업로드: `SYNO.FileStation.Upload` (multipart, 파일을 메모리에 올리지 않고 스트리밍)
 //! - 다운로드: `SYNO.FileStation.Download` (스트리밍)
 //! - 삭제: `SYNO.FileStation.Delete` (공유 폴더에 휴지통이 켜져 있으면 휴지통으로 이동)
+//! - 폴더 선택 화면: `SYNO.FileStation.List`(list_share, 폴더만), `SYNO.FileStation.CreateFolder`
 //!
 //! 변경 감지는 주기적으로 목록을 비교하는 방식(폴링)입니다. 리비전은 `크기-수정시각` 입니다.
 
@@ -34,6 +35,7 @@ const APIS: &[(&str, u32)] = &[
     ("SYNO.FileStation.Upload", 2),
     ("SYNO.FileStation.Download", 2),
     ("SYNO.FileStation.Delete", 2),
+    ("SYNO.FileStation.CreateFolder", 2),
 ];
 
 /// Synology API 오류
@@ -210,6 +212,75 @@ pub fn login(cfg: &BackendConfig, data_dir: &Path, otp: Option<&str>) -> Result<
     b.login(otp.map(str::trim).filter(|s| !s.is_empty()))?;
     b.logout();
     Ok(())
+}
+
+/// 폴더 선택 화면에 보여 줄 NAS 폴더 하나
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct NasFolder {
+    pub name: String,
+    /// NAS 안의 절대경로 (예: `/home/Obsidian`)
+    pub path: String,
+}
+
+/// 폴더 선택 화면용 세션. 저장할 폴더를 아직 모르므로 주소와 계정만 씁니다.
+fn browser(cfg: &BackendConfig, data_dir: &Path) -> Result<SynologyBackend> {
+    let BackendConfig::Synology { url, username, .. } = cfg else {
+        bail!("Synology 설정이 아닙니다");
+    };
+    if url.trim().is_empty() || username.trim().is_empty() {
+        bail!("NAS 주소와 계정을 먼저 입력하세요");
+    }
+    SynologyBackend::new(cfg, data_dir)
+}
+
+/// NAS 폴더 목록. `path`가 비었거나 `/`면 공유 폴더 목록, 아니면 그 아래 하위 폴더 목록입니다.
+/// 로그인(2단계 인증)이 필요하면 [`needs_otp`] 오류가 납니다.
+pub fn list_folders(cfg: &BackendConfig, data_dir: &Path, path: &str) -> Result<Vec<NasFolder>> {
+    let mut b = browser(cfg, data_dir)?;
+    let r = b.folders(path);
+    b.logout();
+    r
+}
+
+/// `parent` 아래에 새 폴더를 만들고 그 경로를 돌려줍니다.
+pub fn create_folder(
+    cfg: &BackendConfig,
+    data_dir: &Path,
+    parent: &str,
+    name: &str,
+) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() || name.contains(['/', '\\', '"']) || name == "." || name == ".." {
+        bail!("폴더 이름에 / \\ \" 는 쓸 수 없습니다");
+    }
+    let parent = norm_root(parent);
+    if parent == "/" {
+        bail!(
+            "공유 폴더는 DSM 제어판에서 만들어야 합니다. 공유 폴더를 먼저 고른 뒤 그 안에 만드세요"
+        );
+    }
+    let mut b = browser(cfg, data_dir)?;
+    let r = b
+        .call(
+            "SYNO.FileStation.CreateFolder",
+            "create",
+            &[
+                ("folder_path", &path_array(&parent)),
+                ("name", &path_array(name)),
+                ("force_parent", "false"),
+            ],
+        )
+        .map(|d| {
+            d.get("folders")
+                .and_then(Value::as_array)
+                .and_then(|a| a.first())
+                .and_then(|f| f.get("path"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("{parent}/{name}"))
+        });
+    b.logout();
+    r
 }
 
 fn api_err(api: &str, v: &Value) -> SynoError {
@@ -454,23 +525,69 @@ impl SynologyBackend {
 
     /// 폴더 하나의 목록 (페이지 단위로 모두 가져옴)
     fn list_dir(&mut self, abs: &str) -> Result<Vec<Value>> {
+        self.list_paged(
+            "list",
+            "files",
+            &[("folder_path", abs), ("additional", r#"["size","time"]"#)],
+        )
+    }
+
+    /// 폴더 선택 화면: 공유 폴더 목록 또는 하위 폴더 목록 (이름순)
+    fn folders(&mut self, path: &str) -> Result<Vec<NasFolder>> {
+        let path = norm_root(path);
+        let items = if path == "/" {
+            self.list_paged("list_share", "shares", &[])?
+        } else {
+            self.list_paged(
+                "list",
+                "files",
+                &[("folder_path", &path), ("filetype", "dir")],
+            )?
+        };
+        let mut out: Vec<NasFolder> = items
+            .iter()
+            .filter(|f| f.get("isdir").and_then(Value::as_bool).unwrap_or(true))
+            .filter_map(|f| {
+                let name = f.get("name").and_then(Value::as_str)?.to_string();
+                if SKIP_DIRS.contains(&name.as_str()) || name.starts_with('@') {
+                    return None;
+                }
+                let p = f
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| {
+                        if path == "/" {
+                            format!("/{name}")
+                        } else {
+                            format!("{path}/{name}")
+                        }
+                    });
+                Some(NasFolder { name, path: p })
+            })
+            .collect();
+        out.sort_by_key(|f| f.name.to_lowercase());
+        Ok(out)
+    }
+
+    /// 페이지 단위로 모두 가져오기 (`key`: 응답의 목록 필드 이름)
+    fn list_paged(
+        &mut self,
+        method: &str,
+        key: &str,
+        params: &[(&str, &str)],
+    ) -> Result<Vec<Value>> {
         let mut out = Vec::new();
         let mut offset = 0usize;
         loop {
             let off = offset.to_string();
             let lim = PAGE.to_string();
-            let data = self.call(
-                "SYNO.FileStation.List",
-                "list",
-                &[
-                    ("folder_path", abs),
-                    ("additional", r#"["size","time"]"#),
-                    ("offset", &off),
-                    ("limit", &lim),
-                ],
-            )?;
+            let mut p: Vec<(&str, &str)> = params.to_vec();
+            p.push(("offset", &off));
+            p.push(("limit", &lim));
+            let data = self.call("SYNO.FileStation.List", method, &p)?;
             let files = data
-                .get("files")
+                .get(key)
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
@@ -850,6 +967,7 @@ mod tests {
                     "SYNO.FileStation.Upload": {"path": "entry.cgi", "minVersion": 1, "maxVersion": 3},
                     "SYNO.FileStation.Download": {"path": "entry.cgi", "minVersion": 1, "maxVersion": 2},
                     "SYNO.FileStation.Delete": {"path": "entry.cgi", "minVersion": 1, "maxVersion": 2},
+                    "SYNO.FileStation.CreateFolder": {"path": "entry.cgi", "minVersion": 1, "maxVersion": 2},
                 })),
             );
         }
@@ -873,8 +991,23 @@ mod tests {
                 }
             }
             ("SYNO.API.Auth", Some("logout")) => (j, ok(Value::Null)),
+            ("SYNO.FileStation.List", Some("list_share")) => {
+                let shares = json!([
+                    {"name": "photo", "path": "/photo", "isdir": true},
+                    {"name": "home", "path": "/home", "isdir": true},
+                ]);
+                (j, ok(json!({"shares": shares, "total": 2, "offset": 0})))
+            }
+            ("SYNO.FileStation.CreateFolder", Some("create")) => {
+                let parent = json_path(&p["folder_path"]);
+                let name = json_path(&p["name"]);
+                let path = format!("{parent}/{name}");
+                f.files.insert(format!("{path}/.keep"), (Vec::new(), 0));
+                (j, ok(json!({"folders": [{"name": name, "path": path}]})))
+            }
             ("SYNO.FileStation.List", Some("list")) => {
                 let dir = p["folder_path"].clone();
+                let dirs_only = p.get("filetype").map(String::as_str) == Some("dir");
                 let prefix = format!("{dir}/");
                 if !f.files.keys().any(|k| k.starts_with(&prefix)) {
                     return (j, fail(408));
@@ -897,7 +1030,10 @@ mod tests {
                         }
                     }
                 }
-                let mut all: Vec<Value> = entries.into_values().collect();
+                let mut all: Vec<Value> = entries
+                    .into_values()
+                    .filter(|e| !dirs_only || e["isdir"] == json!(true))
+                    .collect();
                 all.sort_by_key(|v| v["name"].as_str().unwrap().to_string());
                 let off: usize = p["offset"].parse().unwrap();
                 let lim: usize = 1; // 페이지 처리 검증용으로 1개씩
@@ -1072,5 +1208,29 @@ mod tests {
 
         let logins = fake.lock().unwrap().logins.clone();
         assert!(logins.iter().any(|l| l.contains("DEV1")), "{logins:?}");
+
+        // 폴더 선택: 공유 폴더 → 하위 폴더 → 새 폴더
+        let browse = cfg(&url, "");
+        let shares = list_folders(&browse, dir.path(), "").unwrap();
+        let names: Vec<&str> = shares.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["home", "photo"]);
+        let sub = list_folders(&browse, dir.path(), "/home/Obsidian").unwrap();
+        assert_eq!(
+            sub,
+            vec![NasFolder {
+                name: "사진".into(),
+                path: "/home/Obsidian/사진".into()
+            }]
+        );
+        let made = create_folder(&browse, dir.path(), "/home/Obsidian", "새 노트").unwrap();
+        assert_eq!(made, "/home/Obsidian/새 노트");
+        assert_eq!(
+            list_folders(&browse, dir.path(), "/home/Obsidian")
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(create_folder(&browse, dir.path(), "/", "x").is_err());
+        assert!(create_folder(&browse, dir.path(), "/home", "a/b").is_err());
     }
 }

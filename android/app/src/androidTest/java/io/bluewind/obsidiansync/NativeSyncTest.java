@@ -122,6 +122,8 @@ public final class NativeSyncTest {
         assertFalse(new JSONObject(Native.testConnection(b, dir)).getBoolean("ok"));
         assertFalse(new JSONObject(Native.synologyLogin(b, dir, "123456")).getBoolean("ok"));
         assertFalse(Native.synologyRemembered(b, dir));
+        assertFalse(new JSONObject(Native.synologyFolders(b, dir, "")).getBoolean("ok"));
+        assertFalse(new JSONObject(Native.synologyCreateFolder(b, dir, "/home", "x")).getBoolean("ok"));
     }
 
     @Test public void invalidConfigFailsWithoutCrashingJvm() throws Exception {
