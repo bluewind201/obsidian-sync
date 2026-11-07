@@ -7,8 +7,8 @@ mod ui;
 use eframe::egui::{self, RichText};
 use obsidian_sync_core::backend::synology;
 use obsidian_sync_core::{
-    auth, service, AppConfig, BackendConfig, Profile, ProfileKind, ServiceStatus, SyncMode,
-    SyncService,
+    auth, service, AppConfig, BackendConfig, ConflictPolicy, Profile, ProfileKind, ServiceStatus,
+    SyncMode, SyncService,
 };
 use platform::SharedTrigger;
 use std::collections::HashMap;
@@ -867,23 +867,66 @@ impl App {
         let mut reset = false;
         let mut delete = false;
         ui::step_card(ui, 5, "동기화 방식", true, |ui| {
+            ui.label(RichText::new("동기화 방향").strong());
             ui.radio_value(
                 &mut p.mode,
                 SyncMode::TwoWay,
-                "양방향 동기화 — 어느 쪽에서 바꿔도 서로 맞춥니다",
+                "양방향 — 어느 쪽에서 바꿔도 서로 맞춥니다",
             );
             ui.radio_value(
                 &mut p.mode,
                 SyncMode::UploadOnly,
-                "백업 (올리기만) — 이 PC → 저장소로만 올리고, 저장소 파일은 지우지 않습니다",
+                "올리기만 (백업) — 이 PC의 변경만 저장소로 올립니다",
+            );
+            ui.radio_value(
+                &mut p.mode,
+                SyncMode::DownloadOnly,
+                "내려받기만 — 저장소의 변경만 이 PC로 받습니다. 이 PC에서 고친 내용은 올리지 않습니다",
             );
             ui.add_space(4.0);
-            if p.mode == SyncMode::TwoWay {
-                ui.checkbox(
-                    &mut p.propagate_deletes,
-                    "삭제도 동기화 (지워진 파일은 폴더 안 .trash 로 이동)",
-                );
+            match p.mode {
+                SyncMode::TwoWay => {
+                    ui.checkbox(
+                        &mut p.propagate_deletes,
+                        "삭제도 동기화 (지워진 파일은 폴더 안 .trash 로 이동)",
+                    );
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("데이터 기준 (양쪽이 모두 바뀌었을 때)").strong());
+                    ui.radio_value(
+                        &mut p.conflict_policy,
+                        ConflictPolicy::KeepBoth,
+                        "둘 다 보존 — 이 PC 쪽은 '(충돌 …)' 사본으로 남깁니다 (Synology Drive와 같은 방식)",
+                    );
+                    ui.radio_value(
+                        &mut p.conflict_policy,
+                        ConflictPolicy::PreferLocal,
+                        "이 PC 기준 — 이 PC 내용으로 저장소를 덮어씁니다",
+                    );
+                    ui.radio_value(
+                        &mut p.conflict_policy,
+                        ConflictPolicy::PreferRemote,
+                        "저장소 기준 — 저장소 내용으로 덮어씁니다 (이전 내용은 .trash 에 보관)",
+                    );
+                }
+                SyncMode::UploadOnly => {
+                    ui.checkbox(
+                        &mut p.delete_in_target,
+                        "이 PC에서 지운 파일은 저장소에서도 지우기 (끄면 저장소에 남음)",
+                    );
+                }
+                SyncMode::DownloadOnly => {
+                    ui.checkbox(
+                        &mut p.delete_in_target,
+                        "저장소에서 지운 파일은 이 PC에서도 지우기 (.trash 로 이동, 끄면 이 PC에 남음)",
+                    );
+                    ui.label(
+                        RichText::new("처음 연결할 때 내용이 다른 파일은 저장소 기준으로 맞추고, 이 PC 파일은 .trash 에 보관합니다.")
+                            .small()
+                            .color(MUTED),
+                    );
+                }
             }
+            ui.add_space(4.0);
             if p.kind == ProfileKind::Obsidian {
                 ui.checkbox(
                     &mut p.sync_obsidian_folder,

@@ -28,7 +28,7 @@ HTTP는 `ureq` + rustls(webpki 루트 내장)라 Windows/Android 모두 시스�
 ## 설정과 프로필
 
 `AppConfig { profiles: [Profile], poll_interval_secs, debounce_ms, watch_local, start_on_launch, device_name }`.
-`Profile`은 `id, name, enabled, kind(obsidian|folder), local_path, backend, mode(two_way|upload_only), propagate_deletes, sync_obsidian_folder, ignore_patterns`.
+`Profile`은 `id, name, enabled, kind(obsidian|folder), local_path, backend, mode(two_way|upload_only|download_only), propagate_deletes, delete_in_target, conflict_policy(keep_both|prefer_local|prefer_remote), sync_obsidian_folder, ignore_patterns`.
 이전 형식(`vault_path` + `backend`, WebDAV)은 `AppConfig::from_json`이 읽을 때 프로필 1개로 자동 변환합니다.
 `SyncService`는 켜진 프로필마다 작업 스레드와 파일 감시를 하나씩 둡니다. 동기화 기록은 `로컬 폴더 + 저장소 id`별 파일에 저장됩니다.
 
@@ -48,11 +48,14 @@ HTTP는 `ureq` + rustls(webpki 루트 내장)라 Windows/Android 모두 시스�
 - 다운로드는 임시 파일 + rename. 스캔 이후 로컬이 바뀌었으면 덮어쓰지 않고 다음 회차로 미룹니다.
 - 원격/볼트가 갑자기 비었거나, 기록된 파일의 절반 이상(20개 초과)이 삭제될 상황이면 중단합니다.
 - 원격 rev가 형식만 바뀐 경우 내려받아 해시가 같으면 기록만 갱신합니다.
-- **백업 모드**(`upload_only`)는 로컬 → 원격 업로드만 합니다. 원격 변경·삭제는 무시하고 원격 파일을 지우지 않습니다. 첫 동기화 때 원격에 같은 크기 파일이 있으면 업로드 없이 기록만 합니다.
+- **백업 모드**(`upload_only`)는 로컬 → 원격 업로드만 합니다. 원격 변경·삭제는 무시하고 원격 파일을 지우지 않습니다. 첫 동기화 때 원격에 같은 크기 파일이 있으면 업로드 없이 기록만 합니다. `delete_in_target`을 켜면 로컬 삭제를 원격에도 반영합니다.
+- **내려받기 모드**(`download_only`)는 원격이 기준입니다. 로컬 전용 파일과 로컬 수정은 올리지 않고, 원격과 내용이 다르면 원격으로 교체(`Replace`)하면서 이전 로컬 내용은 `.trash`에 보관합니다. 로컬에서 지운 파일은 다시 받습니다. 원격 삭제는 `delete_in_target`이 켜졌을 때만 로컬에서 `.trash`로 옮깁니다.
+- **데이터 기준**(`conflict_policy`, 양방향 전용): `keep_both`는 충돌 사본을 만들고, `prefer_local`은 로컬로 원격을 덮어쓰며, `prefer_remote`는 원격으로 로컬을 교체합니다(이전 로컬은 `.trash`).
+- 빈 쪽 안전장치는 그 방향의 삭제가 실제로 일어날 수 있는 모드(양방향, 또는 `delete_in_target`을 켠 단방향)에서만 동작합니다.
 
 ## 테스트
 
-- `crates/core/tests/sync.rs`: 두 기기 왕복, 충돌, 삭제/휴지통, 빈 원격 안전장치, 여러 프로필, 백업 모드, 대용량 파일 스트리밍
+- `crates/core/tests/sync.rs`: 두 기기 왕복, 충돌, 삭제/휴지통, 빈 원격 안전장치, 여러 프로필, 백업 모드, 내려받기 모드, 데이터 기준, 대용량 파일 스트리밍
 - `backend/synology.rs`: 가짜 DSM 서버로 OTP·기기 토큰 로그인, 페이지 목록, multipart 업로드, 다운로드, 세션 만료 재로그인, 삭제 검증
 - S3 서명은 AWS 공식 예제 값으로 검증
 - Android 에뮬레이터: JNI 왕복, 실시간 감시 업로드, 잘못된 설정 처리, 화면 실행

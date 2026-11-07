@@ -1,5 +1,7 @@
 //! 로컬 폴더 백엔드를 원격 삼아 두 기기(A, B) 간 동기화를 검증
-use obsidian_sync_core::{AppConfig, BackendConfig, Profile, ProfileKind, SyncEngine, SyncMode};
+use obsidian_sync_core::{
+    AppConfig, BackendConfig, ConflictPolicy, Profile, ProfileKind, SyncEngine, SyncMode,
+};
 use std::fs;
 use std::path::Path;
 
@@ -240,4 +242,113 @@ fn large_file_streams() {
         .filter(|d| d.file_name().to_string_lossy().starts_with(".obsync-tmp-"))
         .collect();
     assert!(leftovers.is_empty());
+}
+
+#[test]
+fn upload_only_can_mirror_deletes() {
+    let e = env();
+    let mut p = profile(&e.a, &e.remote);
+    p.mode = SyncMode::UploadOnly;
+    p.delete_in_target = true;
+    let mut ea = SyncEngine::new(p, "PC", &e.data_a).unwrap();
+    write(&e.a.join("x.jpg"), "x");
+    ea.sync_once(&noop).unwrap();
+    fs::remove_file(e.a.join("x.jpg")).unwrap();
+    assert_eq!(ea.sync_once(&noop).unwrap().deleted_remote, 1);
+    assert!(!e.remote.join("x.jpg").exists());
+}
+
+#[test]
+fn download_only_mode() {
+    let e = env();
+    let mut p = profile(&e.b, &e.remote);
+    p.mode = SyncMode::DownloadOnly;
+    let mut eb = SyncEngine::new(p.clone(), "Phone", &e.data_b).unwrap();
+
+    write(&e.remote.join("doc/a.md"), "from nas");
+    write(&e.remote.join("same.md"), "same");
+    write(&e.b.join("same.md"), "same");
+    write(&e.b.join("diff.md"), "local version!!");
+    write(&e.remote.join("diff.md"), "nas version");
+    write(&e.b.join("local-only.md"), "mine");
+    let r = eb.sync_once(&noop).unwrap();
+    assert_eq!(r.uploaded, 0, "{r:?}");
+    assert_eq!(
+        fs::read_to_string(e.b.join("doc/a.md")).unwrap(),
+        "from nas"
+    );
+    // 처음 연결 때 내용이 다르면 저장소 기준, 내 기기 파일은 .trash 보관
+    assert_eq!(
+        fs::read_to_string(e.b.join("diff.md")).unwrap(),
+        "nas version"
+    );
+    assert_eq!(
+        fs::read_to_string(e.b.join(".trash/diff.md")).unwrap(),
+        "local version!!"
+    );
+    // 내 기기에만 있는 파일은 올리지 않음
+    assert!(!e.remote.join("local-only.md").exists());
+    assert_eq!(eb.sync_once(&noop).unwrap().changes(), 0);
+
+    // 내 기기에서 고쳐도 올리지 않음
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    write(&e.b.join("doc/a.md"), "edited on phone");
+    assert_eq!(eb.sync_once(&noop).unwrap().uploaded, 0);
+    assert_eq!(
+        fs::read_to_string(e.remote.join("doc/a.md")).unwrap(),
+        "from nas"
+    );
+
+    // 원격에서 지워도 기본값은 내 기기에 남김
+    fs::remove_file(e.remote.join("same.md")).unwrap();
+    eb.sync_once(&noop).unwrap();
+    assert!(e.b.join("same.md").exists());
+
+    // 옵션을 켜면 원격 삭제를 따라감 (.trash로 이동)
+    p.delete_in_target = true;
+    let mut eb = SyncEngine::new(p, "Phone", &e.data_b).unwrap();
+    write(&e.remote.join("gone.md"), "g");
+    eb.sync_once(&noop).unwrap();
+    fs::remove_file(e.remote.join("gone.md")).unwrap();
+    assert_eq!(eb.sync_once(&noop).unwrap().deleted_local, 1);
+    assert!(e.b.join(".trash/gone.md").exists());
+}
+
+#[test]
+fn conflict_policies() {
+    for policy in [ConflictPolicy::PreferLocal, ConflictPolicy::PreferRemote] {
+        let e = env();
+        let mut pa = profile(&e.a, &e.remote);
+        pa.conflict_policy = policy;
+        let mut pb = profile(&e.b, &e.remote);
+        pb.conflict_policy = policy;
+        let mut ea = SyncEngine::new(pa, "PC", &e.data_a).unwrap();
+        let mut eb = SyncEngine::new(pb, "Phone", &e.data_b).unwrap();
+        write(&e.a.join("x.md"), "base");
+        ea.sync_once(&noop).unwrap();
+        eb.sync_once(&noop).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write(&e.a.join("x.md"), "A edit");
+        write(&e.b.join("x.md"), "B edit");
+        ea.sync_once(&noop).unwrap();
+        let r = eb.sync_once(&noop).unwrap();
+        assert_eq!(r.conflicts, 0, "{policy:?} {r:?}");
+        let expected = match policy {
+            ConflictPolicy::PreferLocal => "B edit",
+            _ => "A edit",
+        };
+        assert_eq!(fs::read_to_string(e.b.join("x.md")).unwrap(), expected);
+        assert_eq!(fs::read_to_string(e.remote.join("x.md")).unwrap(), expected);
+        if policy == ConflictPolicy::PreferRemote {
+            assert_eq!(
+                fs::read_to_string(e.b.join(".trash/x.md")).unwrap(),
+                "B edit"
+            );
+        }
+        // 충돌 사본은 만들지 않음
+        assert!(!fs::read_dir(&e.b)
+            .unwrap()
+            .filter_map(|d| d.ok())
+            .any(|d| d.file_name().to_string_lossy().contains("충돌")));
+    }
 }

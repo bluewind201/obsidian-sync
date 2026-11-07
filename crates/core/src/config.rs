@@ -56,6 +56,14 @@ pub struct Profile {
     /// 한쪽에서 삭제된 파일을 다른 쪽에서도 삭제할지 여부 (양방향 모드에서만 사용)
     #[serde(default = "default_true")]
     pub propagate_deletes: bool,
+    /// 한 방향 모드에서 원본 쪽에서 지운 파일을 대상 쪽에서도 지울지 여부
+    /// (올리기만: 내 기기에서 지우면 원격도 삭제 / 내려받기만: 원격에서 지우면 내 기기도 삭제).
+    /// Synology Cloud Sync의 "원본에서 삭제된 파일을 대상에서 삭제하지 않음" 옵션의 반대입니다.
+    #[serde(default)]
+    pub delete_in_target: bool,
+    /// 데이터 기준: 양쪽이 모두 바뀌었거나 처음 연결할 때 양쪽에 같은 이름의 다른 파일이 있을 때
+    #[serde(default)]
+    pub conflict_policy: ConflictPolicy,
     /// `.obsidian` 설정 폴더(플러그인, 테마 등)도 동기화할지 여부 (Obsidian 볼트에서만 사용)
     #[serde(default = "default_true")]
     pub sync_obsidian_folder: bool,
@@ -80,15 +88,41 @@ pub enum SyncMode {
     /// 양방향 동기화
     #[default]
     TwoWay,
-    /// 백업: 내 기기 → 원격으로 올리기만 함. 원격 파일은 지우거나 내려받지 않음
+    /// 올리기만 (백업): 내 기기 → 원격. 원격 변경은 내려받지 않음
     UploadOnly,
+    /// 내려받기만: 원격 → 내 기기. 내 기기 변경은 올리지 않음
+    DownloadOnly,
+}
+
+/// 데이터 기준 (충돌 시 어느 쪽을 따를지)
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictPolicy {
+    /// 둘 다 보존: 원격본을 원래 이름으로, 내 기기 쪽은 `(충돌 …)` 사본으로 남김 (Synology Drive 방식)
+    #[default]
+    KeepBoth,
+    /// 내 기기 기준: 내 기기 내용으로 원격을 덮어씀
+    PreferLocal,
+    /// 원격 기준: 원격 내용으로 내 기기를 덮어씀 (덮어쓰기 전 파일은 `.trash`에 보관)
+    PreferRemote,
+}
+
+impl ConflictPolicy {
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            ConflictPolicy::KeepBoth => "둘 다 보존",
+            ConflictPolicy::PreferLocal => "내 기기 기준",
+            ConflictPolicy::PreferRemote => "저장소 기준",
+        }
+    }
 }
 
 impl SyncMode {
     pub fn display_name(&self) -> &'static str {
         match self {
             SyncMode::TwoWay => "양방향 동기화",
-            SyncMode::UploadOnly => "백업 (올리기만)",
+            SyncMode::UploadOnly => "올리기만 (백업)",
+            SyncMode::DownloadOnly => "내려받기만",
         }
     }
 }

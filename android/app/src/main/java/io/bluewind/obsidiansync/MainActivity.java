@@ -85,8 +85,9 @@ public final class MainActivity extends Activity {
     private LinearLayout fieldBox, loginBox, otpBox;
     private TextView localPath, testResult;
     private EditText nameEdit, ignoreEdit, otpEdit;
-    private RadioButton kindObsidian, modeTwoWay;
-    private CheckBox chkEnabled, chkDeletes, chkObsidian;
+    private RadioButton kindObsidian, modeTwoWay, modeUp, modeDown, polKeepBoth, polLocal, polRemote;
+    private CheckBox chkEnabled, chkDeletes, chkObsidian, chkTarget;
+    private LinearLayout twoWayBox;
     private boolean loggingIn;
 
     // ─────────────────────────── 시작 ───────────────────────────
@@ -238,7 +239,8 @@ public final class MainActivity extends Activity {
         top.addView(on);
         r.addView(top);
         String kind = "folder".equals(p.optString("kind")) ? "폴더" : "Obsidian";
-        String mode = "upload_only".equals(p.optString("mode")) ? "백업 (올리기만)" : "양방향";
+        String mode = "upload_only".equals(p.optString("mode")) ? "올리기만 (백업)"
+                : "download_only".equals(p.optString("mode")) ? "내려받기만" : "양방향";
         r.addView(text(kind + " · " + mode, 12, MUTED));
         r.addView(text(p.optString("local_path") + "  ⇄  " + backendSummary(p.optJSONObject("backend")), 13, TEXT));
         TextView line = text("", 13, MUTED);
@@ -283,6 +285,8 @@ public final class MainActivity extends Activity {
             p.put("enabled", true);
             p.put("mode", kind.equals("obsidian") ? "two_way" : "upload_only");
             p.put("propagate_deletes", kind.equals("obsidian"));
+            p.put("delete_in_target", false);
+            p.put("conflict_policy", "keep_both");
             p.put("sync_obsidian_folder", true);
             if (kind.equals("folder")) p.put("local_path", Environment.getExternalStorageDirectory().getAbsolutePath() + "/DCIM/Camera");
             // 같은 NAS를 쓰는 경우가 많으므로 기존 Synology 계정을 복사 (폴더만 비움)
@@ -403,18 +407,39 @@ public final class MainActivity extends Activity {
 
         // ⑤ 동기화 방식
         LinearLayout c5 = step(root, "5", "동기화 방식");
+        c5.addView(label("동기화 방향"));
         RadioGroup modes = new RadioGroup(this);
         modeTwoWay = radio("양방향 — 어느 쪽에서 바꿔도 서로 맞춥니다");
-        RadioButton modeUp = radio("백업 (올리기만) — 휴대폰 → 저장소로만 올립니다. 휴대폰에서 지워도 저장소에는 남습니다");
+        modeUp = radio("올리기만 (백업) — 휴대폰 → 저장소로만 올립니다");
+        modeDown = radio("내려받기만 — 저장소 → 휴대폰으로만 받습니다. 휴대폰에서 바꾼 내용은 올리지 않습니다");
         modes.addView(modeTwoWay);
         modes.addView(modeUp);
-        boolean two = !"upload_only".equals(edit.optString("mode"));
-        (two ? modeTwoWay : modeUp).setChecked(true);
-        modes.setOnCheckedChangeListener((g, id) -> chkDeletes.setVisibility(modeTwoWay.isChecked() ? View.VISIBLE : View.GONE));
+        modes.addView(modeDown);
+        String m = edit.optString("mode", "two_way");
+        ("upload_only".equals(m) ? modeUp : "download_only".equals(m) ? modeDown : modeTwoWay).setChecked(true);
         c5.addView(modes);
+
+        twoWayBox = new LinearLayout(this);
+        twoWayBox.setOrientation(LinearLayout.VERTICAL);
         chkDeletes = check("삭제도 동기화 (지워진 파일은 폴더 안 .trash 로 이동)", edit.optBoolean("propagate_deletes", true));
-        chkDeletes.setVisibility(two ? View.VISIBLE : View.GONE);
-        c5.addView(chkDeletes);
+        twoWayBox.addView(chkDeletes);
+        twoWayBox.addView(label("데이터 기준 (양쪽이 모두 바뀌었을 때)"));
+        RadioGroup policies = new RadioGroup(this);
+        polKeepBoth = radio("둘 다 보존 — 저장소 쪽을 이름 바꾼 사본(충돌 사본)으로 함께 둡니다");
+        polLocal = radio("내 기기 기준 — 이 휴대폰의 내용으로 저장소를 덮어씁니다");
+        polRemote = radio("저장소 기준 — 저장소 내용으로 덮어쓰고, 이 휴대폰의 이전 내용은 .trash 에 보관합니다");
+        policies.addView(polKeepBoth);
+        policies.addView(polLocal);
+        policies.addView(polRemote);
+        String pol = edit.optString("conflict_policy", "keep_both");
+        ("prefer_local".equals(pol) ? polLocal : "prefer_remote".equals(pol) ? polRemote : polKeepBoth).setChecked(true);
+        twoWayBox.addView(policies);
+        c5.addView(twoWayBox);
+
+        chkTarget = check("", edit.optBoolean("delete_in_target", false));
+        c5.addView(chkTarget);
+        updateModeOptions();
+        modes.setOnCheckedChangeListener((g, id) -> updateModeOptions());
         chkObsidian = check(".obsidian 설정 폴더도 동기화 (플러그인, 테마)", edit.optBoolean("sync_obsidian_folder", true));
         chkObsidian.setVisibility(isObsidian ? View.VISIBLE : View.GONE);
         c5.addView(chkObsidian);
@@ -526,6 +551,18 @@ public final class MainActivity extends Activity {
     }
 
     /** 편집 중인 내용을 프로필 JSON으로 */
+    /** 동기화 방향에 맞는 옵션만 보여 줍니다. */
+    private void updateModeOptions() {
+        boolean two = modeTwoWay.isChecked();
+        twoWayBox.setVisibility(two ? View.VISIBLE : View.GONE);
+        chkTarget.setVisibility(two ? View.GONE : View.VISIBLE);
+        if (modeUp.isChecked()) {
+            chkTarget.setText("휴대폰에서 지운 파일은 저장소에서도 지우기 (끄면 저장소에 남음)");
+        } else if (modeDown.isChecked()) {
+            chkTarget.setText("저장소에서 지운 파일은 휴대폰에서도 지우기 (.trash 로 이동, 끄면 휴대폰에 남음)");
+        }
+    }
+
     private JSONObject profileJson() throws Exception {
         JSONObject p = new JSONObject(edit.toString());
         p.put("name", nameEdit.getText().toString().trim());
@@ -533,8 +570,10 @@ public final class MainActivity extends Activity {
         p.put("enabled", chkEnabled.isChecked());
         p.put("local_path", localPath.getText().toString().trim());
         p.put("backend", backendJson());
-        p.put("mode", modeTwoWay.isChecked() ? "two_way" : "upload_only");
+        p.put("mode", modeUp.isChecked() ? "upload_only" : modeDown.isChecked() ? "download_only" : "two_way");
         p.put("propagate_deletes", chkDeletes.isChecked());
+        p.put("conflict_policy", polLocal.isChecked() ? "prefer_local" : polRemote.isChecked() ? "prefer_remote" : "keep_both");
+        p.put("delete_in_target", chkTarget.isChecked());
         p.put("sync_obsidian_folder", chkObsidian.isChecked());
         JSONArray ig = new JSONArray();
         for (String l : ignoreEdit.getText().toString().split("\n")) if (!l.trim().isEmpty()) ig.put(l.trim());
