@@ -11,7 +11,7 @@
     <!-- GitHub 릴리즈에서 받은 새 버전을 앱이 직접 설치 (자동 업데이트) -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
     <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION"/>
-    <application android:label="Obsidian Sync" android:icon="@android:drawable/stat_notify_sync"
+    <application android:label="Obsidian Sync" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher_round"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:allowBackup="false" android:usesCleartextTraffic="true" android:supportsRtl="true">
         <activity android:name=".MainActivity" android:exported="true" android:windowSoftInputMode="adjustResize">
