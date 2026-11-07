@@ -8,15 +8,15 @@
 //! - 양쪽 모두 수정된 경우 로컬 파일을 `이름 (충돌 기기 날짜).md` 로 보존
 //! - 원격/로컬이 갑자기 비었거나 대량 삭제가 예정되면 동기화 중단
 
-use crate::backend::{self, local::write_atomic, Backend, RemoteEntry};
-use crate::config::AppConfig;
+use crate::backend::{self, Backend, RemoteEntry};
+use crate::config::{Profile, SyncMode};
 use crate::scan::{self, mtime_ms, Ignore, LocalFile};
 use crate::state::{FileState, SyncState};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -71,10 +71,12 @@ enum Action {
     Conflict,
     Forget,
     Touch,
+    /// 원격에 이미 있는 같은 파일을 동기화된 것으로 기록 (백업 모드 첫 동기화)
+    Adopt,
 }
 
 pub struct SyncEngine {
-    cfg: AppConfig,
+    cfg: Profile,
     vault: PathBuf,
     backend: Box<dyn Backend>,
     ignore: Ignore,
@@ -101,27 +103,46 @@ pub fn hash_file(path: &Path) -> Result<String> {
     Ok(hex::encode(h.finalize()))
 }
 
+/// 쓰면서 sha256을 계산하는 Writer
+struct HashWriter<W: Write> {
+    inner: W,
+    hasher: Sha256,
+}
+
+impl<W: Write> Write for HashWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.hasher.update(&buf[..n]);
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 fn state_file(data_dir: &Path, vault: &str, backend_id: &str) -> PathBuf {
     let key = hash_bytes(format!("{vault}\n{backend_id}").as_bytes());
     data_dir.join(format!("state-{}.json", &key[..16]))
 }
 
 impl SyncEngine {
-    pub fn new(cfg: AppConfig, data_dir: &Path) -> Result<Self> {
-        cfg.validate()?;
+    /// 프로필 하나의 동기화 엔진. `device`는 충돌 파일 이름에 붙일 기기 이름
+    pub fn new(cfg: Profile, device: &str, data_dir: &Path) -> Result<Self> {
+        cfg.validate(true)?;
         let backend = backend::create_backend(&cfg.backend, data_dir)?;
-        Self::with_backend(cfg, backend, data_dir)
+        Self::with_backend(cfg, device, backend, data_dir)
     }
 
     pub fn with_backend(
-        cfg: AppConfig,
+        cfg: Profile,
+        device: &str,
         backend: Box<dyn Backend>,
         data_dir: &Path,
     ) -> Result<Self> {
-        let vault = PathBuf::from(cfg.vault_path.trim());
+        let vault = PathBuf::from(cfg.local_path.trim());
         let ignore = Ignore::new(&cfg).context("제외 패턴 오류")?;
         let id = backend.id();
-        let state_path = state_file(data_dir, &cfg.vault_path, &id);
+        let state_path = state_file(data_dir, &cfg.local_path, &id);
         let mut state = SyncState::load(&state_path);
         if state.backend_id != id {
             state = SyncState {
@@ -129,11 +150,7 @@ impl SyncEngine {
                 ..Default::default()
             };
         }
-        let device = cfg
-            .effective_device_name()
-            .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-            .collect();
+        let device = device.to_string();
         Ok(Self {
             cfg,
             vault,
@@ -152,6 +169,10 @@ impl SyncEngine {
         Ok(())
     }
 
+    pub fn profile(&self) -> &Profile {
+        &self.cfg
+    }
+
     pub fn is_ignored(&self, rel: &str) -> bool {
         self.ignore.is_ignored(rel)
     }
@@ -167,7 +188,7 @@ impl SyncEngine {
     pub fn sync_once(&mut self, log: &dyn Fn(&str)) -> Result<SyncReport> {
         let started = Instant::now();
         if !self.vault.is_dir() {
-            bail!("볼트 폴더를 찾을 수 없습니다: {}", self.vault.display());
+            bail!("폴더를 찾을 수 없습니다: {}", self.vault.display());
         }
         let mut report = SyncReport::default();
 
@@ -204,17 +225,18 @@ impl SyncEngine {
             .map(|e| (e.path.clone(), e))
             .collect();
 
-        // 3) 안전장치
+        // 3) 안전장치 (백업 모드는 아무것도 지우지 않으므로 생략)
         let known = self.state.files.len();
-        if known >= 5 && remote.is_empty() && !local.is_empty() {
+        let two_way = self.cfg.mode == SyncMode::TwoWay;
+        if two_way && known >= 5 && remote.is_empty() && !local.is_empty() {
             bail!(
                 "원격 저장소가 비어 있습니다. 설정이 바뀌었거나 원격 파일이 지워진 것 같아 안전을 위해 중단했습니다. \
                  의도한 경우 '동기화 기록 초기화'를 눌러 주세요"
             );
         }
-        if known >= 5 && local.is_empty() && !remote.is_empty() {
+        if two_way && known >= 5 && local.is_empty() && !remote.is_empty() {
             bail!(
-                "볼트 폴더가 비어 있습니다. 안전을 위해 중단했습니다. 의도한 경우 '동기화 기록 초기화'를 눌러 주세요"
+                "내 폴더가 비어 있습니다. 안전을 위해 중단했습니다. 의도한 경우 '동기화 기록 초기화'를 눌러 주세요"
             );
         }
 
@@ -242,6 +264,29 @@ impl SyncEngine {
                 (Some(_), None) => true,
                 _ => false,
             };
+            if !two_way {
+                // 백업: 로컬 → 원격만. 원격 변경/삭제는 로컬에 반영하지 않고, 원격은 지우지 않음
+                let action = match (l, r, s) {
+                    (Some(lf), Some(rf), None) => {
+                        // 이미 올라가 있는 파일(크기 같음)은 다시 올리지 않고 기록만 함
+                        if lf.size == rf.size {
+                            Action::Adopt
+                        } else {
+                            Action::Upload
+                        }
+                    }
+                    (Some(_), None, _) => Action::Upload,
+                    (Some(_), Some(_), Some(_)) if lchanged => Action::Upload,
+                    (Some(lf), Some(_), Some(s)) if s.size != lf.size || s.mtime != lf.mtime => {
+                        Action::Touch
+                    }
+                    (Some(_), Some(_), Some(_)) => continue,
+                    (None, _, Some(_)) => Action::Forget,
+                    (None, _, None) => continue,
+                };
+                plan.push((p.clone(), action));
+                continue;
+            }
             let propagate = self.cfg.propagate_deletes;
             let action = match (l, r, s) {
                 (Some(_), None, None) => Action::Upload,
@@ -330,6 +375,11 @@ impl SyncEngine {
                     self.state.files.remove(&p);
                     Ok(())
                 }
+                Action::Adopt => {
+                    let rev = remote[&p].rev.clone();
+                    let h = local_hash[&p].clone();
+                    self.record(&p, h, rev)
+                }
                 Action::Touch => {
                     if let (Some(lf), Some(s)) = (local.get(&p), self.state.files.get_mut(&p)) {
                         s.size = lf.size;
@@ -369,10 +419,36 @@ impl SyncEngine {
     }
 
     fn do_upload(&mut self, p: &str) -> Result<()> {
-        let data = std::fs::read(self.full(p))?;
-        let hash = hash_bytes(&data);
-        let entry = self.backend.upload(p, &data)?;
+        let full = self.full(p);
+        let hash = hash_file(&full)?;
+        let entry = self.backend.upload_file(p, &full)?;
         self.record(p, hash, entry.rev)
+    }
+
+    /// 원격 파일을 같은 폴더의 임시파일로 내려받고 (임시파일 경로, sha256) 반환
+    fn fetch(&mut self, p: &str) -> Result<(PathBuf, String)> {
+        let full = self.full(p);
+        if let Some(d) = full.parent() {
+            std::fs::create_dir_all(d)?;
+        }
+        let tmp = backend::local::temp_path(&full);
+        let res = (|| {
+            let file = std::fs::File::create(&tmp)?;
+            let mut w = HashWriter {
+                inner: std::io::BufWriter::with_capacity(256 * 1024, file),
+                hasher: Sha256::new(),
+            };
+            self.backend.download_to(p, &mut w)?;
+            w.flush()?;
+            Ok::<_, anyhow::Error>(hex::encode(w.hasher.finalize()))
+        })();
+        match res {
+            Ok(h) => Ok((tmp, h)),
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                Err(e)
+            }
+        }
     }
 
     /// 다운로드. 스캔 이후 로컬 파일이 바뀌었으면 덮어쓰지 않고 건너뜀 (false 반환)
@@ -383,18 +459,21 @@ impl SyncEngine {
         expected: Option<&LocalFile>,
     ) -> Result<bool> {
         let full = self.full(p);
-        let data = self.backend.download(p)?;
-        let hash = hash_bytes(&data);
-        match (std::fs::metadata(&full), expected) {
-            (Ok(m), Some(e)) if m.len() != e.size || mtime_ms(&m) != e.mtime => {
-                return Ok(false);
-            }
-            (Ok(_), None) => return Ok(false),
-            _ => {}
+        let (tmp, hash) = self.fetch(p)?;
+        let changed_meanwhile = match (std::fs::metadata(&full), expected) {
+            (Ok(m), Some(e)) => m.len() != e.size || mtime_ms(&m) != e.mtime,
+            (Ok(_), None) => true,
+            _ => false,
+        };
+        if changed_meanwhile {
+            let _ = std::fs::remove_file(&tmp);
+            return Ok(false);
         }
         let same = full.is_file() && hash_file(&full).map(|h| h == hash).unwrap_or(false);
-        if !same {
-            write_atomic(&full, &data)?;
+        if same {
+            let _ = std::fs::remove_file(&tmp);
+        } else {
+            backend::local::replace_file(&tmp, &full)?;
         }
         self.record(p, hash, r.rev.clone())?;
         Ok(!same)
@@ -460,22 +539,25 @@ impl SyncEngine {
         r: &RemoteEntry,
         local_hash: &str,
     ) -> Result<Option<String>> {
-        let data = self.backend.download(p)?;
-        let rhash = hash_bytes(&data);
+        let (tmp, rhash) = self.fetch(p)?;
         if rhash == local_hash {
+            let _ = std::fs::remove_file(&tmp);
             self.record(p, rhash, r.rev.clone())?;
             return Ok(None);
         }
         let full = self.full(p);
         let cname = self.conflict_name(p);
         let cfull = self.full(&cname);
-        std::fs::rename(&full, &cfull)?;
-        write_atomic(&full, &data)?;
+        if let Err(e) = std::fs::rename(&full, &cfull) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+        backend::local::replace_file(&tmp, &full)?;
         self.record(p, rhash, r.rev.clone())?;
         // 보존한 로컬 사본도 원격에 올려 다른 기기에서도 보이게 함
-        let cdata = std::fs::read(&cfull)?;
-        let centry = self.backend.upload(&cname, &cdata)?;
-        self.record(&cname, hash_bytes(&cdata), centry.rev)?;
+        let chash = hash_file(&cfull)?;
+        let centry = self.backend.upload_file(&cname, &cfull)?;
+        self.record(&cname, chash, centry.rev)?;
         Ok(Some(cname))
     }
 }

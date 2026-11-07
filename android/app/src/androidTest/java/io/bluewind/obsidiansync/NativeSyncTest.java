@@ -52,6 +52,45 @@ public final class NativeSyncTest {
         }
     }
 
+    @Test public void multipleProfilesWithBackupMode() throws Exception {
+        File root = tmp();
+        File notes = new File(root, "notes"), photos = new File(root, "photos"), remote = new File(root, "remote");
+        assertTrue(notes.mkdirs() && photos.mkdirs() && remote.mkdirs());
+        Files.write(new File(notes, "n.md").toPath(), "note".getBytes(StandardCharsets.UTF_8));
+        Files.write(new File(photos, "p.jpg").toPath(), new byte[200_000]);
+        JSONObject cfg = new JSONObject().put("profiles", new org.json.JSONArray()
+                .put(new JSONObject().put("id", "n").put("local_path", notes.getAbsolutePath())
+                        .put("backend", new JSONObject().put("type", "local_folder").put("path", new File(remote, "notes").getAbsolutePath())))
+                .put(new JSONObject().put("id", "p").put("kind", "folder").put("mode", "upload_only").put("local_path", photos.getAbsolutePath())
+                        .put("backend", new JSONObject().put("type", "local_folder").put("path", new File(remote, "photos").getAbsolutePath()))));
+        assertTrue(new JSONObject(Native.validate(cfg.toString())).getBoolean("ok"));
+        assertTrue(new JSONObject(Native.syncOnce(cfg.toString(), new File(root, "s").getAbsolutePath())).getBoolean("ok"));
+        assertTrue(new File(remote, "notes/n.md").exists());
+        assertEquals(200_000, new File(remote, "photos/p.jpg").length());
+        // 백업 모드: 휴대폰에서 지워도 원격에 남음
+        assertTrue(new File(photos, "p.jpg").delete());
+        assertTrue(new JSONObject(Native.syncOnce(cfg.toString(), new File(root, "s").getAbsolutePath())).getBoolean("ok"));
+        assertTrue(new File(remote, "photos/p.jpg").exists());
+    }
+
+    @Test public void legacyConfigIsNormalized() throws Exception {
+        JSONObject r = new JSONObject(Native.normalize("{\"vault_path\":\"/sdcard/V\",\"backend\":{\"type\":\"web_dav\",\"url\":\"https://nas:5006/home/V\",\"username\":\"u\",\"password\":\"p\"}}"));
+        assertTrue(r.getBoolean("ok"));
+        JSONObject p = r.getJSONObject("config").getJSONArray("profiles").getJSONObject(0);
+        assertEquals("/sdcard/V", p.getString("local_path"));
+        assertEquals("synology", p.getJSONObject("backend").getString("type"));
+        assertEquals("https://nas:5001", p.getJSONObject("backend").getString("url"));
+        assertFalse(Native.newProfileId().isEmpty());
+    }
+
+    @Test public void synologyErrorsDoNotCrash() throws Exception {
+        String dir = InstrumentationRegistry.getInstrumentation().getTargetContext().getCacheDir().getAbsolutePath();
+        String b = new JSONObject().put("type", "synology").put("url", "http://127.0.0.1:9").put("username", "u").put("password", "p").put("folder", "/home/x").toString();
+        assertFalse(new JSONObject(Native.testConnection(b, dir)).getBoolean("ok"));
+        assertFalse(new JSONObject(Native.synologyLogin(b, dir, "123456")).getBoolean("ok"));
+        assertFalse(Native.synologyRemembered(b, dir));
+    }
+
     @Test public void invalidConfigFailsWithoutCrashingJvm() throws Exception {
         String dir = InstrumentationRegistry.getInstrumentation().getTargetContext().getCacheDir().getAbsolutePath();
         assertFalse(new JSONObject(Native.syncOnce("invalid json", dir)).getBoolean("ok"));

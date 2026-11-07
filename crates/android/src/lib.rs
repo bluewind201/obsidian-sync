@@ -7,7 +7,8 @@ use jni::objects::{JClass, JString};
 use jni::sys::{jboolean, jstring};
 use jni::JNIEnv;
 use obsidian_sync_core::auth::{self, DeviceCode, OAuthProvider};
-use obsidian_sync_core::{service, AppConfig, SyncService};
+use obsidian_sync_core::backend::synology;
+use obsidian_sync_core::{service, AppConfig, BackendConfig, SyncService};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,11 +19,16 @@ static PENDING: Mutex<Option<DeviceCode>> = Mutex::new(None);
 static CANCEL: AtomicBool = AtomicBool::new(false);
 
 fn parse(config: &str) -> Result<AppConfig> {
-    serde_json::from_str(config).map_err(|e| anyhow!("설정 형식 오류: {e}"))
+    AppConfig::from_json(config).map_err(|e| anyhow!("설정 형식 오류: {e:#}"))
+}
+
+/// 저장소 설정 JSON (프로필의 `backend` 항목)
+fn parse_backend(backend: &str) -> Result<BackendConfig> {
+    serde_json::from_str(backend).map_err(|e| anyhow!("저장소 설정 형식 오류: {e}"))
 }
 
 fn err(e: anyhow::Error) -> Value {
-    json!({"ok": false, "error": format!("{e:#}")})
+    json!({"ok": false, "error": format!("{e:#}"), "need_otp": synology::needs_otp(&e)})
 }
 
 // ── 순수 Rust 함수 (테스트 가능) ──────────────────────────────
@@ -77,18 +83,44 @@ pub fn sync_once(config: &str, data_dir: &str) -> Value {
     }
 }
 
-pub fn test_connection(config: &str, data_dir: &str) -> Value {
-    match parse(config).and_then(|c| service::test_connection(&c.backend, Path::new(data_dir))) {
+/// 연결 테스트 (`backend`: 저장소 설정 JSON)
+pub fn test_connection(backend: &str, data_dir: &str) -> Value {
+    match parse_backend(backend).and_then(|b| service::test_connection(&b, Path::new(data_dir))) {
         Ok(n) => json!({"ok": true, "count": n}),
         Err(e) => err(e),
     }
 }
 
-pub fn login_start(config: &str) -> Value {
+/// Synology 로그인 (2단계 인증 코드가 있으면 함께 보내고 기기를 기억)
+pub fn synology_login(backend: &str, data_dir: &str, otp: &str) -> Value {
+    let otp = otp.trim();
+    match parse_backend(backend)
+        .and_then(|b| synology::login(&b, Path::new(data_dir), (!otp.is_empty()).then_some(otp)))
+    {
+        Ok(()) => json!({"ok": true}),
+        Err(e) => err(e),
+    }
+}
+
+/// Synology 2단계 인증을 통과해 이 기기가 기억되어 있는지
+pub fn synology_remembered(backend: &str, data_dir: &str) -> bool {
+    parse_backend(backend)
+        .map(|b| synology::has_device_token(Path::new(data_dir), &b))
+        .unwrap_or(false)
+}
+
+/// 저장된 Synology 기기 인증을 지움
+pub fn synology_forget(backend: &str, data_dir: &str) {
+    if let Ok(b) = parse_backend(backend) {
+        synology::forget_device(Path::new(data_dir), &b);
+    }
+}
+
+pub fn login_start(backend: &str) -> Value {
     let r = (|| {
-        let cfg = parse(config)?;
-        cfg.backend.validate()?;
-        let p = OAuthProvider::for_backend(&cfg.backend)
+        let backend = parse_backend(backend)?;
+        backend.validate()?;
+        let p = OAuthProvider::for_backend(&backend)
             .ok_or_else(|| anyhow!("로그인이 필요 없는 저장소입니다"))?;
         let dc = p.start_device()?;
         CANCEL.store(false, Ordering::Relaxed);
@@ -104,18 +136,17 @@ pub fn login_start(config: &str) -> Value {
 }
 
 /// 사용자가 승인할 때까지 대기 (블로킹, 백그라운드 스레드에서 호출)
-pub fn login_wait(config: &str, data_dir: &str) -> Value {
+pub fn login_wait(backend: &str, data_dir: &str) -> Value {
     let r = (|| {
-        let cfg = parse(config)?;
+        let backend = parse_backend(backend)?;
         let dc = PENDING
             .lock()
             .unwrap()
             .clone()
             .ok_or_else(|| anyhow!("먼저 로그인을 시작하세요"))?;
-        let p =
-            OAuthProvider::for_backend(&cfg.backend).ok_or_else(|| anyhow!("OAuth 저장소 아님"))?;
+        let p = OAuthProvider::for_backend(&backend).ok_or_else(|| anyhow!("OAuth 저장소 아님"))?;
         let token = p.poll_device(&dc, &CANCEL)?;
-        let path: PathBuf = auth::token_path(Path::new(data_dir), &cfg.backend).unwrap();
+        let path: PathBuf = auth::token_path(Path::new(data_dir), &backend).unwrap();
         auth::save_token(&path, &token)?;
         *PENDING.lock().unwrap() = None;
         Ok::<_, anyhow::Error>(())
@@ -130,20 +161,22 @@ pub fn login_cancel() {
     CANCEL.store(true, Ordering::Relaxed);
 }
 
-pub fn is_logged_in(config: &str, data_dir: &str) -> bool {
-    parse(config)
-        .map(|c| !c.backend.needs_oauth() || auth::is_logged_in(Path::new(data_dir), &c.backend))
+/// OneDrive/Google Drive 로그인 여부 (그 외 저장소는 항상 true)
+pub fn is_logged_in(backend: &str, data_dir: &str) -> bool {
+    parse_backend(backend)
+        .map(|b| !b.needs_oauth() || auth::is_logged_in(Path::new(data_dir), &b))
         .unwrap_or(false)
 }
 
-pub fn logout(config: &str, data_dir: &str) {
-    if let Ok(c) = parse(config) {
-        auth::logout(Path::new(data_dir), &c.backend);
+pub fn logout(backend: &str, data_dir: &str) {
+    if let Ok(b) = parse_backend(backend) {
+        auth::logout(Path::new(data_dir), &b);
     }
 }
 
-pub fn reset_state(config: &str, data_dir: &str) -> Value {
-    match parse(config).and_then(|c| service::reset_state(c, Path::new(data_dir))) {
+/// 프로필 하나의 동기화 기록 초기화
+pub fn reset_state(config: &str, data_dir: &str, profile_id: &str) -> Value {
+    match parse(config).and_then(|c| service::reset_state(&c, profile_id, Path::new(data_dir))) {
         Ok(()) => json!({"ok": true}),
         Err(e) => err(e),
     }
@@ -154,6 +187,24 @@ pub fn validate(config: &str) -> Value {
         Ok(()) => json!({"ok": true}),
         Err(e) => err(e),
     }
+}
+
+/// 설정을 현재 형식으로 정리해 돌려줌 (이전 버전 설정 자동 변환, 새 프로필 ID 부여)
+pub fn normalize(config: &str) -> Value {
+    let cfg = if config.trim().is_empty() {
+        Ok(AppConfig::default())
+    } else {
+        parse(config)
+    };
+    match cfg {
+        Ok(c) => json!({"ok": true, "config": c}),
+        Err(e) => err(e),
+    }
+}
+
+/// 새 프로필 ID
+pub fn new_profile_id() -> String {
+    obsidian_sync_core::config::new_profile_id()
 }
 
 // ── JNI 바인딩 ──────────────────────────────────────────────
@@ -197,7 +248,70 @@ jni_json2!(
     test_connection
 );
 jni_json2!(Java_io_bluewind_obsidiansync_Native_loginWait, login_wait);
-jni_json2!(Java_io_bluewind_obsidiansync_Native_resetState, reset_state);
+macro_rules! jni_json3 {
+    ($name:ident, $f:path) => {
+        #[no_mangle]
+        pub extern "system" fn $name<'l>(
+            mut env: JNIEnv<'l>,
+            _c: JClass<'l>,
+            a: JString<'l>,
+            b: JString<'l>,
+            c: JString<'l>,
+        ) -> jstring {
+            let (a, b, c) = (s(&mut env, &a), s(&mut env, &b), s(&mut env, &c));
+            let v = guard(PANIC.to_string(), || $f(&a, &b, &c).to_string());
+            out(&mut env, v)
+        }
+    };
+}
+
+jni_json3!(Java_io_bluewind_obsidiansync_Native_resetState, reset_state);
+jni_json3!(
+    Java_io_bluewind_obsidiansync_Native_synologyLogin,
+    synology_login
+);
+
+#[no_mangle]
+pub extern "system" fn Java_io_bluewind_obsidiansync_Native_synologyForget<'l>(
+    mut env: JNIEnv<'l>,
+    _c: JClass<'l>,
+    a: JString<'l>,
+    b: JString<'l>,
+) {
+    let (a, b) = (s(&mut env, &a), s(&mut env, &b));
+    guard((), || synology_forget(&a, &b));
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_bluewind_obsidiansync_Native_synologyRemembered<'l>(
+    mut env: JNIEnv<'l>,
+    _c: JClass<'l>,
+    a: JString<'l>,
+    b: JString<'l>,
+) -> jboolean {
+    let (a, b) = (s(&mut env, &a), s(&mut env, &b));
+    guard(false, || synology_remembered(&a, &b)) as jboolean
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_bluewind_obsidiansync_Native_normalize<'l>(
+    mut env: JNIEnv<'l>,
+    _c: JClass<'l>,
+    a: JString<'l>,
+) -> jstring {
+    let a = s(&mut env, &a);
+    let v = guard(PANIC.to_string(), || normalize(&a).to_string());
+    out(&mut env, v)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_bluewind_obsidiansync_Native_newProfileId<'l>(
+    mut env: JNIEnv<'l>,
+    _c: JClass<'l>,
+) -> jstring {
+    let v = guard("p0".to_string(), new_profile_id);
+    out(&mut env, v)
+}
 
 #[no_mangle]
 pub extern "system" fn Java_io_bluewind_obsidiansync_Native_loginStart<'l>(
@@ -284,5 +398,22 @@ mod tests {
         assert_eq!(sync_once("not json", "/tmp")["ok"], false);
         assert_eq!(validate("{}")["ok"], false);
         assert_eq!(status()["running"], false);
+        assert_eq!(test_connection("{}", "/tmp")["ok"], false);
+    }
+
+    #[test]
+    fn normalize_migrates_legacy() {
+        let v = normalize(
+            r#"{"vault_path":"/sdcard/Vault","backend":{"type":"local_folder","path":"/x"}}"#,
+        );
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["config"]["profiles"][0]["local_path"], "/sdcard/Vault");
+        assert_eq!(
+            normalize("")["config"]["profiles"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
     }
 }

@@ -1,5 +1,5 @@
 //! 로컬 볼트 스캔 + 제외 규칙
-use crate::config::AppConfig;
+use crate::config::{Profile, ProfileKind};
 use anyhow::Result;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use std::collections::HashMap;
@@ -28,12 +28,12 @@ pub struct Ignore {
 }
 
 impl Ignore {
-    pub fn new(cfg: &AppConfig) -> Result<Self> {
+    pub fn new(cfg: &Profile) -> Result<Self> {
         let mut b = GlobSetBuilder::new();
         for p in DEFAULT_IGNORES {
             b.add(Glob::new(p)?);
         }
-        if !cfg.sync_obsidian_folder {
+        if cfg.kind == ProfileKind::Obsidian && !cfg.sync_obsidian_folder {
             b.add(Glob::new(".obsidian/**")?);
         }
         for p in &cfg.ignore_patterns {
@@ -126,7 +126,7 @@ mod tests {
     use super::*;
     #[test]
     fn ignores() {
-        let mut cfg = AppConfig::default();
+        let mut cfg = Profile::default();
         cfg.ignore_patterns = vec!["Private".into(), "*.pdf".into()];
         let ig = Ignore::new(&cfg).unwrap();
         assert!(ig.is_ignored(".obsidian/workspace.json"));
@@ -138,5 +138,10 @@ mod tests {
         cfg.sync_obsidian_folder = false;
         let ig = Ignore::new(&cfg).unwrap();
         assert!(ig.is_ignored(".obsidian/app.json"));
+        // 일반 폴더에서는 .obsidian 옵션을 쓰지 않음
+        cfg.kind = ProfileKind::Folder;
+        let ig = Ignore::new(&cfg).unwrap();
+        assert!(!ig.is_ignored(".obsidian/app.json"));
+        assert!(ig.is_ignored("사진/@eaDir/x.jpg"));
     }
 }

@@ -1,5 +1,5 @@
 //! 로컬 폴더 백엔드를 원격 삼아 두 기기(A, B) 간 동기화를 검증
-use obsidian_sync_core::{AppConfig, BackendConfig, SyncEngine};
+use obsidian_sync_core::{AppConfig, BackendConfig, Profile, ProfileKind, SyncEngine, SyncMode};
 use std::fs;
 use std::path::Path;
 
@@ -29,16 +29,18 @@ fn env() -> Env {
     e
 }
 
-fn engine(vault: &Path, remote: &Path, data: &Path, device: &str) -> SyncEngine {
-    let cfg = AppConfig {
-        vault_path: vault.to_string_lossy().into(),
+fn profile(local: &Path, remote: &Path) -> Profile {
+    Profile {
+        local_path: local.to_string_lossy().into(),
         backend: BackendConfig::LocalFolder {
             path: remote.to_string_lossy().into(),
         },
-        device_name: device.into(),
         ..Default::default()
-    };
-    SyncEngine::new(cfg, data).unwrap()
+    }
+}
+
+fn engine(vault: &Path, remote: &Path, data: &Path, device: &str) -> SyncEngine {
+    SyncEngine::new(profile(vault, remote), device, data).unwrap()
 }
 
 fn write(p: &Path, s: &str) {
@@ -148,4 +150,94 @@ fn empty_remote_safety() {
     // 기록 초기화 후에는 다시 업로드
     ea.reset_state().unwrap();
     assert_eq!(ea.sync_once(&noop).unwrap().uploaded, 6);
+}
+
+#[test]
+fn backup_mode_never_deletes_remote() {
+    let e = env();
+    let mut p = profile(&e.a, &e.remote);
+    p.kind = ProfileKind::Folder;
+    p.mode = SyncMode::UploadOnly;
+    let mut ea = SyncEngine::new(p.clone(), "Phone", &e.data_a).unwrap();
+
+    // 이미 원격에 같은 크기로 올라가 있는 사진은 다시 올리지 않음
+    write(&e.a.join("DCIM/old.jpg"), "old-photo");
+    write(&e.remote.join("DCIM/old.jpg"), "old-photo");
+    // 원격에만 있는 파일은 내려받지 않음
+    write(&e.remote.join("other.jpg"), "pc-only");
+    write(&e.a.join("DCIM/new.jpg"), "new-photo");
+    let r = ea.sync_once(&noop).unwrap();
+    assert_eq!(r.uploaded, 1, "{r:?}");
+    assert_eq!(r.downloaded, 0);
+    assert!(!e.a.join("other.jpg").exists());
+    assert!(e.remote.join("DCIM/new.jpg").exists());
+
+    // 휴대폰에서 지워도 원격에는 남음
+    fs::remove_file(e.a.join("DCIM/new.jpg")).unwrap();
+    let r = ea.sync_once(&noop).unwrap();
+    assert_eq!(r.deleted_remote, 0);
+    assert!(e.remote.join("DCIM/new.jpg").exists());
+    assert_eq!(ea.sync_once(&noop).unwrap().changes(), 0);
+
+    // 휴대폰에서 바꾸면 다시 올림
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    write(&e.a.join("DCIM/old.jpg"), "edited-photo");
+    assert_eq!(ea.sync_once(&noop).unwrap().uploaded, 1);
+    assert_eq!(
+        fs::read_to_string(e.remote.join("DCIM/old.jpg")).unwrap(),
+        "edited-photo"
+    );
+}
+
+#[test]
+fn multiple_profiles_sync_independently() {
+    let e = env();
+    let notes = e.a.join("notes");
+    let photos = e.a.join("photos");
+    let r_notes = e.remote.join("notes");
+    let r_photos = e.remote.join("photos");
+    for d in [&notes, &photos] {
+        fs::create_dir_all(d).unwrap();
+    }
+    write(&notes.join("a.md"), "note");
+    write(&photos.join("p.jpg"), "photo");
+    let mut photo_profile = profile(&photos, &r_photos);
+    photo_profile.kind = ProfileKind::Folder;
+    photo_profile.name = "사진".into();
+    let cfg = AppConfig {
+        profiles: vec![profile(&notes, &r_notes), photo_profile],
+        ..Default::default()
+    };
+    cfg.validate().unwrap();
+    let rep = obsidian_sync_core::service::sync_once(cfg.clone(), &e.data_a, &noop).unwrap();
+    assert_eq!(rep.uploaded, 2, "{rep:?}");
+    assert!(r_notes.join("a.md").exists());
+    assert!(r_photos.join("p.jpg").exists());
+
+    // 폴더가 겹치는 프로필은 거부
+    let mut bad = cfg.clone();
+    let mut overlap = profile(&photos.join("sub"), &e.remote.join("x"));
+    overlap.id = "other".into();
+    bad.profiles.push(overlap);
+    assert!(bad.validate().is_err());
+}
+
+#[test]
+fn large_file_streams() {
+    let e = env();
+    let mut ea = engine(&e.a, &e.remote, &e.data_a, "PC");
+    let mut eb = engine(&e.b, &e.remote, &e.data_b, "Phone");
+    let big: Vec<u8> = (0..5_000_000u32).map(|i| (i % 253) as u8).collect();
+    fs::create_dir_all(e.a.join("video")).unwrap();
+    fs::write(e.a.join("video/clip.mp4"), &big).unwrap();
+    assert_eq!(ea.sync_once(&noop).unwrap().uploaded, 1);
+    assert_eq!(eb.sync_once(&noop).unwrap().downloaded, 1);
+    assert_eq!(fs::read(e.b.join("video/clip.mp4")).unwrap(), big);
+    // 임시파일이 남지 않음
+    let leftovers: Vec<_> = fs::read_dir(e.b.join("video"))
+        .unwrap()
+        .filter_map(|d| d.ok())
+        .filter(|d| d.file_name().to_string_lossy().starts_with(".obsync-tmp-"))
+        .collect();
+    assert!(leftovers.is_empty());
 }
