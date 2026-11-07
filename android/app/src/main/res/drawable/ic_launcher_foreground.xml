@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 앱 아이콘 전경: 노트 문서를 감싸는 두 개의 동기화 화살표 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:pathData="M31.45,45.79 A24,24 0 0 1 76.55,45.79" android:strokeColor="#FFFFFFFF" android:strokeWidth="5"/>
+    <path android:pathData="M78.94,52.37 L81.72,43.91 L71.38,47.67 Z" android:fillColor="#FFFFFFFF" android:strokeColor="#FFFFFFFF" android:strokeWidth="1.5" android:strokeLineJoin="round"/>
+    <path android:pathData="M76.55,62.21 A24,24 0 0 1 31.45,62.21" android:strokeColor="#FFFFFFFF" android:strokeWidth="5"/>
+    <path android:pathData="M29.06,55.63 L36.62,60.33 L26.28,64.09 Z" android:fillColor="#FFFFFFFF" android:strokeColor="#FFFFFFFF" android:strokeWidth="1.5" android:strokeLineJoin="round"/>
+    <path android:pathData="M47,42 h11 l6,6 v15 a2,2 0 0 1 -2,2 h-15 a2,2 0 0 1 -2,-2 v-19 a2,2 0 0 1 2,-2z" android:fillColor="#FFFFFFFF"/>
+    <path android:pathData="M58,42 v4 a2,2 0 0 0 2,2 h4z" android:fillColor="#FFDDD6FE"/>
+    <path android:pathData="M49,53 h10 M49,57 h10 M49,61 h6" android:strokeColor="#FF7C3AED" android:strokeWidth="2" android:strokeLineCap="round"/>
+</vector>

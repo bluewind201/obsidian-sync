@@ -313,13 +313,13 @@ public final class MainActivity extends Activity {
             p.put("conflict_policy", "keep_both");
             p.put("sync_obsidian_folder", true);
             if (kind.equals("folder")) p.put("local_path", Environment.getExternalStorageDirectory().getAbsolutePath() + "/DCIM/Camera");
-            // 같은 NAS를 쓰는 경우가 많으므로 기존 Synology 계정을 복사 (폴더만 비움)
-            JSONObject b = new JSONObject().put("type", "synology");
+            // 같은 NAS를 쓰는 경우가 많으므로 기존 Synology 계정을 복사 (폴더는 기본값 /home)
+            JSONObject b = new JSONObject().put("type", "synology").put("folder", "/home");
             JSONArray ps = profiles();
             for (int i = ps.length() - 1; i >= 0; i--) {
                 JSONObject ob = ps.getJSONObject(i).optJSONObject("backend");
                 if (ob != null && "synology".equals(ob.optString("type"))) {
-                    b = new JSONObject(ob.toString()).put("folder", "");
+                    b = new JSONObject(ob.toString()).put("folder", "/home");
                     break;
                 }
             }
@@ -514,7 +514,7 @@ public final class MainActivity extends Activity {
                 field("url", "NAS 주소", "https://내NAS주소:5001", false, saved);
                 field("username", "아이디", "DSM 로그인 아이디", false, saved);
                 field("password", "비밀번호", "", true, saved);
-                field("folder", "NAS 폴더", folderKind ? "/photo/휴대폰" : "/home/Obsidian", false, saved);
+                field("folder", "NAS 폴더", folderKind ? "/photo/휴대폰" : "/home/Obsidian", false, saved, "/home");
                 Button pickNas = secondary("NAS에서 폴더 고르기");
                 pickNas.setOnClickListener(v -> openNasPicker());
                 fieldBox.addView(pickNas);

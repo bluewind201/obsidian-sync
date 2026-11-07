@@ -217,7 +217,8 @@ impl Default for BackendConfig {
             url: String::new(),
             username: String::new(),
             password: String::new(),
-            folder: String::new(),
+            // 폴더를 고르기 전 기본값 (NAS에서 고르기로 바꿀 수 있음)
+            folder: "/home".into(),
         }
     }
 }
