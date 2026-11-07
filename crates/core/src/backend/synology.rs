@@ -207,7 +207,7 @@ pub fn has_device_token(data_dir: &Path, cfg: &BackendConfig) -> bool {
 
 /// 로그인 (OTP가 있으면 함께 보내고 기기 토큰을 저장). 성공하면 세션을 바로 닫습니다.
 pub fn login(cfg: &BackendConfig, data_dir: &Path, otp: Option<&str>) -> Result<()> {
-    cfg.validate()?;
+    check_account(cfg)?;
     let mut b = SynologyBackend::new(cfg, data_dir)?;
     b.login(otp.map(str::trim).filter(|s| !s.is_empty()))?;
     b.logout();
@@ -222,14 +222,19 @@ pub struct NasFolder {
     pub path: String,
 }
 
+/// 로그인과 폴더 선택에 필요한 주소·계정만 검사합니다 (NAS 폴더는 아직 비어 있어도 됨).
+fn check_account(cfg: &BackendConfig) -> Result<()> {
+    let mut c = cfg.clone();
+    match &mut c {
+        BackendConfig::Synology { folder, .. } => *folder = "/home".into(),
+        _ => bail!("Synology 설정이 아닙니다"),
+    }
+    c.validate()
+}
+
 /// 폴더 선택 화면용 세션. 저장할 폴더를 아직 모르므로 주소와 계정만 씁니다.
 fn browser(cfg: &BackendConfig, data_dir: &Path) -> Result<SynologyBackend> {
-    let BackendConfig::Synology { url, username, .. } = cfg else {
-        bail!("Synology 설정이 아닙니다");
-    };
-    if url.trim().is_empty() || username.trim().is_empty() {
-        bail!("NAS 주소와 계정을 먼저 입력하세요");
-    }
+    check_account(cfg)?;
     SynologyBackend::new(cfg, data_dir)
 }
 
@@ -1231,6 +1236,14 @@ mod tests {
             2
         );
         assert!(create_folder(&browse, dir.path(), "/", "x").is_err());
+
+        // NAS 폴더를 정하기 전(빈 칸)에도 2단계 인증과 폴더 목록이 되어야 함
+        let fresh = tempfile::tempdir().unwrap();
+        let e = list_folders(&browse, fresh.path(), "").unwrap_err();
+        assert!(needs_otp(&e), "{e:#}");
+        login(&browse, fresh.path(), Some("123456")).unwrap();
+        assert!(has_device_token(fresh.path(), &browse));
+        assert_eq!(list_folders(&browse, fresh.path(), "").unwrap().len(), 2);
         assert!(create_folder(&browse, dir.path(), "/home", "a/b").is_err());
     }
 }

@@ -319,7 +319,7 @@ impl App {
                 url: url.clone(),
                 username: username.clone(),
                 password: password.clone(),
-                folder: String::new(),
+                folder: "/home".into(),
             },
             _ => BackendConfig::default(),
         };
