@@ -141,6 +141,8 @@ struct App {
     /// 저장소 종류를 바꿨다가 돌아올 때 입력값 복원용 (프로필 ID, 종류)
     backend_cache: HashMap<(String, &'static str), BackendConfig>,
     service: Option<SyncService>,
+    /// 백그라운드에서 멈추는 중인 이전 서비스 (화면이 멈추지 않도록)
+    stopping: Option<std::thread::JoinHandle<()>>,
     trigger: SharedTrigger,
     login: Option<Login>,
     test: Option<Arc<Mutex<Job>>>,
@@ -210,6 +212,7 @@ impl App {
             backend_cache: HashMap::new(),
             cfg,
             service: None,
+            stopping: None,
             trigger,
             login: None,
             test: None,
@@ -258,6 +261,7 @@ impl App {
 
     fn start_service(&mut self) {
         self.stop_service();
+        self.wait_stopped();
         if let Err(e) = self.cfg.validate() {
             self.set_msg(format!("{e:#}"), true);
             self.page = Page::Settings;
@@ -286,10 +290,19 @@ impl App {
         }
     }
 
+    /// 중지는 진행 중인 파일 하나가 끝날 때까지 걸릴 수 있어 백그라운드에서 합니다
     fn stop_service(&mut self) {
         *self.trigger.lock().unwrap() = None;
         if let Some(s) = self.service.take() {
-            s.stop();
+            self.wait_stopped();
+            self.stopping = Some(std::thread::spawn(move || s.stop()));
+        }
+    }
+
+    /// 이전 서비스가 완전히 멈출 때까지 대기 (다시 시작하거나 기록을 지우기 전에)
+    fn wait_stopped(&mut self) {
+        if let Some(h) = self.stopping.take() {
+            let _ = h.join();
         }
     }
 
@@ -715,6 +728,27 @@ impl App {
                     }
                 }
             });
+            let pending: usize = status
+                .as_ref()
+                .map(|s| s.profiles.iter().filter_map(|p| p.pending_deletes).sum())
+                .unwrap_or(0);
+            if pending > 0 {
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(
+                        "의도한 삭제라면 '삭제 진행'을, 실수라면 설정의 '동기화 기록 초기화'를 누르세요 (지워진 파일이 복원됩니다)",
+                    )
+                    .color(WARN),
+                );
+                if ui
+                    .add(ui::big_button(&format!("삭제 진행 ({pending}개)")))
+                    .clicked()
+                {
+                    if let Some(s) = &self.service {
+                        s.allow_deletes("");
+                    }
+                }
+            }
         });
 
         ui.add_space(8.0);
@@ -1222,6 +1256,7 @@ impl App {
         if reset {
             let was_running = self.service.is_some();
             self.stop_service();
+            self.wait_stopped();
             match service::reset_state(&self.cfg, &id, &self.data_dir) {
                 Ok(()) => self.set_msg("동기화 기록을 초기화했습니다", false),
                 Err(e) => self.set_msg(format!("{e:#}"), true),

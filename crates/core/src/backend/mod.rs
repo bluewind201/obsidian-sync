@@ -35,6 +35,15 @@ pub trait Backend: Send {
     /// 삭제. 이미 없으면 성공으로 처리
     fn delete(&mut self, path: &str) -> Result<()>;
 
+    /// 여러 파일 한꺼번에 삭제. 한 번의 요청으로 지울 수 있는 저장소는 재정의합니다.
+    /// 실패하면 엔진이 파일별 `delete`로 다시 시도합니다.
+    fn delete_many(&mut self, paths: &[String]) -> Result<()> {
+        for p in paths {
+            self.delete(p)?;
+        }
+        Ok(())
+    }
+
     /// 로컬 파일을 업로드. 대용량 파일을 메모리에 올리지 않도록 저장소별로 재정의할 수 있음
     fn upload_file(&mut self, path: &str, src: &Path) -> Result<RemoteEntry> {
         let data = std::fs::read(src)?;

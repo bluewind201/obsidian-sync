@@ -1,12 +1,13 @@
 //! 백그라운드 동기화 서비스: 프로필마다 실시간 파일 감시 + 주기적 원격 확인
 use crate::config::{AppConfig, BackendConfig, Profile};
-use crate::engine::{SyncEngine, SyncReport};
+use crate::engine::{MassDeletePending, SyncEngine, SyncReport};
 use crate::scan::{rel_of, Ignore};
 use anyhow::{bail, Result};
 use notify::{EventKind, RecursiveMode, Watcher};
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -32,6 +33,8 @@ pub struct ProfileStatus {
     pub last_sync: Option<String>,
     pub last_summary: String,
     pub last_error: Option<String>,
+    /// 한 번에 많은 파일이 지워질 예정이라 확인을 기다리는 경우 그 개수
+    pub pending_deletes: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Default)]
@@ -76,11 +79,16 @@ impl Shared {
 enum Cmd {
     SyncNow,
     LocalChange,
+    /// 확인을 기다리던 대량 삭제를 진행
+    AllowDeletes,
     Stop,
 }
 
 pub struct SyncService {
     txs: Vec<Sender<Cmd>>,
+    /// 프로필 번호별 명령 채널 (시작에 실패한 프로필은 None)
+    by_profile: Vec<Option<Sender<Cmd>>>,
+    cancels: Vec<Arc<AtomicBool>>,
     shared: Arc<Mutex<Shared>>,
     threads: Vec<JoinHandle<()>>,
     _watchers: Vec<notify::RecommendedWatcher>,
@@ -130,6 +138,7 @@ fn start_watcher(
 /// 프로필 하나의 작업 스레드 루프
 fn worker(
     mut engine: SyncEngine,
+    cancel: Arc<AtomicBool>,
     idx: usize,
     rx: Receiver<Cmd>,
     sh: Arc<Mutex<Shared>>,
@@ -143,16 +152,24 @@ fn worker(
         match rx.recv_timeout(timeout) {
             Ok(Cmd::Stop) | Err(RecvTimeoutError::Disconnected) => break,
             Ok(Cmd::LocalChange) => {
-                // 연속 저장이 끝날 때까지 대기
+                // 연속 저장(또는 대량 삭제)이 끝날 때까지 대기
                 loop {
                     match rx.recv_timeout(debounce) {
                         Ok(Cmd::LocalChange) => continue,
+                        Ok(Cmd::AllowDeletes) => {
+                            engine.allow_deletions_once();
+                            break;
+                        }
                         Ok(Cmd::SyncNow) | Err(RecvTimeoutError::Timeout) => break,
                         Ok(Cmd::Stop) | Err(RecvTimeoutError::Disconnected) => break 'outer,
                     }
                 }
             }
+            Ok(Cmd::AllowDeletes) => engine.allow_deletions_once(),
             Ok(Cmd::SyncNow) | Err(RecvTimeoutError::Timeout) => {}
+        }
+        if cancel.load(Ordering::Relaxed) {
+            break;
         }
         sh.lock().unwrap().profiles[idx].syncing = true;
         let log_sh = sh.clone();
@@ -167,6 +184,7 @@ fn worker(
             let st = &mut s.profiles[idx];
             st.syncing = false;
             st.last_sync = Some(now_str());
+            st.pending_deletes = None;
             match result {
                 Ok(rep) => {
                     st.last_summary = rep.summary();
@@ -180,6 +198,9 @@ fn worker(
                 }
                 Err(e) => {
                     let msg = format!("{e:#}");
+                    if let Some(m) = e.downcast_ref::<MassDeletePending>() {
+                        st.pending_deletes = Some(m.count);
+                    }
                     st.last_summary = "실패".into();
                     logs.push((format!("{prefix}동기화 실패: {msg}"), true));
                     st.last_error = Some(msg);
@@ -223,6 +244,8 @@ impl SyncService {
         let debounce = Duration::from_millis(cfg.debounce_ms.clamp(200, 60_000));
 
         let mut txs = Vec::new();
+        let mut by_profile = Vec::new();
+        let mut cancels = Vec::new();
         let mut threads = Vec::new();
         let mut watchers = Vec::new();
         let mut first_err = None;
@@ -237,6 +260,7 @@ impl SyncService {
                     s.profiles[idx].last_summary = "시작 실패".into();
                     s.push(format!("[{name}] 시작하지 못했습니다: {msg}"), true);
                     first_err.get_or_insert(e);
+                    by_profile.push(None);
                     continue;
                 }
             };
@@ -263,9 +287,12 @@ impl SyncService {
                 );
             }
             let sh = shared.clone();
+            let cancel = engine.cancel_flag();
+            cancels.push(cancel.clone());
             let t = std::thread::Builder::new()
                 .name(format!("obsidian-sync-{idx}"))
-                .spawn(move || worker(engine, idx, rx, sh, poll, debounce))?;
+                .spawn(move || worker(engine, cancel, idx, rx, sh, poll, debounce))?;
+            by_profile.push(Some(tx.clone()));
             txs.push(tx);
             threads.push(t);
         }
@@ -274,6 +301,8 @@ impl SyncService {
         }
         Ok(Self {
             txs,
+            by_profile,
+            cancels,
             shared,
             threads,
             _watchers: watchers,
@@ -283,6 +312,18 @@ impl SyncService {
     pub fn sync_now(&self) {
         for tx in &self.txs {
             let _ = tx.send(Cmd::SyncNow);
+        }
+    }
+
+    /// 확인을 기다리던 대량 삭제를 진행 (`profile_id`가 비면 확인을 기다리는 모든 프로필)
+    pub fn allow_deletes(&self, profile_id: &str) {
+        let s = self.shared.lock().unwrap();
+        for (i, p) in s.profiles.iter().enumerate() {
+            if p.pending_deletes.is_some() && (profile_id.is_empty() || p.id == profile_id) {
+                if let Some(Some(tx)) = self.by_profile.get(i) {
+                    let _ = tx.send(Cmd::AllowDeletes);
+                }
+            }
         }
     }
 
@@ -326,13 +367,16 @@ impl SyncService {
         }
     }
 
-    /// 중지 (진행 중인 동기화가 끝날 때까지 대기)
+    /// 중지. 진행 중인 동기화는 지금 처리하는 파일까지만 하고 멈춥니다
     pub fn stop(mut self) {
         self.shutdown();
     }
 
     fn shutdown(&mut self) {
         self._watchers.clear();
+        for c in &self.cancels {
+            c.store(true, Ordering::Relaxed);
+        }
         for tx in &self.txs {
             let _ = tx.send(Cmd::Stop);
         }

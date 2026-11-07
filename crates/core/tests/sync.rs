@@ -352,3 +352,100 @@ fn conflict_policies() {
             .any(|d| d.file_name().to_string_lossy().contains("충돌")));
     }
 }
+
+#[test]
+fn mass_delete_waits_for_confirmation() {
+    use obsidian_sync_core::MassDeletePending;
+    let e = env();
+    let mut ea = engine(&e.a, &e.remote, &e.data_a, "PC");
+    for i in 0..30 {
+        write(&e.a.join(format!("n/{i}.md")), "x");
+    }
+    assert_eq!(ea.sync_once(&noop).unwrap().uploaded, 30);
+    for i in 0..25 {
+        fs::remove_file(e.a.join(format!("n/{i}.md"))).unwrap();
+    }
+    // 확인 전: 멈추고 원격은 그대로
+    let err = ea.sync_once(&noop).unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<MassDeletePending>(),
+        Some(&MassDeletePending { count: 25 })
+    );
+    assert!(e.remote.join("n/0.md").exists());
+    // 확인 후: 한 번 진행
+    ea.allow_deletions_once();
+    let r = ea.sync_once(&noop).unwrap();
+    assert_eq!(r.deleted_remote, 25, "{r:?}");
+    assert!(!e.remote.join("n/0.md").exists());
+    assert!(e.remote.join("n/29.md").exists());
+}
+
+#[test]
+fn cancel_stops_sync_and_resumes_later() {
+    use std::sync::atomic::Ordering;
+    let e = env();
+    let mut ea = engine(&e.a, &e.remote, &e.data_a, "PC");
+    for i in 0..40 {
+        write(&e.a.join(format!("{i}.md")), "x");
+    }
+    let cancel = ea.cancel_flag();
+    cancel.store(true, Ordering::Relaxed);
+    let r = ea.sync_once(&noop).unwrap();
+    assert_eq!(r.uploaded, 0);
+    cancel.store(false, Ordering::Relaxed);
+    assert_eq!(ea.sync_once(&noop).unwrap().uploaded, 40);
+}
+
+#[test]
+fn remote_deletes_are_batched() {
+    use obsidian_sync_core::backend::{self, Backend, RemoteEntry};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct Counting(Box<dyn Backend>, Arc<AtomicUsize>, Arc<AtomicUsize>);
+    impl Backend for Counting {
+        fn id(&self) -> String {
+            self.0.id()
+        }
+        fn list(&mut self) -> anyhow::Result<Vec<RemoteEntry>> {
+            self.0.list()
+        }
+        fn download(&mut self, p: &str) -> anyhow::Result<Vec<u8>> {
+            self.0.download(p)
+        }
+        fn upload(&mut self, p: &str, d: &[u8]) -> anyhow::Result<RemoteEntry> {
+            self.0.upload(p, d)
+        }
+        fn delete(&mut self, p: &str) -> anyhow::Result<()> {
+            self.1.fetch_add(1, Ordering::Relaxed);
+            self.0.delete(p)
+        }
+        fn delete_many(&mut self, paths: &[String]) -> anyhow::Result<()> {
+            self.2.fetch_add(1, Ordering::Relaxed);
+            for p in paths {
+                self.0.delete(p)?;
+            }
+            Ok(())
+        }
+    }
+
+    let e = env();
+    let p = profile(&e.a, &e.remote);
+    let singles = Arc::new(AtomicUsize::new(0));
+    let batches = Arc::new(AtomicUsize::new(0));
+    let inner = backend::create_backend(&p.backend, &e.data_a).unwrap();
+    let b = Box::new(Counting(inner, singles.clone(), batches.clone()));
+    let mut ea = SyncEngine::with_backend(p, "PC", b, &e.data_a).unwrap();
+    for i in 0..250 {
+        write(&e.a.join(format!("{i}.md")), "x");
+    }
+    ea.sync_once(&noop).unwrap();
+    for i in 0..240 {
+        fs::remove_file(e.a.join(format!("{i}.md"))).unwrap();
+    }
+    ea.allow_deletions_once();
+    let r = ea.sync_once(&noop).unwrap();
+    assert_eq!(r.deleted_remote, 240);
+    assert_eq!(singles.load(Ordering::Relaxed), 0);
+    assert_eq!(batches.load(Ordering::Relaxed), 2); // 200 + 40
+}

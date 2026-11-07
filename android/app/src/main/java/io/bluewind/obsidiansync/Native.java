@@ -12,7 +12,9 @@ public final class Native {
     public static native String start(String config, String dataDir);
     public static native void stop();
     public static native boolean syncNow();
-    /** {"running","syncing","last_sync","last_summary","last_error","logs":[...],"profiles":[{id,name,active,syncing,last_sync,last_summary,last_error}]} */
+    /** 대량 삭제 확인 대기 중인 프로필의 삭제를 한 번 허용 ("" = 대기 중인 전체). 서비스가 꺼져 있으면 false */
+    public static native boolean allowDeletes(String profileId);
+    /** {"running","syncing","last_sync","last_summary","last_error","logs":[...],"profiles":[{id,name,active,syncing,last_sync,last_summary,last_error,pending_deletes}]} */
     public static native String status();
     /** 켜진 프로필을 한 번씩 동기화. {"ok","summary"?,"error"?} */
     public static native String syncOnce(String config, String dataDir);

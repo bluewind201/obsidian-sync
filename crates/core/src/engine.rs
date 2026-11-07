@@ -18,7 +18,31 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
+
+/// 원격 삭제를 한 번에 묶어 보내는 개수
+const DELETE_BATCH: usize = 200;
+
+/// 한 번에 많은 파일이 지워질 예정이라 멈춘 경우의 오류.
+/// 사용자가 확인하면 [`SyncEngine::allow_deletions_once`] 후 다시 동기화합니다.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MassDeletePending {
+    pub count: usize,
+}
+
+impl std::fmt::Display for MassDeletePending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "한 번에 {}개 파일이 삭제될 예정이라 확인을 기다립니다. 의도한 삭제라면 '삭제 진행'을 누르세요. \
+             실수라면 '동기화 기록 초기화'를 누르면 지워진 파일이 복원됩니다",
+            self.count
+        )
+    }
+}
+impl std::error::Error for MassDeletePending {}
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SyncReport {
@@ -85,6 +109,8 @@ pub struct SyncEngine {
     state_path: PathBuf,
     state: SyncState,
     device: String,
+    cancel: Arc<AtomicBool>,
+    allow_mass_delete: bool,
 }
 
 pub fn hash_bytes(data: &[u8]) -> String {
@@ -105,14 +131,21 @@ pub fn hash_file(path: &Path) -> Result<String> {
     Ok(hex::encode(h.finalize()))
 }
 
-/// 쓰면서 sha256을 계산하는 Writer
+/// 쓰면서 sha256을 계산하는 Writer (중지 요청이 오면 내려받기를 끊음)
 struct HashWriter<W: Write> {
     inner: W,
     hasher: Sha256,
+    cancel: Arc<AtomicBool>,
 }
 
 impl<W: Write> Write for HashWriter<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "동기화를 중지했습니다",
+            ));
+        }
         let n = self.inner.write(buf)?;
         self.hasher.update(&buf[..n]);
         Ok(n)
@@ -161,7 +194,23 @@ impl SyncEngine {
             state_path,
             state,
             device,
+            cancel: Arc::new(AtomicBool::new(false)),
+            allow_mass_delete: false,
         })
+    }
+
+    /// 이 플래그를 true로 바꾸면 진행 중인 동기화가 다음 파일에서 멈춥니다
+    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
+        self.cancel.clone()
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
+    /// 다음 동기화 한 번은 대량 삭제 안전장치를 건너뜁니다 (사용자가 확인한 경우)
+    pub fn allow_deletions_once(&mut self) {
+        self.allow_mass_delete = true;
     }
 
     /// 동기화 기록 초기화 (다음 동기화 때 양쪽을 처음부터 비교)
@@ -198,6 +247,9 @@ impl SyncEngine {
         let local = scan::scan(&self.vault, &self.ignore)?;
         let mut local_hash: HashMap<String, String> = HashMap::new();
         for (p, f) in &local {
+            if self.cancelled() {
+                return Ok(report);
+            }
             let cached = self
                 .state
                 .files
@@ -358,16 +410,19 @@ impl SyncEngine {
             .iter()
             .filter(|(_, a)| matches!(a, Action::DeleteLocal | Action::DeleteRemote))
             .count();
-        if deletions > 20 && deletions * 2 > known {
-            bail!(
-                "한 번에 {deletions}개 파일이 삭제될 예정이라 안전을 위해 중단했습니다. \
-                 의도한 경우 '동기화 기록 초기화'를 누른 뒤 다시 동기화하세요 (이 경우 삭제 대신 복원됩니다)"
-            );
+        let allowed = std::mem::take(&mut self.allow_mass_delete);
+        if deletions > 20 && deletions * 2 > known && !allowed {
+            return Err(MassDeletePending { count: deletions }.into());
         }
 
-        // 5) 실행
+        // 5) 실행 (원격 삭제는 모아서 한꺼번에)
         let mut since_save = 0;
+        let mut remote_deletes: Vec<String> = Vec::new();
         for (p, action) in plan {
+            if self.cancelled() {
+                log("중지 요청으로 동기화를 멈췄습니다 (남은 작업은 다음에 이어서 합니다)");
+                break;
+            }
             let res = match action {
                 Action::Upload => self.do_upload(&p).map(|_| {
                     report.uploaded += 1;
@@ -386,10 +441,10 @@ impl SyncEngine {
                     report.deleted_local += 1;
                     log(&format!("✕ (로컬) {p}"));
                 }),
-                Action::DeleteRemote => self.do_delete_remote(&p).map(|_| {
-                    report.deleted_remote += 1;
-                    log(&format!("✕ (원격) {p}"));
-                }),
+                Action::DeleteRemote => {
+                    remote_deletes.push(p);
+                    continue;
+                }
                 Action::Conflict => {
                     let r = remote[&p].clone();
                     let lh = local_hash[&p].clone();
@@ -439,6 +494,47 @@ impl SyncEngine {
                 let _ = self.state.save(&self.state_path);
             }
         }
+        for chunk in remote_deletes.chunks(DELETE_BATCH) {
+            if self.cancelled() {
+                break;
+            }
+            match self.backend.delete_many(chunk) {
+                Ok(()) => {
+                    for p in chunk {
+                        self.state.files.remove(p);
+                    }
+                    report.deleted_remote += chunk.len();
+                    match chunk {
+                        [one] => log(&format!("✕ (원격) {one}")),
+                        _ => log(&format!(
+                            "✕ (원격) {}개 파일 삭제 ({} 등)",
+                            chunk.len(),
+                            chunk[0]
+                        )),
+                    }
+                }
+                // 한꺼번에 실패하면 파일별로 다시 시도해 어느 파일이 문제인지 남김
+                Err(_) => {
+                    for p in chunk {
+                        if self.cancelled() {
+                            break;
+                        }
+                        match self.do_delete_remote(p) {
+                            Ok(()) => {
+                                report.deleted_remote += 1;
+                                log(&format!("✕ (원격) {p}"));
+                            }
+                            Err(e) => {
+                                let msg = format!("{p}: {e:#}");
+                                log(&format!("오류 {msg}"));
+                                report.errors.push(msg);
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = self.state.save(&self.state_path);
+        }
         self.state.save(&self.state_path)?;
         report.duration_ms = started.elapsed().as_millis() as u64;
         Ok(report)
@@ -477,6 +573,7 @@ impl SyncEngine {
             let mut w = HashWriter {
                 inner: std::io::BufWriter::with_capacity(256 * 1024, file),
                 hasher: Sha256::new(),
+                cancel: self.cancel.clone(),
             };
             self.backend.download_to(p, &mut w)?;
             w.flush()?;
