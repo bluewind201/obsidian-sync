@@ -5,7 +5,11 @@ mod platform;
 mod ui;
 
 use eframe::egui::{self, RichText};
-use obsidian_sync_core::{auth, service, AppConfig, BackendConfig, ServiceStatus, SyncService};
+use obsidian_sync_core::backend::synology;
+use obsidian_sync_core::{
+    auth, service, AppConfig, BackendConfig, Profile, ProfileKind, ServiceStatus, SyncMode,
+    SyncService,
+};
 use platform::SharedTrigger;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -17,11 +21,11 @@ use ui::{ACCENT, DANGER, MUTED, OK, WARN};
 /// 저장소 종류: (kind, 배지, 배지 색, 이름, 설명)
 const BACKENDS: &[(&str, &str, egui::Color32, &str, &str)] = &[
     (
-        "web_dav",
+        "synology",
         "NAS",
         egui::Color32::from_rgb(40, 90, 170),
-        "Synology NAS (WebDAV)",
-        "집/회사 NAS에 저장. DSM의 WebDAV Server 사용",
+        "Synology NAS",
+        "DSM 계정으로 로그인 (File Station)",
     ),
     (
         "local_folder",
@@ -57,11 +61,6 @@ const SETUP_DOC: &str = "https://github.com/bluewind201/obsidian-sync/blob/main/
 
 fn default_backend(kind: &str) -> BackendConfig {
     match kind {
-        "web_dav" => BackendConfig::WebDav {
-            url: String::new(),
-            username: String::new(),
-            password: String::new(),
-        },
         "s3" => BackendConfig::S3 {
             endpoint: "https://kr.object.ncloudstorage.com".into(),
             region: "kr-standard".into(),
@@ -80,9 +79,10 @@ fn default_backend(kind: &str) -> BackendConfig {
             client_secret: String::new(),
             folder: obsidian_sync_core::config::default_folder(),
         },
-        _ => BackendConfig::LocalFolder {
+        "local_folder" => BackendConfig::LocalFolder {
             path: String::new(),
         },
+        _ => BackendConfig::default(),
     }
 }
 
@@ -97,6 +97,8 @@ enum Job {
     Running,
     Ok(String),
     Failed(String),
+    /// Synology 2단계 인증 코드가 필요함
+    NeedOtp(String),
 }
 
 enum LoginState {
@@ -116,12 +118,18 @@ struct App {
     data_dir: PathBuf,
     cfg: AppConfig,
     saved: AppConfig,
-    backend_cache: HashMap<&'static str, BackendConfig>,
-    ignore_text: String,
+    /// 설정 화면에서 선택한 프로필 번호
+    sel: usize,
+    /// 프로필별 제외 패턴 입력칸 내용
+    ignore_texts: HashMap<String, String>,
+    /// 저장소 종류를 바꿨다가 돌아올 때 입력값 복원용 (프로필 ID, 종류)
+    backend_cache: HashMap<(String, &'static str), BackendConfig>,
     service: Option<SyncService>,
     trigger: SharedTrigger,
     login: Option<Login>,
     test: Option<Arc<Mutex<Job>>>,
+    otp: String,
+    confirm_delete: bool,
     message: Option<(String, bool)>,
     autostart: bool,
     show_secret: bool,
@@ -148,6 +156,13 @@ fn app_dirs() -> (PathBuf, PathBuf) {
     (base.join("config.json"), base)
 }
 
+fn parse_lines(t: &str) -> Vec<String> {
+    t.lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, hide_on_start: bool) -> Self {
         ui::setup_style(&cc.egui_ctx);
@@ -168,14 +183,21 @@ impl App {
         let mut app = Self {
             config_path,
             data_dir,
-            ignore_text: cfg.ignore_patterns.join("\n"),
+            ignore_texts: cfg
+                .profiles
+                .iter()
+                .map(|p| (p.id.clone(), p.ignore_patterns.join("\n")))
+                .collect(),
             saved: cfg.clone(),
+            sel: 0,
             backend_cache: HashMap::new(),
             cfg,
             service: None,
             trigger,
             login: None,
             test: None,
+            otp: String::new(),
+            confirm_delete: false,
             message: None,
             autostart: platform::autostart_enabled(),
             show_secret: false,
@@ -200,16 +222,10 @@ impl App {
     }
 
     fn dirty(&self) -> bool {
-        self.cfg != self.saved || self.ignore_text != self.saved.ignore_patterns.join("\n")
+        self.cfg != self.saved
     }
 
     fn save(&mut self) -> bool {
-        self.cfg.ignore_patterns = self
-            .ignore_text
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect();
         match self.cfg.save(&self.config_path) {
             Ok(()) => {
                 self.saved = self.cfg.clone();
@@ -229,9 +245,16 @@ impl App {
             self.page = Page::Settings;
             return;
         }
-        if self.cfg.backend.needs_oauth() && !auth::is_logged_in(&self.data_dir, &self.cfg.backend)
-        {
-            self.set_msg("먼저 '로그인' 버튼으로 계정을 연결해 주세요", true);
+        let need_login = self.cfg.profiles.iter().position(|p| {
+            p.enabled && p.backend.needs_oauth() && !auth::is_logged_in(&self.data_dir, &p.backend)
+        });
+        if let Some(i) = need_login {
+            let msg = format!(
+                "'{}' 프로필: 먼저 '로그인' 버튼으로 계정을 연결해 주세요",
+                self.cfg.profiles[i].display_name()
+            );
+            self.select(i);
+            self.set_msg(msg, true);
             self.page = Page::Settings;
             return;
         }
@@ -252,25 +275,100 @@ impl App {
         }
     }
 
+    // ───────────────────────────── 프로필 ─────────────────────────────
+    fn cur(&mut self) -> &mut Profile {
+        &mut self.cfg.profiles[self.sel]
+    }
+
+    fn select(&mut self, i: usize) {
+        if i != self.sel {
+            self.sel = i;
+            self.test = None;
+            self.otp.clear();
+            self.confirm_delete = false;
+        }
+    }
+
+    fn add_profile(&mut self, kind: ProfileKind) {
+        // 같은 NAS를 쓰는 경우가 많으므로 현재 프로필의 Synology 계정을 복사 (폴더만 비움)
+        let backend = match self.cfg.profiles.get(self.sel).map(|p| &p.backend) {
+            Some(BackendConfig::Synology {
+                url,
+                username,
+                password,
+                ..
+            }) => BackendConfig::Synology {
+                url: url.clone(),
+                username: username.clone(),
+                password: password.clone(),
+                folder: String::new(),
+            },
+            _ => BackendConfig::default(),
+        };
+        let p = Profile {
+            name: match kind {
+                ProfileKind::Obsidian => "Obsidian".into(),
+                ProfileKind::Folder => "새 폴더".into(),
+            },
+            kind,
+            backend,
+            ..Default::default()
+        };
+        self.ignore_texts.insert(p.id.clone(), String::new());
+        self.cfg.profiles.push(p);
+        let n = self.cfg.profiles.len() - 1;
+        self.select(n);
+        self.sel = n;
+        self.page = Page::Settings;
+    }
+
     fn start_test(&mut self, ctx: &egui::Context) {
         let job = Arc::new(Mutex::new(Job::Running));
         let (j, backend, dir, ctx) = (
             job.clone(),
-            self.cfg.backend.clone(),
+            self.cur().backend.clone(),
             self.data_dir.clone(),
             ctx.clone(),
         );
         std::thread::spawn(move || {
             let r = service::test_connection(&backend, &dir);
             *j.lock().unwrap() = match r {
-                Ok(0) => {
-                    Job::Ok("연결 성공! 원격 폴더가 비어 있어 첫 동기화 때 노트를 올립니다.".into())
-                }
+                Ok(0) => Job::Ok(
+                    "연결 성공! 원격 폴더가 비어 있어(또는 아직 없어) 첫 동기화 때 파일을 올립니다."
+                        .into(),
+                ),
                 Ok(n) => Job::Ok(format!("연결 성공! 원격에 파일 {n}개가 있습니다.")),
+                Err(e) if synology::needs_otp(&e) => Job::NeedOtp(format!("{e:#}")),
                 Err(e) => Job::Failed(friendly_error(&format!("{e:#}"))),
             };
             ctx.request_repaint();
         });
+        self.test = Some(job);
+    }
+
+    /// Synology 2단계 인증 코드로 로그인한 뒤 연결 테스트
+    fn start_otp(&mut self, ctx: &egui::Context) {
+        let job = Arc::new(Mutex::new(Job::Running));
+        let (j, backend, dir, ctx, otp) = (
+            job.clone(),
+            self.cur().backend.clone(),
+            self.data_dir.clone(),
+            ctx.clone(),
+            self.otp.trim().to_string(),
+        );
+        std::thread::spawn(move || {
+            let r = synology::login(&backend, &dir, Some(&otp))
+                .and_then(|_| service::test_connection(&backend, &dir));
+            *j.lock().unwrap() = match r {
+                Ok(n) => Job::Ok(format!(
+                    "인증 완료! 이 PC를 기억하므로 다음부터는 코드를 묻지 않습니다. (원격 파일 {n}개)"
+                )),
+                Err(e) if synology::needs_otp(&e) => Job::NeedOtp(format!("{e:#}")),
+                Err(e) => Job::Failed(friendly_error(&format!("{e:#}"))),
+            };
+            ctx.request_repaint();
+        });
+        self.otp.clear();
         self.test = Some(job);
     }
 
@@ -280,7 +378,7 @@ impl App {
         let (st, cn, backend, dir, ctx) = (
             state.clone(),
             cancel.clone(),
-            self.cfg.backend.clone(),
+            self.cur().backend.clone(),
             self.data_dir.clone(),
             ctx.clone(),
         );
@@ -325,14 +423,14 @@ impl App {
             Some(s) => (
                 "실시간 동기화 켜짐",
                 match &s.last_sync {
-                    Some(t) => format!("마지막 동기화 {t} · {}", s.last_summary),
+                    Some(t) => format!("마지막 동기화 {t}"),
                     None => "첫 동기화를 준비하고 있습니다".into(),
                 },
                 OK,
             ),
             None if self.cfg.validate().is_err() => (
                 "설정이 필요합니다",
-                "볼트 폴더와 저장소를 먼저 연결해 주세요".into(),
+                "동기화할 폴더(프로필)를 먼저 추가해 주세요".into(),
                 WARN,
             ),
             None => (
@@ -370,48 +468,107 @@ impl App {
                         self.stop_service();
                     }
                 }
-                if !self.cfg.vault_path.is_empty()
-                    && ui.add(ui::big_button("📂  볼트 열기")).clicked()
-                {
-                    let _ = open::that(&self.cfg.vault_path);
-                }
             });
         });
 
         ui.add_space(8.0);
         ui::card(ui, |ui| {
-            egui::Grid::new("summary")
-                .num_columns(2)
-                .spacing([16.0, 8.0])
-                .show(ui, |ui| {
-                    ui.label(RichText::new("볼트").color(MUTED));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("동기화 폴더").strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("＋ 추가").clicked() {
+                        self.add_profile(ProfileKind::Folder);
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            if self.cfg.profiles.is_empty() {
+                ui.label(
+                    RichText::new("아직 프로필이 없습니다. 설정에서 추가해 주세요").color(MUTED),
+                );
+            }
+            let mut goto = None;
+            for (i, p) in self.cfg.profiles.iter().enumerate() {
+                let st = status
+                    .as_ref()
+                    .and_then(|s| s.profiles.iter().find(|x| x.id == p.id));
+                let (dot, line) = match st {
+                    _ if !p.enabled => (MUTED, "꺼짐".to_string()),
+                    Some(s) if s.syncing => (ACCENT, "동기화 중…".into()),
+                    Some(s) if s.last_error.is_some() => (
+                        DANGER,
+                        friendly_error(s.last_error.as_deref().unwrap_or(""))
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .to_string(),
+                    ),
+                    Some(s) => (
+                        OK,
+                        match &s.last_sync {
+                            Some(t) => format!("{} · {}", &t[5..], s.last_summary),
+                            None => "준비 중".into(),
+                        },
+                    ),
+                    None => (MUTED, "대기".into()),
+                };
+                ui::inset(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui::status_dot(ui, dot, 10.0);
+                        ui.label(RichText::new(p.display_name()).strong());
+                        ui.label(
+                            RichText::new(format!(
+                                "{} · {}",
+                                match p.kind {
+                                    ProfileKind::Obsidian => "Obsidian",
+                                    ProfileKind::Folder => "폴더",
+                                },
+                                p.mode.display_name()
+                            ))
+                            .small()
+                            .color(MUTED),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("설정").clicked() {
+                                goto = Some(i);
+                            }
+                            if !p.local_path.is_empty() && ui.small_button("폴더 열기").clicked()
+                            {
+                                let _ = open::that(&p.local_path);
+                            }
+                        });
+                    });
                     ui.add(
-                        egui::Label::new(if self.cfg.vault_path.is_empty() {
-                            "-"
-                        } else {
-                            &self.cfg.vault_path
-                        })
+                        egui::Label::new(
+                            RichText::new(format!("{}  ⇄  {}", p.local_path, p.backend.summary()))
+                                .small(),
+                        )
                         .truncate(),
                     );
-                    ui.end_row();
-                    ui.label(RichText::new("저장소").color(MUTED));
-                    ui.add(egui::Label::new(backend_summary(&self.cfg.backend)).truncate());
-                    ui.end_row();
-                    ui.label(RichText::new("방식").color(MUTED));
-                    ui.label(if self.cfg.watch_local {
-                        format!(
-                            "저장 즉시 업로드 · {}초마다 원격 확인",
-                            self.cfg.poll_interval_secs
-                        )
+                    ui.label(RichText::new(line).small().color(if dot == DANGER {
+                        DANGER
                     } else {
-                        format!("{}초마다 확인", self.cfg.poll_interval_secs)
-                    });
-                    ui.end_row();
+                        MUTED
+                    }));
                 });
-            ui.add_space(4.0);
-            if ui.link("설정 변경 →").clicked() {
+                ui.add_space(4.0);
+            }
+            if let Some(i) = goto {
+                self.select(i);
                 self.page = Page::Settings;
             }
+            ui.label(
+                RichText::new(if self.cfg.watch_local {
+                    format!(
+                        "저장 즉시 업로드 · {}초마다 원격 확인",
+                        self.cfg.poll_interval_secs
+                    )
+                } else {
+                    format!("{}초마다 확인", self.cfg.poll_interval_secs)
+                })
+                .small()
+                .color(MUTED),
+            );
         });
 
         ui.add_space(8.0);
@@ -434,7 +591,7 @@ impl App {
         });
         ui.add_space(6.0);
         ui.label(
-            RichText::new("충돌이 나면 두 버전을 모두 남깁니다 (예: 노트 (충돌 PC 2025-01-01 120000).md). 다른 곳에서 지워진 파일은 볼트의 .trash 폴더로 옮겨집니다.")
+            RichText::new("충돌이 나면 두 버전을 모두 남깁니다 (예: 노트 (충돌 PC 2025-01-01 120000).md). 다른 곳에서 지워진 파일은 폴더 안 .trash 로 옮겨집니다.")
                 .small()
                 .color(MUTED),
         );
@@ -442,52 +599,201 @@ impl App {
 
     // ───────────────────────────── 설정 ─────────────────────────────
     fn settings_page(&mut self, ui: &mut egui::Ui) {
-        let vault_ok = !self.cfg.vault_path.trim().is_empty()
-            && std::path::Path::new(self.cfg.vault_path.trim()).is_dir();
-        ui::step_card(ui, 1, "Obsidian 볼트 선택", vault_ok, |ui| {
-            ui.label(RichText::new("Obsidian에서 사용하는 볼트(보관함) 폴더를 고르세요. .obsidian 폴더가 들어 있는 폴더입니다.").color(MUTED));
+        // 프로필 선택 줄
+        ui::card(ui, |ui| {
+            ui.label(RichText::new("동기화 프로필").strong());
+            ui.label(
+                RichText::new("프로필 하나가 '내 PC 폴더 ↔ 저장소 폴더' 1:1 연결입니다. Obsidian 볼트, 사진 폴더 등을 따로 만들 수 있습니다.")
+                    .small()
+                    .color(MUTED),
+            );
+            ui.add_space(6.0);
+            let mut pick = None;
+            ui.horizontal_wrapped(|ui| {
+                for (i, p) in self.cfg.profiles.iter().enumerate() {
+                    let mut t = RichText::new(p.display_name());
+                    if !p.enabled {
+                        t = t.color(MUTED).italics();
+                    }
+                    if ui.selectable_label(i == self.sel, t).clicked() {
+                        pick = Some(i);
+                    }
+                }
+                if ui.button("＋ Obsidian 볼트").clicked() {
+                    pick = Some(usize::MAX);
+                }
+                if ui.button("＋ 일반 폴더 (사진 등)").clicked() {
+                    pick = Some(usize::MAX - 1);
+                }
+            });
+            match pick {
+                Some(usize::MAX) => self.add_profile(ProfileKind::Obsidian),
+                Some(x) if x == usize::MAX - 1 => self.add_profile(ProfileKind::Folder),
+                Some(i) => self.select(i),
+                None => {}
+            }
+        });
+        ui.add_space(8.0);
+
+        if self.cfg.profiles.is_empty() {
+            ui::card(ui, |ui| {
+                ui.label("위의 '＋' 버튼으로 동기화할 폴더를 추가하세요.");
+            });
+        } else {
+            self.sel = self.sel.min(self.cfg.profiles.len() - 1);
+            self.profile_editor(ui);
+        }
+
+        ui.add_space(8.0);
+        ui::card(ui, |ui| {
+            ui.horizontal(|ui| {
+                let label = if self.service.is_some() {
+                    "저장 후 다시 시작"
+                } else {
+                    "저장하고 동기화 시작"
+                };
+                if ui::primary_button(ui, label).clicked() && self.save() {
+                    self.start_service();
+                    if self.service.is_some() {
+                        self.page = Page::Home;
+                    }
+                }
+                if ui
+                    .add_enabled(self.dirty(), egui::Button::new("저장만 하기"))
+                    .clicked()
+                    && self.save()
+                {
+                    self.set_msg("저장했습니다", false);
+                }
+                if self.dirty() {
+                    ui.label(
+                        RichText::new("저장하지 않은 변경 사항이 있습니다")
+                            .small()
+                            .color(WARN),
+                    );
+                }
+            });
+        });
+
+        ui.add_space(8.0);
+        ui::card(ui, |ui| {
+            egui::CollapsingHeader::new(RichText::new("⚙  고급 설정 (모든 프로필 공통)").strong())
+                .default_open(false)
+                .show(ui, |ui| self.advanced(ui));
+        });
+    }
+
+    fn profile_editor(&mut self, ui: &mut egui::Ui) {
+        let data_dir = self.data_dir.clone();
+        let p = self.cur();
+        let kind = p.kind;
+        let id = p.id.clone();
+
+        // ① 이름과 종류
+        ui::step_card(ui, 1, "이름과 종류", !p.name.trim().is_empty(), |ui| {
+            egui::Grid::new("pname")
+                .num_columns(2)
+                .spacing([12.0, 8.0])
+                .show(ui, |ui| {
+                    ui::field(ui, "프로필 이름", &mut p.name, false, "예: Obsidian, 사진");
+                    ui.label(RichText::new("종류").color(MUTED));
+                    ui.horizontal(|ui| {
+                        ui.radio_value(&mut p.kind, ProfileKind::Obsidian, "Obsidian 볼트");
+                        ui.radio_value(
+                            &mut p.kind,
+                            ProfileKind::Folder,
+                            "일반 폴더 (사진·문서 등)",
+                        );
+                    });
+                    ui.end_row();
+                });
+            ui.checkbox(&mut p.enabled, "이 프로필 동기화하기");
+        });
+
+        // ② 내 PC 폴더
+        ui.add_space(8.0);
+        let dir_ok =
+            !p.local_path.trim().is_empty() && std::path::Path::new(p.local_path.trim()).is_dir();
+        let mut pick_local = false;
+        ui::step_card(ui, 2, "내 PC 폴더", dir_ok, |ui| {
+            ui.label(
+                RichText::new(match kind {
+                    ProfileKind::Obsidian => {
+                        "Obsidian 볼트(보관함) 폴더를 고르세요. .obsidian 폴더가 들어 있는 폴더입니다."
+                    }
+                    ProfileKind::Folder => "동기화할 폴더를 고르세요 (예: 사진, 문서 폴더).",
+                })
+                .color(MUTED),
+            );
             ui.horizontal(|ui| {
                 ui.add(
-                    egui::TextEdit::singleline(&mut self.cfg.vault_path)
-                        .hint_text(r"C:\Users\나\Documents\MyVault")
+                    egui::TextEdit::singleline(&mut p.local_path)
+                        .hint_text(match kind {
+                            ProfileKind::Obsidian => r"C:\Users\나\Documents\MyVault",
+                            ProfileKind::Folder => r"C:\Users\나\Pictures",
+                        })
                         .desired_width(ui.available_width() - 110.0),
                 );
                 if ui.button("폴더 선택…").clicked() {
-                    if let Some(p) = platform::pick_folder() {
-                        self.cfg.vault_path = p;
-                    }
+                    pick_local = true;
                 }
             });
-            if vault_ok
-                && !std::path::Path::new(self.cfg.vault_path.trim())
+            if kind == ProfileKind::Obsidian
+                && dir_ok
+                && !std::path::Path::new(p.local_path.trim())
                     .join(".obsidian")
                     .is_dir()
             {
                 ui.label(RichText::new("⚠ 이 폴더에 .obsidian 폴더가 없습니다. 새 기기라면 빈 폴더여도 괜찮습니다.").color(WARN).small());
             }
         });
+        if pick_local {
+            if let Some(path) = platform::pick_folder() {
+                let p = self.cur();
+                if p.name.trim().is_empty() || p.name == "새 폴더" {
+                    p.name = std::path::Path::new(&path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                }
+                p.local_path = path;
+            }
+        }
 
+        // ③ 저장소
         ui.add_space(8.0);
-        let backend_ok = self.cfg.backend.validate().is_ok();
-        ui::step_card(ui, 2, "저장소 선택", backend_ok, |ui| {
+        let backend_ok = self.cur().backend.validate().is_ok();
+        ui::step_card(ui, 3, "저장소", backend_ok, |ui| {
             self.backend_picker(ui);
             ui.add_space(6.0);
             self.backend_fields(ui);
         });
 
+        // ④ 연결 확인
         ui.add_space(8.0);
-        let logged_in = !self.cfg.backend.needs_oauth()
-            || auth::is_logged_in(&self.data_dir, &self.cfg.backend);
+        let backend = self.cur().backend.clone();
+        let logged_in = !backend.needs_oauth() || auth::is_logged_in(&data_dir, &backend);
         let tested = matches!(
             self.test
                 .as_ref()
                 .map(|j| matches!(&*j.lock().unwrap(), Job::Ok(_))),
             Some(true)
         );
-        ui::step_card(ui, 3, "연결 확인", logged_in && tested, |ui| {
-            if self.cfg.backend.needs_oauth() {
+        ui::step_card(ui, 4, "연결 확인", logged_in && tested, |ui| {
+            if backend.needs_oauth() {
                 self.login_ui(ui);
                 ui.add_space(6.0);
+            }
+            if matches!(backend, BackendConfig::Synology { .. })
+                && synology::has_device_token(&data_dir, &backend)
+            {
+                ui.horizontal(|ui| {
+                    ui::status_dot(ui, OK, 8.0);
+                    ui.label(RichText::new("2단계 인증 완료 (이 PC 기억됨)").small());
+                    if ui.small_button("기억 해제").clicked() {
+                        synology::forget_device(&data_dir, &backend);
+                    }
+                });
             }
             ui.horizontal(|ui| {
                 let running = matches!(
@@ -510,6 +816,7 @@ impl App {
                     ui.label("확인하는 중…");
                 }
             });
+            let mut send_otp = false;
             if let Some(job) = &self.test {
                 match &*job.lock().unwrap() {
                     Job::Ok(m) => {
@@ -518,51 +825,135 @@ impl App {
                     Job::Failed(m) => {
                         ui.label(RichText::new(format!("✖ {m}")).color(DANGER));
                     }
+                    Job::NeedOtp(m) => {
+                        ui::inset(ui, |ui| {
+                            ui.label(RichText::new("🔐 2단계 인증").strong());
+                            ui.label(
+                                RichText::new(format!(
+                                    "{}\nOTP 앱(Synology Secure SignIn, Google Authenticator 등)의 6자리 코드를 입력하세요. 한 번 인증하면 이 PC를 기억합니다.",
+                                    m.lines().next().unwrap_or("")
+                                ))
+                                .small()
+                                .color(MUTED),
+                            );
+                            ui.horizontal(|ui| {
+                                let r = ui.add(
+                                    egui::TextEdit::singleline(&mut self.otp)
+                                        .hint_text("123456")
+                                        .desired_width(120.0),
+                                );
+                                let enter =
+                                    r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                if (ui::primary_button(ui, "인증").clicked() || enter)
+                                    && !self.otp.trim().is_empty()
+                                {
+                                    send_otp = true;
+                                }
+                            });
+                        });
+                    }
                     Job::Running => {}
                 }
             }
+            if send_otp {
+                self.start_otp(ui.ctx());
+            }
         });
 
+        // ⑤ 동기화 방식
         ui.add_space(8.0);
-        ui::step_card(
-            ui,
-            4,
-            "저장하고 시작",
-            self.service.is_some() && !self.dirty(),
-            |ui| {
-                ui.horizontal(|ui| {
-                    let label = if self.service.is_some() {
-                        "저장 후 다시 시작"
-                    } else {
-                        "저장하고 동기화 시작"
-                    };
-                    if ui::primary_button(ui, label).clicked() && self.save() {
-                        self.start_service();
-                        if self.service.is_some() {
-                            self.page = Page::Home;
-                        }
-                    }
+        let ignore = self.ignore_texts.entry(id.clone()).or_default();
+        let p = &mut self.cfg.profiles[self.sel];
+        let mut reset = false;
+        let mut delete = false;
+        ui::step_card(ui, 5, "동기화 방식", true, |ui| {
+            ui.radio_value(
+                &mut p.mode,
+                SyncMode::TwoWay,
+                "양방향 동기화 — 어느 쪽에서 바꿔도 서로 맞춥니다",
+            );
+            ui.radio_value(
+                &mut p.mode,
+                SyncMode::UploadOnly,
+                "백업 (올리기만) — 이 PC → 저장소로만 올리고, 저장소 파일은 지우지 않습니다",
+            );
+            ui.add_space(4.0);
+            if p.mode == SyncMode::TwoWay {
+                ui.checkbox(
+                    &mut p.propagate_deletes,
+                    "삭제도 동기화 (지워진 파일은 폴더 안 .trash 로 이동)",
+                );
+            }
+            if p.kind == ProfileKind::Obsidian {
+                ui.checkbox(
+                    &mut p.sync_obsidian_folder,
+                    ".obsidian 설정 폴더도 동기화 (플러그인, 테마, 단축키)",
+                );
+            }
+            ui.add_space(4.0);
+            ui.label("동기화하지 않을 파일/폴더 (한 줄에 하나, 예: Private, *.mp4)");
+            if ui
+                .add(
+                    egui::TextEdit::multiline(ignore)
+                        .desired_rows(2)
+                        .desired_width(f32::INFINITY),
+                )
+                .changed()
+            {
+                p.ignore_patterns = parse_lines(ignore);
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .button("이 프로필 동기화 기록 초기화")
+                    .on_hover_text("다음 동기화 때 양쪽 파일을 처음부터 다시 비교합니다. 파일은 지워지지 않습니다.")
+                    .clicked()
+                {
+                    reset = true;
+                }
+                if !self.confirm_delete {
                     if ui
-                        .add_enabled(self.dirty(), egui::Button::new("저장만 하기"))
+                        .button(RichText::new("프로필 삭제").color(DANGER))
                         .clicked()
-                        && self.save()
                     {
-                        self.set_msg("저장했습니다", false);
+                        self.confirm_delete = true;
                     }
-                });
-            },
-        );
-
-        ui.add_space(8.0);
-        ui::card(ui, |ui| {
-            egui::CollapsingHeader::new(RichText::new("⚙  고급 설정").strong())
-                .default_open(false)
-                .show(ui, |ui| self.advanced(ui));
+                } else {
+                    ui.label(RichText::new("프로필을 지울까요? (파일은 지워지지 않습니다)").color(DANGER));
+                    if ui.button(RichText::new("삭제").color(DANGER)).clicked() {
+                        delete = true;
+                    }
+                    if ui.button("취소").clicked() {
+                        self.confirm_delete = false;
+                    }
+                }
+            });
         });
+
+        if reset {
+            let was_running = self.service.is_some();
+            self.stop_service();
+            match service::reset_state(&self.cfg, &id, &self.data_dir) {
+                Ok(()) => self.set_msg("동기화 기록을 초기화했습니다", false),
+                Err(e) => self.set_msg(format!("{e:#}"), true),
+            }
+            if was_running {
+                self.start_service();
+            }
+        }
+        if delete {
+            self.cfg.profiles.remove(self.sel);
+            self.ignore_texts.remove(&id);
+            self.confirm_delete = false;
+            self.test = None;
+            self.sel = self.sel.saturating_sub(1);
+            self.set_msg("프로필을 지웠습니다. '저장'을 눌러야 반영됩니다", false);
+        }
     }
 
     fn backend_picker(&mut self, ui: &mut egui::Ui) {
-        let current = self.cfg.backend.kind();
+        let current = self.cur().backend.kind();
+        let id = self.cur().id.clone();
         let mut selected = current;
         let w = ((ui.available_width() - 8.0) / 2.0).max(200.0);
         egui::Grid::new("backend_cards")
@@ -581,13 +972,12 @@ impl App {
                 }
             });
         if selected != current {
-            let old = std::mem::replace(
-                &mut self.cfg.backend,
-                self.backend_cache
-                    .remove(selected)
-                    .unwrap_or_else(|| default_backend(selected)),
-            );
-            self.backend_cache.insert(current, old);
+            let new = self
+                .backend_cache
+                .remove(&(id.clone(), selected))
+                .unwrap_or_else(|| default_backend(selected));
+            let old = std::mem::replace(&mut self.cur().backend, new);
+            self.backend_cache.insert((id, current), old);
             self.test = None;
         }
     }
@@ -595,10 +985,40 @@ impl App {
     fn backend_fields(&mut self, ui: &mut egui::Ui) {
         let secret = !self.show_secret;
         let mut pick_path = false;
+        let kind = self.cur().kind;
         egui::Grid::new("backend_fields")
             .num_columns(2)
             .spacing([12.0, 8.0])
-            .show(ui, |ui| match &mut self.cfg.backend {
+            .show(ui, |ui| match &mut self.cfg.profiles[self.sel].backend {
+                BackendConfig::Synology {
+                    url,
+                    username,
+                    password,
+                    folder,
+                } => {
+                    ui::field(ui, "NAS 주소", url, false, "https://내NAS주소:5001");
+                    ui::field(ui, "아이디", username, false, "DSM 로그인 아이디");
+                    ui::field(ui, "비밀번호", password, secret, "");
+                    ui::field(
+                        ui,
+                        "NAS 폴더",
+                        folder,
+                        false,
+                        match kind {
+                            ProfileKind::Obsidian => "/home/Obsidian",
+                            ProfileKind::Folder => "/photo/PC 사진",
+                        },
+                    );
+                    ui.label("");
+                    ui.label(
+                        RichText::new(
+                            "공유 폴더 이름부터 적습니다. 없는 하위 폴더는 자동으로 만듭니다.",
+                        )
+                        .small()
+                        .color(MUTED),
+                    );
+                    ui.end_row();
+                }
                 BackendConfig::LocalFolder { path } => {
                     ui::field(
                         ui,
@@ -612,21 +1032,6 @@ impl App {
                         pick_path = true;
                     }
                     ui.end_row();
-                }
-                BackendConfig::WebDav {
-                    url,
-                    username,
-                    password,
-                } => {
-                    ui::field(
-                        ui,
-                        "WebDAV 주소",
-                        url,
-                        false,
-                        "https://내NAS주소:5006/home/Obsidian",
-                    );
-                    ui::field(ui, "NAS 아이디", username, false, "");
-                    ui::field(ui, "NAS 비밀번호", password, secret, "");
                 }
                 BackendConfig::S3 {
                     endpoint,
@@ -691,7 +1096,7 @@ impl App {
             });
         if pick_path {
             if let (Some(p), BackendConfig::LocalFolder { path }) =
-                (platform::pick_folder(), &mut self.cfg.backend)
+                (platform::pick_folder(), &mut self.cur().backend)
             {
                 *path = p;
             }
@@ -700,13 +1105,14 @@ impl App {
             ui.checkbox(&mut self.show_secret, "비밀번호 표시");
             ui.hyperlink_to(
                 RichText::new("❓ 이 저장소 설정 방법").small(),
-                backend_help(&self.cfg.backend),
+                backend_help(&self.cfg.profiles[self.sel].backend),
             );
         });
     }
 
     fn login_ui(&mut self, ui: &mut egui::Ui) {
-        let logged_in = auth::is_logged_in(&self.data_dir, &self.cfg.backend);
+        let backend = self.cur().backend.clone();
+        let logged_in = auth::is_logged_in(&self.data_dir, &backend);
         let mut finished = false;
         if let Some(login) = &self.login {
             match &*login.state.lock().unwrap() {
@@ -767,10 +1173,10 @@ impl App {
                         self.start_login(ui.ctx());
                     }
                     if ui.small_button("로그아웃").clicked() {
-                        auth::logout(&self.data_dir, &self.cfg.backend);
+                        auth::logout(&self.data_dir, &backend);
                     }
                 } else {
-                    let ok = self.cfg.backend.validate().is_ok();
+                    let ok = backend.validate().is_ok();
                     if ui
                         .add_enabled(ok, egui::Button::new("🔑  로그인"))
                         .clicked()
@@ -794,14 +1200,6 @@ impl App {
         ui.checkbox(
             &mut self.cfg.watch_local,
             "저장하자마자 바로 업로드 (실시간 감시)",
-        );
-        ui.checkbox(
-            &mut self.cfg.sync_obsidian_folder,
-            ".obsidian 설정 폴더도 동기화 (플러그인, 테마, 단축키)",
-        );
-        ui.checkbox(
-            &mut self.cfg.propagate_deletes,
-            "삭제도 동기화 (지워진 파일은 .trash 폴더로 이동)",
         );
         ui.checkbox(
             &mut self.cfg.start_on_launch,
@@ -846,34 +1244,10 @@ impl App {
                 );
                 ui.end_row();
             });
-        ui.add_space(4.0);
-        ui.label("동기화하지 않을 파일/폴더 (한 줄에 하나, 예: Private, *.mp4)");
-        ui.add(
-            egui::TextEdit::multiline(&mut self.ignore_text)
-                .desired_rows(3)
-                .desired_width(f32::INFINITY),
-        );
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            if ui
-                .button("동기화 기록 초기화")
-                .on_hover_text("다음 동기화 때 양쪽 파일을 처음부터 다시 비교합니다. 파일은 지워지지 않습니다.")
-                .clicked()
-            {
-                let was_running = self.service.is_some();
-                self.stop_service();
-                match service::reset_state(self.cfg.clone(), &self.data_dir) {
-                    Ok(()) => self.set_msg("동기화 기록을 초기화했습니다", false),
-                    Err(e) => self.set_msg(format!("{e:#}"), true),
-                }
-                if was_running {
-                    self.start_service();
-                }
-            }
-            if ui.button("설정 폴더 열기").clicked() {
-                let _ = open::that(&self.data_dir);
-            }
-        });
+        if ui.button("설정 폴더 열기").clicked() {
+            let _ = open::that(&self.data_dir);
+        }
     }
 
     // ───────────────────────────── 기록 ─────────────────────────────
@@ -915,25 +1289,10 @@ impl App {
     }
 }
 
-fn backend_summary(b: &BackendConfig) -> String {
-    match b {
-        BackendConfig::LocalFolder { path } => format!("폴더 · {path}"),
-        BackendConfig::WebDav { url, .. } => format!("WebDAV · {url}"),
-        BackendConfig::S3 {
-            endpoint,
-            bucket,
-            prefix,
-            ..
-        } => format!("S3 · {endpoint} / {bucket}/{prefix}"),
-        BackendConfig::OneDrive { folder, .. } => format!("OneDrive · /{folder}"),
-        BackendConfig::GoogleDrive { folder, .. } => format!("Google Drive · /{folder}"),
-    }
-}
-
 fn backend_help(b: &BackendConfig) -> String {
     let anchor = match b {
+        BackendConfig::Synology { .. } => "synology-nas",
         BackendConfig::LocalFolder { .. } => "폴더--공유-드라이브",
-        BackendConfig::WebDav { .. } => "synology-nas-webdav",
         BackendConfig::S3 { .. } => "네이버-클라우드--google-cloud-storage",
         BackendConfig::OneDrive { .. } => "onedrive",
         BackendConfig::GoogleDrive { .. } => "google-drive",
@@ -943,7 +1302,9 @@ fn backend_help(b: &BackendConfig) -> String {
 
 /// 기술적인 오류 메시지를 이해하기 쉬운 안내로 변환
 fn friendly_error(raw: &str) -> String {
-    let hint = if raw.contains("HTTP 401")
+    let hint = if raw.contains("Synology:") {
+        ""
+    } else if raw.contains("HTTP 401")
         || raw.contains("HTTP 403")
         || raw.contains("SignatureDoesNotMatch")
         || raw.contains("InvalidAccessKeyId")
@@ -957,7 +1318,7 @@ fn friendly_error(raw: &str) -> String {
     } else if raw.contains("invalid_grant") || raw.contains("다시 로그인") {
         "로그인이 만료되었습니다. 설정에서 다시 로그인해 주세요."
     } else if raw.contains("certificate") || raw.contains("Certificate") {
-        "서버 인증서를 신뢰할 수 없습니다. NAS에 정식 인증서(예: Let's Encrypt)를 설정하세요."
+        "서버 인증서를 신뢰할 수 없습니다. NAS에 정식 인증서(예: Let's Encrypt)를 설정하거나, 집 안에서는 http://NAS주소:5000 을 사용하세요."
     } else {
         ""
     };
@@ -1073,7 +1434,7 @@ impl eframe::App for App {
                 egui::ScrollArea::vertical()
                     .auto_shrink(false)
                     .show(ui, |ui| {
-                        ui.set_max_width((ui.available_width() - 16.0).min(720.0));
+                        ui.set_max_width((ui.available_width() - 16.0).min(760.0));
                         match self.page {
                             Page::Home => self.home_page(ui, &status),
                             _ => self.settings_page(ui),
@@ -1098,7 +1459,7 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Obsidian Sync")
-            .with_inner_size([900.0, 700.0])
+            .with_inner_size([920.0, 760.0])
             .with_min_inner_size([680.0, 520.0])
             .with_icon(Arc::new(icon)),
         ..Default::default()

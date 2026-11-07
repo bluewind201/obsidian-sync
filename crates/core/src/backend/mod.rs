@@ -7,11 +7,12 @@ pub mod gdrive;
 pub mod local;
 pub mod onedrive;
 pub mod s3;
-pub mod webdav;
+pub mod synology;
 
 use crate::config::BackendConfig;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::Path;
 
 /// 원격 파일 정보. `path`는 볼트 기준 상대경로이며 구분자는 항상 `/` 입니다.
@@ -33,17 +34,31 @@ pub trait Backend: Send {
     fn upload(&mut self, path: &str, data: &[u8]) -> Result<RemoteEntry>;
     /// 삭제. 이미 없으면 성공으로 처리
     fn delete(&mut self, path: &str) -> Result<()>;
+
+    /// 로컬 파일을 업로드. 대용량 파일을 메모리에 올리지 않도록 저장소별로 재정의할 수 있음
+    fn upload_file(&mut self, path: &str, src: &Path) -> Result<RemoteEntry> {
+        let data = std::fs::read(src)?;
+        self.upload(path, &data)
+    }
+
+    /// 원격 파일을 `dest`로 내려받음. 대용량 파일은 저장소별로 스트리밍 구현
+    fn download_to(&mut self, path: &str, dest: &mut dyn Write) -> Result<()> {
+        let data = self.download(path)?;
+        dest.write_all(&data)?;
+        Ok(())
+    }
+
+    /// 연결 확인용 추가 검사 (예: 공유 폴더 존재 여부)
+    fn check(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub fn create_backend(cfg: &BackendConfig, data_dir: &Path) -> Result<Box<dyn Backend>> {
     cfg.validate()?;
     Ok(match cfg {
+        BackendConfig::Synology { .. } => Box::new(synology::SynologyBackend::new(cfg, data_dir)?),
         BackendConfig::LocalFolder { path } => Box::new(local::LocalBackend::new(path)?),
-        BackendConfig::WebDav {
-            url,
-            username,
-            password,
-        } => Box::new(webdav::WebDavBackend::new(url, username, password)),
         BackendConfig::S3 {
             endpoint,
             region,

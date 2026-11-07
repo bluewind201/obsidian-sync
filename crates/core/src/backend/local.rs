@@ -45,18 +45,43 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
+    let tmp = temp_path(path);
+    std::fs::write(&tmp, data)?;
+    replace_file(&tmp, path)
+}
+
+/// 임시파일 경로 (같은 폴더, 동기화 제외 이름)
+pub fn temp_path(path: &Path) -> PathBuf {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    let tmp = path.with_file_name(format!(".obsync-tmp-{name}"));
-    std::fs::write(&tmp, data)?;
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        // Windows 일부 환경에서 대상이 있으면 rename이 실패할 수 있음
+    path.with_file_name(format!(".obsync-tmp-{name}"))
+}
+
+/// 임시파일을 대상 이름으로 바꿈 (Windows에서 대상이 있으면 지운 뒤 다시 시도)
+pub fn replace_file(tmp: &Path, path: &Path) -> Result<()> {
+    if let Err(e) = std::fs::rename(tmp, path) {
         let _ = std::fs::remove_file(path);
-        std::fs::rename(&tmp, path).map_err(|_| e)?;
+        if std::fs::rename(tmp, path).is_err() {
+            let _ = std::fs::remove_file(tmp);
+            return Err(e.into());
+        }
     }
     Ok(())
+}
+
+/// 파일을 스트리밍 복사한 뒤 원자적으로 교체
+pub fn copy_atomic(src: &Path, path: &Path) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = temp_path(path);
+    if let Err(e) = std::fs::copy(src, &tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    replace_file(&tmp, path)
 }
 
 /// 빈 상위 폴더 정리
@@ -123,6 +148,25 @@ impl Backend for LocalBackend {
             size: meta.len(),
             rev: rev_of(&meta),
         })
+    }
+
+    fn upload_file(&mut self, path: &str, src: &Path) -> Result<RemoteEntry> {
+        check_path(path)?;
+        let full = self.full(path);
+        copy_atomic(src, &full)?;
+        let meta = std::fs::metadata(&full)?;
+        Ok(RemoteEntry {
+            path: path.into(),
+            size: meta.len(),
+            rev: rev_of(&meta),
+        })
+    }
+
+    fn download_to(&mut self, path: &str, dest: &mut dyn std::io::Write) -> Result<()> {
+        check_path(path)?;
+        let mut f = std::fs::File::open(self.full(path))?;
+        std::io::copy(&mut f, dest)?;
+        Ok(())
     }
 
     fn delete(&mut self, path: &str) -> Result<()> {
