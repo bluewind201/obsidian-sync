@@ -16,7 +16,7 @@ pub mod service;
 pub mod state;
 mod xml;
 
-pub use config::{AppConfig, BackendConfig, Profile, ProfileKind, SyncMode};
+pub use config::{AppConfig, BackendConfig, ConflictPolicy, Profile, ProfileKind, SyncMode};
 pub use engine::{SyncEngine, SyncReport};
 pub use service::{LogLine, ProfileStatus, ServiceStatus, SyncService};
 

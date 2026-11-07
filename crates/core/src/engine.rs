@@ -9,7 +9,7 @@
 //! - 원격/로컬이 갑자기 비었거나 대량 삭제가 예정되면 동기화 중단
 
 use crate::backend::{self, Backend, RemoteEntry};
-use crate::config::{Profile, SyncMode};
+use crate::config::{ConflictPolicy, Profile, SyncMode};
 use crate::scan::{self, mtime_ms, Ignore, LocalFile};
 use crate::state::{FileState, SyncState};
 use anyhow::{bail, Context, Result};
@@ -71,8 +71,10 @@ enum Action {
     Conflict,
     Forget,
     Touch,
-    /// 원격에 이미 있는 같은 파일을 동기화된 것으로 기록 (백업 모드 첫 동기화)
+    /// 원격에 이미 있는 같은 파일을 동기화된 것으로 기록 (한 방향 모드 첫 동기화)
     Adopt,
+    /// 원격 내용으로 덮어씀. 내용이 다르면 내 기기 파일은 `.trash`에 보관
+    Replace,
 }
 
 pub struct SyncEngine {
@@ -225,16 +227,27 @@ impl SyncEngine {
             .map(|e| (e.path.clone(), e))
             .collect();
 
-        // 3) 안전장치 (백업 모드는 아무것도 지우지 않으므로 생략)
+        // 3) 안전장치: 한쪽이 통째로 비었는데 그쪽 기준으로 다른 쪽을 지우게 되는 경우 중단
         let known = self.state.files.len();
-        let two_way = self.cfg.mode == SyncMode::TwoWay;
-        if two_way && known >= 5 && remote.is_empty() && !local.is_empty() {
+        let mode = self.cfg.mode;
+        let policy = self.cfg.conflict_policy;
+        let remote_wipes_local = match mode {
+            SyncMode::TwoWay => true,
+            SyncMode::DownloadOnly => self.cfg.delete_in_target,
+            SyncMode::UploadOnly => false,
+        };
+        let local_wipes_remote = match mode {
+            SyncMode::TwoWay => true,
+            SyncMode::UploadOnly => self.cfg.delete_in_target,
+            SyncMode::DownloadOnly => false,
+        };
+        if remote_wipes_local && known >= 5 && remote.is_empty() && !local.is_empty() {
             bail!(
                 "원격 저장소가 비어 있습니다. 설정이 바뀌었거나 원격 파일이 지워진 것 같아 안전을 위해 중단했습니다. \
                  의도한 경우 '동기화 기록 초기화'를 눌러 주세요"
             );
         }
-        if two_way && known >= 5 && local.is_empty() && !remote.is_empty() {
+        if local_wipes_remote && known >= 5 && local.is_empty() && !remote.is_empty() {
             bail!(
                 "내 폴더가 비어 있습니다. 안전을 위해 중단했습니다. 의도한 경우 '동기화 기록 초기화'를 눌러 주세요"
             );
@@ -264,60 +277,77 @@ impl SyncEngine {
                 (Some(_), None) => true,
                 _ => false,
             };
-            if !two_way {
-                // 백업: 로컬 → 원격만. 원격 변경/삭제는 로컬에 반영하지 않고, 원격은 지우지 않음
-                let action = match (l, r, s) {
-                    (Some(lf), Some(rf), None) => {
-                        // 이미 올라가 있는 파일(크기 같음)은 다시 올리지 않고 기록만 함
-                        if lf.size == rf.size {
-                            Action::Adopt
-                        } else {
-                            Action::Upload
-                        }
-                    }
-                    (Some(_), None, _) => Action::Upload,
+            let touched = |lf: &LocalFile, s: &FileState| s.size != lf.size || s.mtime != lf.mtime;
+            let action = match mode {
+                // 올리기만: 내 기기 → 원격. 원격 변경은 무시, 원격 삭제는 다시 올림
+                SyncMode::UploadOnly => match (l, r, s) {
+                    // 처음 연결: 이미 올라가 있는 파일(크기 같음)은 다시 올리지 않고 기록만 함
+                    (Some(lf), Some(rf), None) if lf.size == rf.size => Action::Adopt,
+                    (Some(_), Some(_), None) | (Some(_), None, _) => Action::Upload,
                     (Some(_), Some(_), Some(_)) if lchanged => Action::Upload,
-                    (Some(lf), Some(_), Some(s)) if s.size != lf.size || s.mtime != lf.mtime => {
-                        Action::Touch
-                    }
+                    (Some(lf), Some(_), Some(s)) if touched(lf, s) => Action::Touch,
                     (Some(_), Some(_), Some(_)) => continue,
+                    (None, Some(_), Some(_)) if self.cfg.delete_in_target => Action::DeleteRemote,
                     (None, _, Some(_)) => Action::Forget,
                     (None, _, None) => continue,
-                };
-                plan.push((p.clone(), action));
-                continue;
-            }
-            let propagate = self.cfg.propagate_deletes;
-            let action = match (l, r, s) {
-                (Some(_), None, None) => Action::Upload,
-                (None, Some(_), None) => Action::Download,
-                (Some(_), Some(_), None) => Action::Conflict,
-                (None, None, Some(_)) => Action::Forget,
-                (None, None, None) => continue,
-                (Some(lf), Some(_), Some(s)) => match (lchanged, rchanged) {
-                    (false, false) => {
-                        if s.size != lf.size || s.mtime != lf.mtime {
-                            Action::Touch
-                        } else {
-                            continue;
-                        }
-                    }
-                    (true, false) => Action::Upload,
-                    (false, true) => Action::Download,
-                    (true, true) => Action::Conflict,
                 },
-                (None, Some(_), Some(_)) => {
-                    if rchanged || !propagate {
-                        Action::Download
-                    } else {
-                        Action::DeleteRemote
-                    }
-                }
-                (Some(_), None, Some(_)) => {
-                    if lchanged || !propagate {
-                        Action::Upload
-                    } else {
+                // 내려받기만: 원격 → 내 기기. 내 기기 변경은 올리지 않음
+                SyncMode::DownloadOnly => match (l, r, s) {
+                    (Some(lf), Some(rf), None) if lf.size == rf.size => Action::Adopt,
+                    // 처음 연결 때 내용이 다르면 원격 기준 (내 기기 파일은 .trash에 보관)
+                    (Some(_), Some(_), None) => Action::Replace,
+                    (None, Some(_), _) => Action::Download,
+                    (Some(_), Some(_), Some(_)) if rchanged && lchanged => Action::Replace,
+                    (Some(_), Some(_), Some(_)) if rchanged => Action::Download,
+                    (Some(lf), Some(_), Some(s)) if !lchanged && touched(lf, s) => Action::Touch,
+                    // 내 기기에서 고친 파일은 원격이 바뀔 때까지 그대로 둠
+                    (Some(_), Some(_), Some(_)) => continue,
+                    (Some(_), None, Some(_)) if self.cfg.delete_in_target && !lchanged => {
                         Action::DeleteLocal
+                    }
+                    (Some(_), None, Some(_)) | (None, None, Some(_)) => Action::Forget,
+                    // 내 기기에만 있는 파일은 올리지 않음
+                    (Some(_), None, None) | (None, None, None) => continue,
+                },
+                SyncMode::TwoWay => {
+                    let propagate = self.cfg.propagate_deletes;
+                    let conflict = match policy {
+                        ConflictPolicy::KeepBoth => Action::Conflict,
+                        ConflictPolicy::PreferLocal => Action::Upload,
+                        ConflictPolicy::PreferRemote => Action::Replace,
+                    };
+                    match (l, r, s) {
+                        (Some(_), None, None) => Action::Upload,
+                        (None, Some(_), None) => Action::Download,
+                        (Some(_), Some(_), None) => conflict,
+                        (None, None, Some(_)) => Action::Forget,
+                        (None, None, None) => continue,
+                        (Some(lf), Some(_), Some(s)) => match (lchanged, rchanged) {
+                            (false, false) => {
+                                if touched(lf, s) {
+                                    Action::Touch
+                                } else {
+                                    continue;
+                                }
+                            }
+                            (true, false) => Action::Upload,
+                            (false, true) => Action::Download,
+                            (true, true) => conflict,
+                        },
+                        (None, Some(_), Some(_)) => {
+                            if rchanged || !propagate {
+                                Action::Download
+                            } else {
+                                Action::DeleteRemote
+                            }
+                        }
+                        (Some(_), None, Some(_)) => {
+                            if lchanged || !propagate {
+                                Action::Upload
+                            } else {
+                                Action::DeleteLocal
+                            }
+                        }
                     }
                 }
             };
@@ -374,6 +404,16 @@ impl SyncEngine {
                 Action::Forget => {
                     self.state.files.remove(&p);
                     Ok(())
+                }
+                Action::Replace => {
+                    let r = remote[&p].clone();
+                    self.do_replace(&p, &r).map(|kept| {
+                        report.downloaded += 1;
+                        match kept {
+                            true => log(&format!("↓ {p} (저장소 기준, 이전 내용은 .trash에 보관)")),
+                            false => log(&format!("↓ {p}")),
+                        }
+                    })
                 }
                 Action::Adopt => {
                     let rev = remote[&p].rev.clone();
@@ -479,28 +519,52 @@ impl SyncEngine {
         Ok(!same)
     }
 
+    /// 원격 내용으로 덮어씀. 덮어쓴 내 기기 파일을 .trash에 보관했으면 true
+    fn do_replace(&mut self, p: &str, r: &RemoteEntry) -> Result<bool> {
+        let full = self.full(p);
+        let (tmp, hash) = self.fetch(p)?;
+        let mut kept = false;
+        if full.is_file() && hash_file(&full).map(|h| h != hash).unwrap_or(true) {
+            if let Err(e) = self.move_to_trash(p) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+            kept = true;
+        }
+        backend::local::replace_file(&tmp, &full)?;
+        self.record(p, hash, r.rev.clone())?;
+        Ok(kept)
+    }
+
+    /// 파일을 폴더 안 `.trash/`로 옮김 (같은 이름이 있으면 시각을 붙임)
+    fn move_to_trash(&self, p: &str) -> Result<()> {
+        let full = self.full(p);
+        let mut dest = self.vault.join(".trash");
+        for seg in p.split('/') {
+            dest.push(seg);
+        }
+        if dest.exists() {
+            let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+            let name = format!(
+                "{} ({stamp})",
+                dest.file_name().unwrap_or_default().to_string_lossy()
+            );
+            dest.set_file_name(name);
+        }
+        if let Some(d) = dest.parent() {
+            std::fs::create_dir_all(d)?;
+        }
+        if std::fs::rename(&full, &dest).is_err() {
+            std::fs::copy(&full, &dest)?;
+            std::fs::remove_file(&full)?;
+        }
+        Ok(())
+    }
+
     fn do_delete_local(&mut self, p: &str) -> Result<()> {
         let full = self.full(p);
         if full.exists() {
-            let mut dest = self.vault.join(".trash");
-            for seg in p.split('/') {
-                dest.push(seg);
-            }
-            if dest.exists() {
-                let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-                let name = format!(
-                    "{} ({stamp})",
-                    dest.file_name().unwrap_or_default().to_string_lossy()
-                );
-                dest.set_file_name(name);
-            }
-            if let Some(d) = dest.parent() {
-                std::fs::create_dir_all(d)?;
-            }
-            if std::fs::rename(&full, &dest).is_err() {
-                std::fs::copy(&full, &dest)?;
-                std::fs::remove_file(&full)?;
-            }
+            self.move_to_trash(p)?;
             backend::local::cleanup_empty_dirs(&self.vault, &full);
         }
         self.state.files.remove(p);

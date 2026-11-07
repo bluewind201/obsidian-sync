@@ -73,6 +73,27 @@ public final class NativeSyncTest {
         assertTrue(new File(remote, "photos/p.jpg").exists());
     }
 
+    @Test public void downloadOnlyMode() throws Exception {
+        File root = tmp();
+        File local = new File(root, "local"), remote = new File(root, "remote");
+        assertTrue(local.mkdirs() && remote.mkdirs());
+        Files.write(new File(remote, "r.md").toPath(), "from nas".getBytes(StandardCharsets.UTF_8));
+        Files.write(new File(local, "mine.md").toPath(), "phone only".getBytes(StandardCharsets.UTF_8));
+        JSONObject cfg = new JSONObject().put("profiles", new org.json.JSONArray()
+                .put(new JSONObject().put("id", "d").put("kind", "folder").put("mode", "download_only")
+                        .put("conflict_policy", "keep_both").put("delete_in_target", false)
+                        .put("local_path", local.getAbsolutePath())
+                        .put("backend", new JSONObject().put("type", "local_folder").put("path", remote.getAbsolutePath()))));
+        String state = new File(root, "s").getAbsolutePath();
+        assertTrue(new JSONObject(Native.syncOnce(cfg.toString(), state)).getBoolean("ok"));
+        assertEquals("from nas", new String(Files.readAllBytes(new File(local, "r.md").toPath()), StandardCharsets.UTF_8));
+        assertFalse("내려받기만: 휴대폰 파일은 올리지 않음", new File(remote, "mine.md").exists());
+        // 저장소에서 지워도 기본값이면 휴대폰에 남음
+        assertTrue(new File(remote, "r.md").delete());
+        assertTrue(new JSONObject(Native.syncOnce(cfg.toString(), state)).getBoolean("ok"));
+        assertTrue(new File(local, "r.md").exists());
+    }
+
     @Test public void legacyConfigIsNormalized() throws Exception {
         JSONObject r = new JSONObject(Native.normalize("{\"vault_path\":\"/sdcard/V\",\"backend\":{\"type\":\"web_dav\",\"url\":\"https://nas:5006/home/V\",\"username\":\"u\",\"password\":\"p\"}}"));
         assertTrue(r.getBoolean("ok"));
