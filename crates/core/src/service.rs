@@ -143,13 +143,24 @@ fn worker(
     rx: Receiver<Cmd>,
     sh: Arc<Mutex<Shared>>,
     poll: Duration,
+    quick: Option<Duration>,
     debounce: Duration,
 ) {
     let name = engine.profile().display_name();
     let mut next_poll = Instant::now();
+    let mut next_quick = quick.map(|q| Instant::now() + q);
     'outer: loop {
-        let timeout = next_poll.saturating_duration_since(Instant::now());
+        let due = next_quick.map_or(next_poll, |q| q.min(next_poll));
+        let timeout = due.saturating_duration_since(Instant::now());
         match rx.recv_timeout(timeout) {
+            Err(RecvTimeoutError::Timeout) if Instant::now() < next_poll => {
+                // 빠른 확인: 변경 신호 파일만 보고, 다른 기기가 바꿨을 때만 동기화
+                next_quick = quick.map(|q| Instant::now() + q);
+                if !engine.remote_changed() {
+                    continue;
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => engine.force_full_list(),
             Ok(Cmd::Stop) | Err(RecvTimeoutError::Disconnected) => break,
             Ok(Cmd::LocalChange) => {
                 // 연속 저장(또는 대량 삭제)이 끝날 때까지 대기
@@ -166,7 +177,7 @@ fn worker(
                 }
             }
             Ok(Cmd::AllowDeletes) => engine.allow_deletions_once(),
-            Ok(Cmd::SyncNow) | Err(RecvTimeoutError::Timeout) => {}
+            Ok(Cmd::SyncNow) => engine.force_full_list(),
         }
         if cancel.load(Ordering::Relaxed) {
             break;
@@ -213,6 +224,7 @@ fn worker(
         drop(s);
         // 로컬 변경으로 인한 동기화 후에도 원격 확인 주기는 유지
         next_poll = Instant::now() + poll;
+        next_quick = quick.map(|q| Instant::now() + q);
     }
     let mut s = sh.lock().unwrap();
     s.profiles[idx].syncing = false;
@@ -241,6 +253,8 @@ impl SyncService {
             ..Default::default()
         }));
         let poll = Duration::from_secs(cfg.poll_interval_secs.max(10));
+        let quick =
+            (cfg.quick_check_secs > 0).then(|| Duration::from_secs(cfg.quick_check_secs.max(2)));
         let debounce = Duration::from_millis(cfg.debounce_ms.clamp(200, 60_000));
 
         let mut txs = Vec::new();
@@ -291,7 +305,7 @@ impl SyncService {
             cancels.push(cancel.clone());
             let t = std::thread::Builder::new()
                 .name(format!("obsidian-sync-{idx}"))
-                .spawn(move || worker(engine, cancel, idx, rx, sh, poll, debounce))?;
+                .spawn(move || worker(engine, cancel, idx, rx, sh, poll, quick, debounce))?;
             by_profile.push(Some(tx.clone()));
             txs.push(tx);
             threads.push(t);

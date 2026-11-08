@@ -61,7 +61,22 @@ pub trait Backend: Send {
     fn check(&mut self) -> Result<()> {
         Ok(())
     }
+
+    /// 변경 신호 파일([`CHANGE_MARKER`])의 현재 값. 이 앱이 저장소를 바꿀 때마다 새 값을 씁니다.
+    /// 다른 기기는 이 작은 파일 하나만 자주 확인해 변경을 빨리 알아챕니다.
+    /// `None`이면 지원하지 않는 저장소 (전체 목록 주기 확인만 사용). 파일이 없으면 `Some("")`.
+    fn change_marker(&mut self) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// 변경 신호 파일에 새 값을 씀 (지원하지 않는 저장소는 아무것도 하지 않음)
+    fn touch_change_marker(&mut self, _token: &str) -> Result<()> {
+        Ok(())
+    }
 }
+
+/// 변경 신호 파일 경로 (동기화 대상에서 제외됨)
+pub const CHANGE_MARKER: &str = ".obsync/changed";
 
 pub fn create_backend(cfg: &BackendConfig, data_dir: &Path) -> Result<Box<dyn Backend>> {
     cfg.validate()?;

@@ -111,6 +111,12 @@ pub struct SyncEngine {
     device: String,
     cancel: Arc<AtomicBool>,
     allow_mass_delete: bool,
+    /// 마지막으로 확인한 변경 신호 값 (저장소가 지원할 때)
+    last_marker: Option<String>,
+    /// 직전 동기화가 오류 없이 끝나 동기화 기록이 저장소 상태와 같음
+    clean: bool,
+    /// 다음 동기화는 반드시 전체 목록을 조회
+    force_full: bool,
 }
 
 pub fn hash_bytes(data: &[u8]) -> String {
@@ -196,6 +202,9 @@ impl SyncEngine {
             device,
             cancel: Arc::new(AtomicBool::new(false)),
             allow_mass_delete: false,
+            last_marker: None,
+            clean: false,
+            force_full: true,
         })
     }
 
@@ -236,7 +245,55 @@ impl SyncEngine {
         p
     }
 
+    /// 다음 동기화는 변경 신호와 관계없이 저장소 전체 목록을 조회합니다
+    /// (다른 프로그램이 저장소를 바꾼 경우를 위해 주기적으로 호출)
+    pub fn force_full_list(&mut self) {
+        self.force_full = true;
+    }
+
+    /// 다른 기기가 저장소를 바꿨는지 변경 신호 파일 하나로 빠르게 확인 (요청 1번).
+    /// 지원하지 않는 저장소이거나 확인에 실패하면 false
+    pub fn remote_changed(&mut self) -> bool {
+        let Some(last) = self.last_marker.clone() else {
+            return false;
+        };
+        matches!(self.backend.change_marker(), Ok(Some(m)) if m != last)
+    }
+
     pub fn sync_once(&mut self, log: &dyn Fn(&str)) -> Result<SyncReport> {
+        let marker = self.backend.change_marker().ok().flatten();
+        // 아무도 저장소를 바꾸지 않았고 직전 동기화가 깨끗하게 끝났으면, 저장소 상태는
+        // 동기화 기록과 같으므로 전체 목록 조회(폴더마다 요청)를 건너뜁니다.
+        let use_cache = !std::mem::take(&mut self.force_full)
+            && self.clean
+            && self.cfg.mode == SyncMode::TwoWay
+            && marker.is_some()
+            && marker == self.last_marker;
+        self.clean = false;
+        let r = self.sync_inner(log, use_cache);
+        self.last_marker = marker.clone();
+        if let Ok(rep) = &r {
+            if !self.cancelled() {
+                self.clean = rep.errors.is_empty();
+                if rep.uploaded + rep.deleted_remote + rep.conflicts > 0 && marker.is_some() {
+                    // 동기화하는 사이 다른 기기가 바꿨다면 신호를 덮어쓰지 않고 남겨 둠
+                    // (다음 빠른 확인에서 변경으로 감지됨)
+                    let now = self.backend.change_marker().ok().flatten();
+                    if now == marker {
+                        let token = format!("{} {}", self.device, crate::config::unix_nanos());
+                        if self.backend.touch_change_marker(&token).is_ok() {
+                            self.last_marker = Some(token);
+                        }
+                    } else {
+                        self.clean = false;
+                    }
+                }
+            }
+        }
+        r
+    }
+
+    fn sync_inner(&mut self, log: &dyn Fn(&str), use_cache: bool) -> Result<SyncReport> {
         let started = Instant::now();
         if !self.vault.is_dir() {
             bail!("폴더를 찾을 수 없습니다: {}", self.vault.display());
@@ -269,15 +326,29 @@ impl SyncEngine {
             local_hash.insert(p.clone(), h);
         }
 
-        // 2) 원격 목록
-        let remote: HashMap<String, RemoteEntry> = self
-            .backend
-            .list()
-            .context("원격 목록 조회 실패")?
-            .into_iter()
-            .filter(|e| backend::is_safe_rel_path(&e.path) && !self.ignore.is_ignored(&e.path))
-            .map(|e| (e.path.clone(), e))
-            .collect();
+        // 2) 원격 목록 (변경이 없으면 동기화 기록으로 대신)
+        let remote: HashMap<String, RemoteEntry> = if use_cache {
+            self.state
+                .files
+                .iter()
+                .map(|(p, f)| {
+                    let e = RemoteEntry {
+                        path: p.clone(),
+                        size: f.size,
+                        rev: f.remote_rev.clone(),
+                    };
+                    (p.clone(), e)
+                })
+                .collect()
+        } else {
+            self.backend
+                .list()
+                .context("원격 목록 조회 실패")?
+                .into_iter()
+                .filter(|e| backend::is_safe_rel_path(&e.path) && !self.ignore.is_ignored(&e.path))
+                .map(|e| (e.path.clone(), e))
+                .collect()
+        };
 
         // 3) 안전장치: 한쪽이 통째로 비었는데 그쪽 기준으로 다른 쪽을 지우게 되는 경우 중단
         let known = self.state.files.len();
@@ -301,7 +372,10 @@ impl SyncEngine {
         }
         if local_wipes_remote && known >= 5 && local.is_empty() && !remote.is_empty() {
             bail!(
-                "내 폴더가 비어 있습니다. 안전을 위해 중단했습니다. 의도한 경우 '동기화 기록 초기화'를 눌러 주세요"
+                "내 폴더가 비어 있습니다 ({}). 저장소 파일이 지워지지 않도록 멈췄습니다. \
+                 폴더 위치가 바뀌었거나 접근 권한(안드로이드는 '모든 파일 접근')이 없는지 확인하세요. \
+                 저장소의 파일을 다시 받으려면 '동기화 기록 초기화'를 누르세요 (저장소 파일은 지워지지 않습니다)",
+                self.vault.display()
             );
         }
 
