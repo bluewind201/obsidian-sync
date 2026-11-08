@@ -84,11 +84,22 @@ pub fn rel_of(root: &Path, p: &Path) -> Option<String> {
 }
 
 pub fn scan(root: &Path, ignore: &Ignore) -> Result<HashMap<String, LocalFile>> {
+    // 폴더 자체를 읽을 수 없으면(없음, 드라이브 분리, 권한 없음) 빈 폴더로 취급하지 않고 실패.
+    // 빈 폴더로 보면 "모두 지워졌다"고 판단해 저장소 파일을 지울 수 있습니다.
+    if let Err(e) = std::fs::read_dir(root) {
+        anyhow::bail!(
+            "내 폴더를 읽을 수 없습니다 ({}): {e}. 폴더가 있는지, 접근 권한이 있는지 확인하세요",
+            root.display()
+        );
+    }
     let mut out = HashMap::new();
     let mut it = walkdir::WalkDir::new(root).follow_links(true).into_iter();
     while let Some(entry) = it.next() {
         let entry = match entry {
             Ok(e) => e,
+            Err(e) if e.depth() == 0 => {
+                anyhow::bail!("내 폴더를 읽을 수 없습니다 ({}): {e}", root.display());
+            }
             Err(e) => {
                 log::warn!("스캔 건너뜀: {e}");
                 continue;
@@ -124,6 +135,15 @@ pub fn scan(root: &Path, ignore: &Ignore) -> Result<HashMap<String, LocalFile>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn missing_folder_is_an_error_not_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let ig = Ignore::new(&Profile::default()).unwrap();
+        assert!(scan(dir.path(), &ig).unwrap().is_empty());
+        let e = scan(&dir.path().join("없음"), &ig).unwrap_err();
+        assert!(e.to_string().contains("읽을 수 없습니다"), "{e}");
+    }
+
     #[test]
     fn ignores() {
         let mut cfg = Profile::default();

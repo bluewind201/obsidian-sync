@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use std::io::Read;
 use std::time::Duration;
 
@@ -18,6 +18,34 @@ impl std::fmt::Display for HttpError {
 }
 impl std::error::Error for HttpError {}
 
+/// 연결 자체가 실패한 오류 (시간 초과, 끊김 등). 다시 시도하면 될 수 있음
+#[derive(Debug)]
+pub struct NetworkError(pub String);
+
+impl std::fmt::Display for NetworkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "네트워크 오류: {}", self.0)
+    }
+}
+impl std::error::Error for NetworkError {}
+
+/// 연결 문제로 실패했는지 (다시 시도할 만한 오류)
+pub fn is_network(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<NetworkError>().is_some()
+            || c.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                use std::io::ErrorKind::*;
+                matches!(
+                    io.kind(),
+                    TimedOut | ConnectionReset | ConnectionAborted | BrokenPipe | UnexpectedEof
+                )
+            })
+    })
+}
+
+/// API 호출(목록, 로그인 등) 한 번에 허용하는 시간. 파일 전송은 에이전트 기본값을 씀
+pub const API_TIMEOUT: Duration = Duration::from_secs(60);
+
 pub fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(20))
@@ -36,7 +64,7 @@ pub fn check(r: std::result::Result<ureq::Response, ureq::Error>) -> Result<ureq
             let body = resp.into_string().unwrap_or_default();
             Err(HttpError { status, url, body }.into())
         }
-        Err(e) => Err(anyhow!("네트워크 오류: {e}")),
+        Err(e) => Err(NetworkError(e.to_string()).into()),
     }
 }
 

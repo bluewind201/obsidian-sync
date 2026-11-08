@@ -27,6 +27,25 @@ const SKIP_DIRS: &[&str] = &[
 ];
 const PAGE: usize = 1000;
 const DEVICE_NAME: &str = "Obsidian Sync";
+/// 연결 끊김/응답 없음일 때 새 연결로 다시 시도하는 횟수
+const NET_RETRIES: u32 = 2;
+
+/// 받은 바이트 수를 세는 Writer (다운로드 재시도 가능 여부 판단)
+struct Counted<'a> {
+    inner: &'a mut dyn Write,
+    n: u64,
+}
+
+impl Write for Counted<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let k = self.inner.write(buf)?;
+        self.n += k as u64;
+        Ok(k)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
 
 /// 사용하는 API와 원하는 버전
 const APIS: &[(&str, u32)] = &[
@@ -150,6 +169,8 @@ pub struct SynologyBackend {
     agent: ureq::Agent,
     sid: Option<String>,
     apis: Option<HashMap<String, ApiInfo>>,
+    /// 연결 재시도 사이 대기 (테스트에서는 짧게)
+    retry_delay: std::time::Duration,
 }
 
 fn base_url(url: &str) -> String {
@@ -351,6 +372,7 @@ impl SynologyBackend {
             agent: http::agent(),
             sid: None,
             apis: None,
+            retry_delay: std::time::Duration::from_secs(2),
         })
     }
 
@@ -381,6 +403,7 @@ impl SynologyBackend {
             let resp = http::check(
                 self.agent
                     .get(&url)
+                    .timeout(http::API_TIMEOUT)
                     .query("api", "SYNO.API.Info")
                     .query("version", "1")
                     .query("method", "query")
@@ -449,7 +472,12 @@ impl SynologyBackend {
             }
         }
         let url = format!("{}/webapi/{}", self.base, info.path);
-        let resp = http::check(self.agent.post(&url).send_form(&form))?;
+        let resp = http::check(
+            self.agent
+                .post(&url)
+                .timeout(http::API_TIMEOUT)
+                .send_form(&form),
+        )?;
         let data = check_json("SYNO.API.Auth", http::read_json(resp)?)?;
         let sid = data
             .get("sid")
@@ -470,13 +498,17 @@ impl SynologyBackend {
         if let Ok(info) = self.api("SYNO.API.Auth") {
             let url = format!("{}/webapi/{}", self.base, info.path);
             let v = info.version.to_string();
-            let _ = self.agent.post(&url).send_form(&[
-                ("api", "SYNO.API.Auth"),
-                ("version", &v),
-                ("method", "logout"),
-                ("session", "FileStation"),
-                ("_sid", &sid),
-            ]);
+            let _ = self
+                .agent
+                .post(&url)
+                .timeout(http::API_TIMEOUT)
+                .send_form(&[
+                    ("api", "SYNO.API.Auth"),
+                    ("version", &v),
+                    ("method", "logout"),
+                    ("session", "FileStation"),
+                    ("_sid", &sid),
+                ]);
         }
     }
 
@@ -487,14 +519,31 @@ impl SynologyBackend {
         Ok(self.sid.clone().unwrap())
     }
 
-    /// API 호출 (세션이 만료되면 한 번 다시 로그인)
+    /// API 호출 (세션 만료 시 다시 로그인, 연결 끊김 시 새 연결로 재시도)
     fn call(&mut self, api: &str, method: &str, params: &[(&str, &str)]) -> Result<Value> {
-        match self.call_once(api, method, params) {
-            Err(e) if syno_code(&e).is_some_and(|s| s.session_expired()) => {
-                self.sid = None;
-                self.call_once(api, method, params)
+        self.retrying(|b| b.call_once(api, method, params))
+    }
+
+    /// 세션이 만료되면 한 번 다시 로그인하고, 연결이 끊기거나 응답이 없으면
+    /// 연결을 새로 맺어 최대 2번 더 시도합니다. 공유기/NAS가 쉬고 있던 연결을
+    /// 조용히 끊으면 재사용한 연결에서 응답이 오지 않는 경우가 있기 때문입니다.
+    fn retrying<T>(&mut self, mut f: impl FnMut(&mut Self) -> Result<T>) -> Result<T> {
+        let mut relogged = false;
+        let mut net_retries = 0u32;
+        loop {
+            match f(self) {
+                Err(e) if !relogged && syno_code(&e).is_some_and(|s| s.session_expired()) => {
+                    relogged = true;
+                    self.sid = None;
+                }
+                Err(e) if net_retries < NET_RETRIES && http::is_network(&e) => {
+                    net_retries += 1;
+                    log::warn!("NAS 연결 재시도 {net_retries}/{NET_RETRIES}: {e:#}");
+                    self.agent = http::agent();
+                    std::thread::sleep(self.retry_delay * net_retries);
+                }
+                r => return r,
             }
-            r => r,
         }
     }
 
@@ -510,7 +559,12 @@ impl SynologyBackend {
         ];
         form.extend_from_slice(params);
         let url = format!("{}/webapi/{}", self.base, info.path);
-        let resp = http::check(self.agent.post(&url).send_form(&form))?;
+        let resp = http::check(
+            self.agent
+                .post(&url)
+                .timeout(http::API_TIMEOUT)
+                .send_form(&form),
+        )?;
         check_json(api, http::read_json(resp)?)
     }
 
@@ -776,13 +830,14 @@ impl Backend for SynologyBackend {
 
     fn download_to(&mut self, path: &str, dest: &mut dyn Write) -> Result<()> {
         check_path(path)?;
-        match self.download_once(path, dest) {
-            Err(e) if syno_code(&e).is_some_and(|s| s.session_expired()) => {
-                self.sid = None;
-                self.download_once(path, dest)
+        // 이미 일부를 받은 뒤 끊기면 이어 쓸 수 없으므로 다시 시도하지 않음 (다음 동기화에서 처음부터)
+        let mut counted = Counted { inner: dest, n: 0 };
+        self.retrying(|b| {
+            if counted.n > 0 {
+                bail!("다운로드 중 연결이 끊겼습니다: {path}");
             }
-            r => r,
-        }
+            b.download_once(path, &mut counted)
+        })
     }
 
     fn upload(&mut self, path: &str, data: &[u8]) -> Result<RemoteEntry> {
@@ -799,13 +854,7 @@ impl Backend for SynologyBackend {
 
     fn upload_file(&mut self, path: &str, src: &Path) -> Result<RemoteEntry> {
         check_path(path)?;
-        match self.upload_once(path, src) {
-            Err(e) if syno_code(&e).is_some_and(|s| s.session_expired()) => {
-                self.sid = None;
-                self.upload_once(path, src)?;
-            }
-            r => r?,
-        }
+        self.retrying(|b| b.upload_once(path, src))?;
         let abs = self.abs(path);
         let f = self
             .info(&abs)?
@@ -908,6 +957,8 @@ mod tests {
         logins: Vec<String>,
         deletes: usize,
         tick: i64,
+        /// 0보다 크면 요청을 받고 응답 없이 연결을 끊음 (끊긴 연결 흉내)
+        drop_next: usize,
     }
 
     struct Req {
@@ -1179,6 +1230,13 @@ mod tests {
                 std::thread::spawn(move || {
                     while let Some(req) = read_req(&mut s) {
                         let _ = req.method;
+                        {
+                            let mut f = f3.lock().unwrap();
+                            if f.drop_next > 0 {
+                                f.drop_next -= 1;
+                                break;
+                            }
+                        }
                         let (ct, body) = handle(&f3, req);
                         let head = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: {ct}\r\nContent-Length: {}\r\n\r\n",
@@ -1192,6 +1250,29 @@ mod tests {
             }
         });
         (url, fake)
+    }
+
+    #[test]
+    fn reconnects_after_dropped_connection() {
+        let (url, fake) = serve();
+        let dir = tempfile::tempdir().unwrap();
+        let c = cfg(&url, "/home/Obsidian");
+        login(&c, dir.path(), Some("123456")).unwrap();
+        let mut b = SynologyBackend::new(&c, dir.path()).unwrap();
+        b.retry_delay = std::time::Duration::from_millis(10);
+        b.upload("a.md", b"a").unwrap();
+
+        // 연결이 두 번 끊겨도 새 연결로 다시 시도해 성공
+        fake.lock().unwrap().drop_next = 2;
+        assert_eq!(b.list().unwrap().len(), 1);
+        fake.lock().unwrap().drop_next = 1;
+        assert_eq!(b.download("a.md").unwrap(), b"a");
+
+        // 계속 끊기면 네트워크 오류로 실패
+        fake.lock().unwrap().drop_next = 10;
+        let e = b.list().unwrap_err();
+        assert!(http::is_network(&e), "{e:#}");
+        assert!(format!("{e:#}").contains("네트워크 오류"));
     }
 
     #[test]
