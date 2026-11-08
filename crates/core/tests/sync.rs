@@ -449,3 +449,92 @@ fn remote_deletes_are_batched() {
     assert_eq!(singles.load(Ordering::Relaxed), 0);
     assert_eq!(batches.load(Ordering::Relaxed), 2); // 200 + 40
 }
+
+#[test]
+fn change_marker_skips_full_listing_and_signals_other_devices() {
+    use obsidian_sync_core::backend::{self, Backend, RemoteEntry};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// 전체 목록 조회 횟수를 세는 래퍼 (변경 신호는 그대로 전달)
+    struct Lists(Box<dyn Backend>, Arc<AtomicUsize>);
+    impl Backend for Lists {
+        fn id(&self) -> String {
+            self.0.id()
+        }
+        fn list(&mut self) -> anyhow::Result<Vec<RemoteEntry>> {
+            self.1.fetch_add(1, Ordering::Relaxed);
+            self.0.list()
+        }
+        fn download(&mut self, p: &str) -> anyhow::Result<Vec<u8>> {
+            self.0.download(p)
+        }
+        fn upload(&mut self, p: &str, d: &[u8]) -> anyhow::Result<RemoteEntry> {
+            self.0.upload(p, d)
+        }
+        fn delete(&mut self, p: &str) -> anyhow::Result<()> {
+            self.0.delete(p)
+        }
+        fn change_marker(&mut self) -> anyhow::Result<Option<String>> {
+            self.0.change_marker()
+        }
+        fn touch_change_marker(&mut self, t: &str) -> anyhow::Result<()> {
+            self.0.touch_change_marker(t)
+        }
+    }
+
+    let e = env();
+    let lists = Arc::new(AtomicUsize::new(0));
+    let mk = |vault: &Path, data: &Path, dev: &str| {
+        let p = profile(vault, &e.remote);
+        let inner = backend::create_backend(&p.backend, data).unwrap();
+        SyncEngine::with_backend(p, dev, Box::new(Lists(inner, lists.clone())), data).unwrap()
+    };
+    let mut a = mk(&e.a, &e.data_a, "PC");
+    let mut b = mk(&e.b, &e.data_b, "Phone");
+
+    write(&e.a.join("note.md"), "v1");
+    a.sync_once(&noop).unwrap();
+    b.sync_once(&noop).unwrap();
+    assert_eq!(fs::read_to_string(e.b.join("note.md")).unwrap(), "v1");
+    // 변경 신호 파일은 동기화 대상이 아님
+    assert!(!e.b.join(".obsync").exists());
+    assert!(e.remote.join(".obsync/changed").exists());
+
+    // 아무도 바꾸지 않았으면 다른 기기 빠른 확인은 "변경 없음"
+    assert!(!b.remote_changed());
+
+    // 내 기기에서 저장 → 전체 목록 조회 없이 업로드
+    let before = lists.load(Ordering::Relaxed);
+    write(&e.a.join("note.md"), "v2");
+    write(&e.a.join("new.md"), "n");
+    let rep = a.sync_once(&noop).unwrap();
+    assert_eq!(rep.uploaded, 2);
+    assert_eq!(
+        lists.load(Ordering::Relaxed),
+        before,
+        "목록 조회를 건너뛰어야 함"
+    );
+    assert_eq!(fs::read_to_string(e.remote.join("note.md")).unwrap(), "v2");
+
+    // 다른 기기는 변경 신호로 바로 알아채고 받아옴
+    assert!(b.remote_changed());
+    b.sync_once(&noop).unwrap();
+    assert_eq!(fs::read_to_string(e.b.join("note.md")).unwrap(), "v2");
+    assert_eq!(fs::read_to_string(e.b.join("new.md")).unwrap(), "n");
+    assert!(!a.remote_changed() || a.sync_once(&noop).unwrap().changes() == 0);
+
+    // 다른 프로그램이 저장소를 직접 바꾸면 신호가 없으므로 주기적 전체 확인에서 잡힘
+    write(&e.remote.join("outside.md"), "o");
+    assert_eq!(a.sync_once(&noop).unwrap().downloaded, 0);
+    a.force_full_list();
+    assert_eq!(a.sync_once(&noop).unwrap().downloaded, 1);
+    assert!(e.a.join("outside.md").exists());
+
+    // 내 기기에서 지운 것도 목록 조회 없이 반영
+    let before = lists.load(Ordering::Relaxed);
+    fs::remove_file(e.a.join("new.md")).unwrap();
+    assert_eq!(a.sync_once(&noop).unwrap().deleted_remote, 1);
+    assert_eq!(lists.load(Ordering::Relaxed), before);
+    assert!(!e.remote.join("new.md").exists());
+}

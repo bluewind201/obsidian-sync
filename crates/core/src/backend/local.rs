@@ -1,6 +1,6 @@
 //! 로컬/네트워크 폴더 저장소.
 //! Synology SMB 공유폴더(`\\NAS\home\Obsidian`), 매핑된 드라이브, Synology Drive 동기화 폴더 등에 사용합니다.
-use super::{check_path, Backend, RemoteEntry};
+use super::{check_path, Backend, RemoteEntry, CHANGE_MARKER};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -167,6 +167,18 @@ impl Backend for LocalBackend {
         let mut f = std::fs::File::open(self.full(path))?;
         std::io::copy(&mut f, dest)?;
         Ok(())
+    }
+
+    fn change_marker(&mut self) -> Result<Option<String>> {
+        match std::fs::read_to_string(self.full(CHANGE_MARKER)) {
+            Ok(s) => Ok(Some(s)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Some(String::new())),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn touch_change_marker(&mut self, token: &str) -> Result<()> {
+        write_atomic(&self.full(CHANGE_MARKER), token.as_bytes())
     }
 
     fn delete(&mut self, path: &str) -> Result<()> {

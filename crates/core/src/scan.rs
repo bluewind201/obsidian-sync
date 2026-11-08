@@ -18,6 +18,7 @@ pub const DEFAULT_IGNORES: &[&str] = &[
     "**/*.tmp",
     "**/~$*",
     "**/.obsync-tmp-*",
+    ".obsync/**",
     "**/@eaDir/**",
     "**/#recycle/**",
     "**/.SynologyWorkingDirectory/**",

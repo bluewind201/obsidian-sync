@@ -12,9 +12,12 @@ pub struct AppConfig {
     /// 동기화 프로필 목록
     #[serde(default)]
     pub profiles: Vec<Profile>,
-    /// 원격 변경 확인 주기(초)
+    /// 저장소 전체 목록 확인 주기(초). 다른 프로그램이 저장소를 바꾼 경우를 잡아냄
     #[serde(default = "default_poll")]
     pub poll_interval_secs: u64,
+    /// 다른 기기 변경 빠른 확인 주기(초). 변경 신호 파일 하나만 확인 (0 = 끔)
+    #[serde(default = "default_quick")]
+    pub quick_check_secs: u64,
     /// 로컬 변경 후 동기화까지 대기 시간(ms). 연속 저장을 묶어 처리합니다.
     #[serde(default = "default_debounce")]
     pub debounce_ms: u64,
@@ -130,8 +133,18 @@ impl SyncMode {
 fn default_poll() -> u64 {
     60
 }
+fn default_quick() -> u64 {
+    5
+}
 fn default_debounce() -> u64 {
-    1500
+    1000
+}
+
+pub fn unix_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
 }
 fn default_true() -> bool {
     true

@@ -839,10 +839,17 @@ impl App {
             }
             ui.label(
                 RichText::new(if self.cfg.watch_local {
-                    format!(
-                        "저장 즉시 업로드 · {}초마다 원격 확인",
-                        self.cfg.poll_interval_secs
-                    )
+                    if self.cfg.quick_check_secs > 0 {
+                        format!(
+                            "저장 즉시 업로드 · 다른 기기 변경 {}초마다 확인",
+                            self.cfg.quick_check_secs.max(2)
+                        )
+                    } else {
+                        format!(
+                            "저장 즉시 업로드 · {}초마다 원격 확인",
+                            self.cfg.poll_interval_secs
+                        )
+                    }
                 } else {
                     format!("{}초마다 확인", self.cfg.poll_interval_secs)
                 })
@@ -1562,11 +1569,22 @@ impl App {
             .num_columns(2)
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
-                ui.label("원격 확인 주기");
+                ui.label("다른 기기 변경 확인");
+                ui.add(
+                    egui::DragValue::new(&mut self.cfg.quick_check_secs)
+                        .range(0..=600)
+                        .suffix(" 초"),
+                )
+                .on_hover_text("작은 신호 파일 하나만 확인합니다. 0이면 끔");
+                ui.end_row();
+                ui.label("전체 목록 확인 주기");
                 ui.add(
                     egui::DragValue::new(&mut self.cfg.poll_interval_secs)
                         .range(10..=3600)
                         .suffix(" 초"),
+                )
+                .on_hover_text(
+                    "다른 프로그램(파일 탐색기, Synology Drive 등)이 바꾼 파일을 찾습니다",
                 );
                 ui.end_row();
                 ui.label("저장 후 대기");

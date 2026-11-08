@@ -822,6 +822,26 @@ impl Backend for SynologyBackend {
         Ok(files)
     }
 
+    fn change_marker(&mut self) -> Result<Option<String>> {
+        match self.download(super::CHANGE_MARKER) {
+            Ok(b) => Ok(Some(String::from_utf8_lossy(&b).into_owned())),
+            Err(e) if syno_code(&e).is_some_and(|s| s.not_found()) => Ok(Some(String::new())),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn touch_change_marker(&mut self, token: &str) -> Result<()> {
+        let tmp = std::env::temp_dir().join(format!(
+            "obsync-marker-{}",
+            &crate::engine::hash_bytes(self.id().as_bytes())[..16]
+        ));
+        std::fs::write(&tmp, token)?;
+        check_path(super::CHANGE_MARKER)?;
+        let r = self.retrying(|b| b.upload_once(super::CHANGE_MARKER, &tmp));
+        let _ = std::fs::remove_file(&tmp);
+        r
+    }
+
     fn download(&mut self, path: &str) -> Result<Vec<u8>> {
         let mut buf = Vec::new();
         self.download_to(path, &mut buf)?;
@@ -1267,6 +1287,13 @@ mod tests {
         assert_eq!(b.list().unwrap().len(), 1);
         fake.lock().unwrap().drop_next = 1;
         assert_eq!(b.download("a.md").unwrap(), b"a");
+
+        // 변경 신호 파일: 없으면 빈 값, 쓰면 그 값, 목록에는 나오지만 엔진이 제외함
+        assert_eq!(b.change_marker().unwrap().as_deref(), Some(""));
+        b.touch_change_marker("PC 1").unwrap();
+        assert_eq!(b.change_marker().unwrap().as_deref(), Some("PC 1"));
+        b.touch_change_marker("PC 2").unwrap();
+        assert_eq!(b.change_marker().unwrap().as_deref(), Some("PC 2"));
 
         // 계속 끊기면 네트워크 오류로 실패
         fake.lock().unwrap().drop_next = 10;
