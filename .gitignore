@@ -9,4 +9,9 @@
 *.log
 config.json
 *.secret
+/dist/
+ObsidianSync-*.zip
+ObsidianSync-*.apk
+SHA256SUMS.txt
+android/app/src/main/jniLibs/
 

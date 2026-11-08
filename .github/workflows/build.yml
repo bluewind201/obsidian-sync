@@ -156,4 +156,9 @@ jobs:
 
           커밋: ${GITHUB_SHA::7}
           NOTES
-          gh release create "$TAG" artifacts/* --target "$GITHUB_SHA" --title "Obsidian Sync $TAG" --notes-file notes.md --latest
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" artifacts/* --clobber
+            gh release edit "$TAG" --title "Obsidian Sync $TAG" --notes-file notes.md --latest
+          else
+            gh release create "$TAG" artifacts/* --target "$GITHUB_SHA" --title "Obsidian Sync $TAG" --notes-file notes.md --latest
+          fi
