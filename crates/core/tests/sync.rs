@@ -506,7 +506,8 @@ fn change_marker_skips_full_listing_and_signals_other_devices() {
 
     // 내 기기에서 저장 → 전체 목록 조회 없이 업로드
     let before = lists.load(Ordering::Relaxed);
-    write(&e.a.join("note.md"), "v2");
+    // 크기를 바꿔 씀: 같은 크기·같은 수정시각(파일시스템 시간 해상도 안)이면 변경으로 보지 않음
+    write(&e.a.join("note.md"), "v2 edited");
     write(&e.a.join("new.md"), "n");
     let rep = a.sync_once(&noop).unwrap();
     assert_eq!(rep.uploaded, 2);
@@ -515,12 +516,18 @@ fn change_marker_skips_full_listing_and_signals_other_devices() {
         before,
         "목록 조회를 건너뛰어야 함"
     );
-    assert_eq!(fs::read_to_string(e.remote.join("note.md")).unwrap(), "v2");
+    assert_eq!(
+        fs::read_to_string(e.remote.join("note.md")).unwrap(),
+        "v2 edited"
+    );
 
     // 다른 기기는 변경 신호로 바로 알아채고 받아옴
     assert!(b.remote_changed());
     b.sync_once(&noop).unwrap();
-    assert_eq!(fs::read_to_string(e.b.join("note.md")).unwrap(), "v2");
+    assert_eq!(
+        fs::read_to_string(e.b.join("note.md")).unwrap(),
+        "v2 edited"
+    );
     assert_eq!(fs::read_to_string(e.b.join("new.md")).unwrap(), "n");
     assert!(!a.remote_changed() || a.sync_once(&noop).unwrap().changes() == 0);
 
