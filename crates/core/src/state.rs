@@ -20,6 +20,10 @@ pub struct SyncState {
     pub backend_id: String,
     #[serde(default)]
     pub files: BTreeMap<String, FileState>,
+    /// Once a mass deletion is held, changing the file count must not approve it.
+    /// Cleared only by explicit approval or a complete plan with no deletions.
+    #[serde(default)]
+    pub deletion_pending: bool,
 }
 
 impl SyncState {

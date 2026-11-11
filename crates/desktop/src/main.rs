@@ -143,6 +143,9 @@ struct App {
     service: Option<SyncService>,
     /// 백그라운드에서 멈추는 중인 이전 서비스 (화면이 멈추지 않도록)
     stopping: Option<std::thread::JoinHandle<()>>,
+    pending_start: bool,
+    pending_reset: Option<(AppConfig, String)>,
+    resetting: Option<std::thread::JoinHandle<anyhow::Result<()>>>,
     trigger: SharedTrigger,
     login: Option<Login>,
     test: Option<Arc<Mutex<Job>>>,
@@ -213,6 +216,9 @@ impl App {
             cfg,
             service: None,
             stopping: None,
+            pending_start: false,
+            pending_reset: None,
+            resetting: None,
             trigger,
             login: None,
             test: None,
@@ -260,8 +266,13 @@ impl App {
     }
 
     fn start_service(&mut self) {
-        self.stop_service();
-        self.wait_stopped();
+        if self.service.is_some() {
+            self.stop_service();
+        }
+        if self.transitioning() {
+            self.pending_start = true;
+            return;
+        }
         if let Err(e) = self.cfg.validate() {
             self.set_msg(format!("{e:#}"), true);
             self.page = Page::Settings;
@@ -290,19 +301,73 @@ impl App {
         }
     }
 
-    /// 중지는 진행 중인 파일 하나가 끝날 때까지 걸릴 수 있어 백그라운드에서 합니다
+    fn transitioning(&self) -> bool {
+        self.stopping.is_some() || self.pending_reset.is_some() || self.resetting.is_some()
+    }
+
+    fn reset_profile(&mut self, id: String) {
+        if self.pending_reset.is_some() || self.resetting.is_some() {
+            return;
+        }
+        let restart = self.service.is_some() || self.pending_start;
+        self.stop_service();
+        self.pending_start = restart;
+        self.pending_reset = Some((self.cfg.clone(), id));
+    }
+
     fn stop_service(&mut self) {
+        self.pending_start = false;
         *self.trigger.lock().unwrap() = None;
         if let Some(s) = self.service.take() {
-            self.wait_stopped();
+            debug_assert!(self.stopping.is_none());
             self.stopping = Some(std::thread::spawn(move || s.stop()));
         }
     }
 
-    /// 이전 서비스가 완전히 멈출 때까지 대기 (다시 시작하거나 기록을 지우기 전에)
-    fn wait_stopped(&mut self) {
-        if let Some(h) = self.stopping.take() {
-            let _ = h.join();
+    // Join only completed tasks; never wait for network I/O in a UI callback.
+    fn poll_lifecycle(&mut self) {
+        if let Some(h) = &self.stopping {
+            if !h.is_finished() {
+                return;
+            }
+            if self.stopping.take().unwrap().join().is_err() {
+                self.pending_start = false;
+                self.pending_reset = None;
+                self.set_msg(
+                    "동기화 중지를 완료하지 못했습니다. 앱을 다시 시작해 주세요",
+                    true,
+                );
+                return;
+            }
+        }
+        if let Some(h) = &self.resetting {
+            if !h.is_finished() {
+                return;
+            }
+            match self.resetting.take().unwrap().join() {
+                Ok(Ok(())) => self.set_msg("동기화 기록을 초기화했습니다", false),
+                result => {
+                    self.pending_start = false;
+                    self.set_msg(
+                        match result {
+                            Ok(Err(e)) => format!("초기화하지 못했습니다: {e:#}"),
+                            _ => "초기화 작업을 완료하지 못했습니다".into(),
+                        },
+                        true,
+                    );
+                    return;
+                }
+            }
+        }
+        if let Some((cfg, id)) = self.pending_reset.take() {
+            let dir = self.data_dir.clone();
+            self.resetting = Some(std::thread::spawn(move || {
+                service::reset_state(&cfg, &id, &dir)
+            }));
+            return;
+        }
+        if std::mem::take(&mut self.pending_start) {
+            self.start_service();
         }
     }
 
@@ -687,6 +752,11 @@ impl App {
                 },
                 OK,
             ),
+            None if self.transitioning() => (
+                "동기화 전환 중…",
+                "진행 중인 작업을 마친 뒤 요청을 처리합니다".into(),
+                WARN,
+            ),
             None if self.cfg.validate().is_err() => (
                 "설정이 필요합니다",
                 "동기화할 폴더(프로필)를 먼저 추가해 주세요".into(),
@@ -710,7 +780,11 @@ impl App {
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if self.service.is_none() {
-                    if ui::primary_button(ui, "▶  동기화 시작").clicked() && self.save() {
+                    if ui
+                        .add_enabled(!self.transitioning(), ui::big_button("▶  동기화 시작"))
+                        .clicked()
+                        && self.save()
+                    {
                         self.start_service();
                     }
                 } else {
@@ -736,7 +810,7 @@ impl App {
                 ui.add_space(8.0);
                 ui.label(
                     RichText::new(
-                        "의도한 삭제라면 '삭제 진행'을, 실수라면 설정의 '동기화 기록 초기화'를 누르세요 (지워진 파일이 복원됩니다)",
+                        "대량 삭제를 보류했습니다. 아래 개수는 모든 프로필의 보류된 삭제 합계입니다. 의도한 삭제인지 확인한 후 '삭제 진행'을 누르세요.",
                     )
                     .color(WARN),
                 );
@@ -939,7 +1013,11 @@ impl App {
                 } else {
                     "저장하고 동기화 시작"
                 };
-                if ui::primary_button(ui, label).clicked() && self.save() {
+                if ui
+                    .add_enabled(!self.transitioning(), ui::big_button(label))
+                    .clicked()
+                    && self.save()
+                {
                     self.start_service();
                     if self.service.is_some() {
                         self.page = Page::Home;
@@ -1149,6 +1227,7 @@ impl App {
 
         // ⑤ 동기화 방식
         ui.add_space(8.0);
+        let transitioning = self.transitioning();
         let ignore = self.ignore_texts.entry(id.clone()).or_default();
         let p = &mut self.cfg.profiles[self.sel];
         let mut reset = false;
@@ -1235,7 +1314,7 @@ impl App {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 if ui
-                    .button("이 프로필 동기화 기록 초기화")
+                    .add_enabled(!transitioning, egui::Button::new("이 프로필 동기화 기록 초기화"))
                     .on_hover_text("다음 동기화 때 양쪽 파일을 처음부터 다시 비교합니다. 파일은 지워지지 않습니다.")
                     .clicked()
                 {
@@ -1261,16 +1340,7 @@ impl App {
         });
 
         if reset {
-            let was_running = self.service.is_some();
-            self.stop_service();
-            self.wait_stopped();
-            match service::reset_state(&self.cfg, &id, &self.data_dir) {
-                Ok(()) => self.set_msg("동기화 기록을 초기화했습니다", false),
-                Err(e) => self.set_msg(format!("{e:#}"), true),
-            }
-            if was_running {
-                self.start_service();
-            }
+            self.reset_profile(id.clone());
         }
         if delete {
             self.cfg.profiles.remove(self.sel);
@@ -1690,6 +1760,7 @@ fn friendly_error(raw: &str) -> String {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_lifecycle();
         if self.hide_on_start {
             self.hide_on_start = false;
             platform::hide_window(self.hwnd);
@@ -1829,3 +1900,6 @@ fn main() -> eframe::Result<()> {
         Box::new(move |cc| Ok(Box::new(App::new(cc, hide)))),
     )
 }
+
+#[cfg(test)]
+mod lifecycle_tests;

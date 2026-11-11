@@ -545,3 +545,183 @@ fn change_marker_skips_full_listing_and_signals_other_devices() {
     assert_eq!(lists.load(Ordering::Relaxed), before);
     assert!(!e.remote.join("new.md").exists());
 }
+
+#[test]
+fn pending_mass_deletes_do_not_block_followup_edits() {
+    let e = env();
+    let mut a = engine(&e.a, &e.remote, &e.data_a, "PC");
+    for i in 0..50 {
+        write(&e.a.join(format!("{i}.md")), "base");
+    }
+    a.sync_once(&noop).unwrap();
+    for i in 0..40 {
+        fs::remove_file(e.a.join(format!("{i}.md"))).unwrap();
+    }
+    let mut b = engine(&e.b, &e.remote, &e.data_b, "Phone");
+    b.sync_once(&noop).unwrap();
+    assert!(a.sync_once(&noop).is_err());
+    write(&e.a.join("49.md"), "followup edit");
+    assert!(a.sync_once(&noop).is_err());
+    assert_eq!(
+        fs::read_to_string(e.remote.join("49.md")).unwrap(),
+        "followup edit"
+    );
+    assert!(
+        b.remote_changed(),
+        "partial progress must notify other devices"
+    );
+    b.sync_once(&noop).unwrap();
+    assert_eq!(
+        fs::read_to_string(e.b.join("49.md")).unwrap(),
+        "followup edit"
+    );
+    assert!(
+        e.remote.join("0.md").exists(),
+        "unapproved deletion must stay protected"
+    );
+    drop(a);
+    let mut a = engine(&e.a, &e.remote, &e.data_a, "PC");
+    for i in 50..90 {
+        write(&e.a.join(format!("{i}.md")), "new file");
+    }
+    assert!(a.sync_once(&noop).is_err());
+    drop(a);
+    let mut a = engine(&e.a, &e.remote, &e.data_a, "PC");
+    assert!(
+        a.sync_once(&noop).is_err(),
+        "restart must preserve deletion protection"
+    );
+    a.allow_deletions_once();
+    assert_eq!(a.sync_once(&noop).unwrap().deleted_remote, 40);
+    assert_eq!(a.sync_once(&noop).unwrap().changes(), 0);
+}
+
+#[test]
+fn bulk_edits_resume_after_mid_batch_cancel_without_reset() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let e = env();
+    let mut a = engine(&e.a, &e.remote, &e.data_a, "PC");
+    for i in 0..100 {
+        write(&e.a.join(format!("{i}.md")), "base");
+    }
+    a.sync_once(&noop).unwrap();
+    for i in 0..100 {
+        write(&e.a.join(format!("{i}.md")), "bulk modified");
+    }
+    let cancel = a.cancel_flag();
+    let progress = AtomicUsize::new(0);
+    let r = a
+        .sync_once(&|line| {
+            if line.starts_with('↑') && progress.fetch_add(1, Ordering::Relaxed) == 9 {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        })
+        .unwrap();
+    assert_eq!(r.uploaded, 10);
+    drop(a);
+    let mut a = engine(&e.a, &e.remote, &e.data_a, "PC");
+    assert_eq!(a.sync_once(&noop).unwrap().uploaded, 90);
+    write(&e.a.join("99.md"), "followup after restart");
+    assert_eq!(a.sync_once(&noop).unwrap().uploaded, 1);
+    assert_eq!(a.sync_once(&noop).unwrap().changes(), 0);
+    for i in 0..99 {
+        assert_eq!(
+            fs::read_to_string(e.remote.join(format!("{i}.md"))).unwrap(),
+            "bulk modified"
+        );
+    }
+}
+
+#[test]
+fn pending_delete_latch_clears_when_files_return_and_rearms_after_approval() {
+    let e = env();
+    let mut a = engine(&e.a, &e.remote, &e.data_a, "PC");
+    for i in 0..50 {
+        write(&e.a.join(format!("{i}.md")), "base");
+    }
+    a.sync_once(&noop).unwrap();
+    for i in 0..40 {
+        fs::remove_file(e.a.join(format!("{i}.md"))).unwrap();
+    }
+    assert!(a.sync_once(&noop).is_err());
+    // A canceled scan must not clear the persisted hold.
+    a.cancel_flag()
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    a.sync_once(&noop).unwrap();
+    drop(a);
+    let mut a = engine(&e.a, &e.remote, &e.data_a, "PC");
+    assert!(a.sync_once(&noop).is_err());
+    assert!(e.remote.join("0.md").exists());
+    // Reappearance of all files resolves the held plan without approval/reset.
+    for i in 0..40 {
+        write(&e.a.join(format!("{i}.md")), "base");
+    }
+    a.sync_once(&noop).unwrap();
+    drop(a);
+    let mut a = engine(&e.a, &e.remote, &e.data_a, "PC");
+    fs::remove_file(e.a.join("0.md")).unwrap();
+    assert_eq!(a.sync_once(&noop).unwrap().deleted_remote, 1);
+    for i in 1..40 {
+        fs::remove_file(e.a.join(format!("{i}.md"))).unwrap();
+    }
+    assert!(a.sync_once(&noop).is_err());
+    a.allow_deletions_once();
+    assert_eq!(a.sync_once(&noop).unwrap().deleted_remote, 39);
+    // Approval is not a permanent waiver for later mass deletions.
+    for i in 50..90 {
+        write(&e.a.join(format!("{i}.md")), "later");
+    }
+    a.sync_once(&noop).unwrap();
+    for i in 50..90 {
+        fs::remove_file(e.a.join(format!("{i}.md"))).unwrap();
+    }
+    assert!(a.sync_once(&noop).is_err());
+    assert!(e.remote.join("50.md").exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn unreadable_files_cannot_clear_pending_deletion_protection() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let e = env();
+    let mut a = engine(&e.a, &e.remote, &e.data_a, "PC");
+    for i in 0..50 {
+        write(&e.a.join(format!("{i}.md")), "base");
+    }
+    a.sync_once(&noop).unwrap();
+    for i in 0..40 {
+        fs::remove_file(e.remote.join(format!("{i}.md"))).unwrap();
+    }
+    a.force_full_list();
+    assert!(a.sync_once(&noop).is_err());
+    for i in 50..90 {
+        write(&e.a.join(format!("{i}.md")), "new");
+    }
+    assert!(a.sync_once(&noop).is_err());
+    let mut locks = Vec::new();
+    for i in 0..40 {
+        let p = e.a.join(format!("{i}.md"));
+        write(&p, "temporarily unreadable");
+        locks.push(
+            fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(p)
+                .unwrap(),
+        );
+    }
+    let unreadable = a.sync_once(&noop).unwrap();
+    assert_eq!(unreadable.errors.len(), 40);
+    assert_eq!(unreadable.deleted_local, 0);
+    drop(locks);
+    for i in 0..40 {
+        write(&e.a.join(format!("{i}.md")), "base");
+    }
+    drop(a);
+    let mut a = engine(&e.a, &e.remote, &e.data_a, "PC");
+    assert!(
+        a.sync_once(&noop).is_err(),
+        "incomplete plan must preserve hold"
+    );
+    assert!(e.a.join("0.md").exists());
+}

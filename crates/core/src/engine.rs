@@ -36,8 +36,7 @@ impl std::fmt::Display for MassDeletePending {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "한 번에 {}개 파일이 삭제될 예정이라 확인을 기다립니다. 의도한 삭제라면 '삭제 진행'을 누르세요. \
-             실수라면 '동기화 기록 초기화'를 누르면 지워진 파일이 복원됩니다",
+            "한 번에 {}개 파일이 삭제될 예정이라 삭제를 보류했습니다. 의도한 삭제인지 확인한 후 '삭제 진행'을 누르세요.",
             self.count
         )
     }
@@ -272,9 +271,9 @@ impl SyncEngine {
         self.clean = false;
         let r = self.sync_inner(log, use_cache);
         self.last_marker = marker.clone();
-        if let Ok(rep) = &r {
+        if let Ok((rep, pending)) = &r {
             if !self.cancelled() {
-                self.clean = rep.errors.is_empty();
+                self.clean = rep.errors.is_empty() && pending.is_none();
                 if rep.uploaded + rep.deleted_remote + rep.conflicts > 0 && marker.is_some() {
                     // 동기화하는 사이 다른 기기가 바꿨다면 신호를 덮어쓰지 않고 남겨 둠
                     // (다음 빠른 확인에서 변경으로 감지됨)
@@ -290,10 +289,18 @@ impl SyncEngine {
                 }
             }
         }
-        r
+        let (report, pending) = r?;
+        if let Some(count) = pending {
+            return Err(MassDeletePending { count }.into());
+        }
+        Ok(report)
     }
 
-    fn sync_inner(&mut self, log: &dyn Fn(&str), use_cache: bool) -> Result<SyncReport> {
+    fn sync_inner(
+        &mut self,
+        log: &dyn Fn(&str),
+        use_cache: bool,
+    ) -> Result<(SyncReport, Option<usize>)> {
         let started = Instant::now();
         if !self.vault.is_dir() {
             bail!("폴더를 찾을 수 없습니다: {}", self.vault.display());
@@ -305,7 +312,7 @@ impl SyncEngine {
         let mut local_hash: HashMap<String, String> = HashMap::new();
         for (p, f) in &local {
             if self.cancelled() {
-                return Ok(report);
+                return Ok((report, None));
             }
             let cached = self
                 .state
@@ -485,8 +492,28 @@ impl SyncEngine {
             .filter(|(_, a)| matches!(a, Action::DeleteLocal | Action::DeleteRemote))
             .count();
         let allowed = std::mem::take(&mut self.allow_mass_delete);
-        if deletions > 20 && deletions * 2 > known && !allowed {
-            return Err(MassDeletePending { count: deletions }.into());
+        let hold_deletions = deletions > 0
+            && !allowed
+            && (self.state.deletion_pending || (deletions > 20 && deletions * 2 > known));
+        // Failed hashes omit paths from the plan. Even approval cannot resolve
+        // those unknown paths; retain their protection until a complete scan.
+        let persist_hold =
+            hold_deletions || (self.state.deletion_pending && !report.errors.is_empty());
+        if self.state.deletion_pending != persist_hold {
+            let previous = self.state.deletion_pending;
+            self.state.deletion_pending = persist_hold;
+            // Persist before applying any unrelated additions: they change the
+            // threshold denominator, including when the process restarts midway.
+            if let Err(e) = self.state.save(&self.state_path) {
+                self.state.deletion_pending = previous;
+                return Err(e);
+            }
+        }
+        let pending = hold_deletions.then_some(deletions);
+        if pending.is_some() {
+            // Preserve deletion baselines pending approval; unrelated edits can proceed.
+            // This partial plan must never seed the remote listing cache.
+            plan.retain(|(_, a)| !matches!(a, Action::DeleteLocal | Action::DeleteRemote));
         }
 
         // 5) 실행 (원격 삭제는 모아서 한꺼번에)
@@ -611,7 +638,7 @@ impl SyncEngine {
         }
         self.state.save(&self.state_path)?;
         report.duration_ms = started.elapsed().as_millis() as u64;
-        Ok(report)
+        Ok((report, pending))
     }
 
     fn record(&mut self, p: &str, hash: String, remote_rev: String) -> Result<()> {
