@@ -10,9 +10,6 @@ fn headless(cfg: AppConfig, data_dir: PathBuf) -> App {
         data_dir,
         saved: cfg.clone(),
         cfg,
-        sel: 0,
-        ignore_texts: HashMap::new(),
-        backend_cache: HashMap::new(),
         service: None,
         stopping: None,
         trigger: Arc::new(Mutex::new(None)),
@@ -21,17 +18,9 @@ fn headless(cfg: AppConfig, data_dir: PathBuf) -> App {
         resetting: None,
         login: None,
         test: None,
-        otp: String::new(),
         browser: None,
-        confirm_delete: false,
         message: None,
         autostart: false,
-        show_secret: false,
-        page: Page::Home,
-        hwnd: 0,
-        hide_on_start: false,
-        _tray: None,
-        has_tray: false,
     }
 }
 

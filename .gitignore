@@ -2,6 +2,7 @@
 /.tools/
 /.work/
 **/build/
+**/node_modules/
 **/.gradle/
 **/local.properties
 *.jks
