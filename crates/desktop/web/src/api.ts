@@ -6,12 +6,14 @@ import type {
   NoteDocumentDto,
   NotePropertyDto,
   NoteTemplateDto,
+  PickedFileAttachmentDto,
   PollDto,
   Profile,
   ProfileKind,
   SearchHitDto,
   SyncSnapshotDto,
   TrashItemDto,
+  VaultBatchCryptoResult,
   VaultScanDto,
   WorkspaceState,
 } from './types';
@@ -98,11 +100,20 @@ export const api = {
   noteDuplicate: (vault: string, path: string) =>
     rpc<{ path: string; scan: VaultScanDto }>('note/duplicate', { vault, path }),
 
-  noteDaily: (vault: string, daily_folder: string) =>
+  noteDaily: (vault: string, daily_folder?: string | null) =>
     rpc<{ path: string; doc: NoteDocumentDto; scan: VaultScanDto }>('note/daily', {
       vault,
-      daily_folder,
+      daily_folder: daily_folder ?? null,
     }),
+
+  exportPdf: (params: {
+    default_filename?: string;
+    landscape?: boolean;
+    margin_top_cm?: number;
+    margin_bottom_cm?: number;
+    margin_left_cm?: number;
+    margin_right_cm?: number;
+  }) => rpc<{ exported: boolean; path: string | null }>('note/export_pdf', params),
 
   createFolder: (vault: string, parent: string, name: string) =>
     rpc<{ path: string; scan: VaultScanDto }>('vault/create_folder', { vault, parent, name }),
@@ -159,6 +170,69 @@ export const api = {
       'vault/pick_attachment',
       { vault }
     ),
+
+  pickFileAttachment: (vault: string) =>
+    rpc<PickedFileAttachmentDto>('vault/pick_file_attachment', { vault }),
+
+  // Note & Vault Encryption RPCs
+  cryptoEncryptNote: (vault: string, path: string, password: string, hint?: string | null) =>
+    rpc<{ doc: NoteDocumentDto; scan: VaultScanDto }>('crypto/encrypt_note', {
+      vault,
+      path,
+      password,
+      hint: hint ?? null,
+    }),
+
+  cryptoDecryptNote: (vault: string, path: string, password: string) =>
+    rpc<{ doc: NoteDocumentDto; scan: VaultScanDto }>('crypto/decrypt_note', {
+      vault,
+      path,
+      password,
+    }),
+
+  cryptoUnlockNote: (vault: string, path: string, password: string) =>
+    rpc<{ doc: NoteDocumentDto; scan: VaultScanDto }>('crypto/unlock_note', {
+      vault,
+      path,
+      password,
+    }),
+
+  cryptoLockNote: (vault: string, path: string) =>
+    rpc<{ doc: NoteDocumentDto; scan: VaultScanDto }>('crypto/lock_note', {
+      vault,
+      path,
+    }),
+
+  cryptoEncryptVault: (
+    vault: string,
+    password: string,
+    hint?: string | null,
+    auto_encrypt = false
+  ) =>
+    rpc<{ result: VaultBatchCryptoResult; scan: VaultScanDto }>('crypto/encrypt_vault', {
+      vault,
+      password,
+      hint: hint ?? null,
+      auto_encrypt,
+    }),
+
+  cryptoDecryptVault: (vault: string, password: string) =>
+    rpc<{ result: VaultBatchCryptoResult; scan: VaultScanDto }>('crypto/decrypt_vault', {
+      vault,
+      password,
+    }),
+
+  cryptoUnlockVault: (vault: string, password: string) =>
+    rpc<{ result: VaultBatchCryptoResult; scan: VaultScanDto }>('crypto/unlock_vault', {
+      vault,
+      password,
+    }),
+
+  cryptoLockVault: (vault: string) =>
+    rpc<{ scan: VaultScanDto }>('crypto/lock_vault', { vault }),
+
+  cryptoSetAutoEncrypt: (vault: string, enabled: boolean) =>
+    rpc<{ scan: VaultScanDto }>('crypto/set_auto_encrypt', { vault, enabled }),
 
   // Sync Center RPCs
   syncState: () => rpc<SyncSnapshotDto>('sync/state', {}),
@@ -260,9 +334,12 @@ export function hydrateMarkdownMediaUrls(markdown: string, vault: string | null)
     return `![${alt}](${buildVaultMediaUrl(vault, relPath)})`;
   });
 
-  // 2. Convert standard Markdown relative image URLs `![alt](rel/path.png)`
-  result = result.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (full, alt: string, rawTarget: string) => {
+  // 2. Convert standard Markdown relative image/attachment URLs `![alt](rel/path.png)` and `[file](attachments/doc.pdf)`
+  result = result.replace(/(!?)\[([^\]]*)\]\(([^)]+)\)/g, (full, bang: string, alt: string, rawTarget: string) => {
     const trimmed = rawTarget.trim();
+    if (!bang && !trimmed.startsWith('attachments/') && !trimmed.startsWith('./attachments/')) {
+      return full;
+    }
     // Handle optional title e.g. `attachments/a.png "title"`
     let urlPart = trimmed;
     let titleSuffix = '';
@@ -283,7 +360,7 @@ export function hydrateMarkdownMediaUrls(markdown: string, vault: string | null)
     } catch {
       decoded = urlPart;
     }
-    return `![${alt}](${buildVaultMediaUrl(vault, decoded)}${titleSuffix})`;
+    return `${bang}[${alt}](${buildVaultMediaUrl(vault, decoded)}${titleSuffix})`;
   });
 
   return result;
@@ -311,8 +388,8 @@ export function dehydrateMarkdownMediaUrls(markdown: string): string {
       .join('/');
   };
 
-  // Replace in Markdown image syntax `![alt](/vault-media?...)`
-  let out = markdown.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (full, alt: string, rawTarget: string) => {
+  // Replace in Markdown image & link syntax `![alt](/vault-media?...)` or `[file](/vault-media?...)`
+  let out = markdown.replace(/(!?)\[([^\]]*)\]\(([^)]+)\)/g, (full, bang: string, alt: string, rawTarget: string) => {
     if (!rawTarget.includes('/vault-media?')) return full;
     const trimmed = rawTarget.trim();
     let urlPart = trimmed;
@@ -322,7 +399,7 @@ export function dehydrateMarkdownMediaUrls(markdown: string): string {
       urlPart = trimmed.slice(0, quoteIdx).trim();
       titleSuffix = trimmed.slice(quoteIdx);
     }
-    return `![${alt}](${replaceMediaUrl(urlPart)}${titleSuffix})`;
+    return `${bang}[${alt}](${replaceMediaUrl(urlPart)}${titleSuffix})`;
   });
 
   // Also replace any HTML `<img src="...vault-media?...">` if present

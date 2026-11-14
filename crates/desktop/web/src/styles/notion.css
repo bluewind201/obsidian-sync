@@ -35,6 +35,14 @@ html[data-theme='light'] {
   --code-bg: #f6f5f3;
   --mark-bg: rgba(250, 204, 21, 0.42);
   --scrollbar-thumb: rgba(55, 53, 47, 0.2);
+
+  --page-width: 210mm;
+  --page-min-height: 297mm;
+  --page-margin-top: 2cm;
+  --page-margin-bottom: 1cm;
+  --page-margin-left: 3cm;
+  --page-margin-right: 3cm;
+  --a4-scale: 1;
 }
 
 html[data-theme='dark'] {
@@ -969,19 +977,20 @@ textarea {
   z-index: 22;
   height: auto !important;
   background: var(--bg-main);
-  padding-top: 4px;
-  padding-bottom: 4px;
+  padding-top: 2px;
+  padding-bottom: 2px;
 }
 
 .editor-mount-wrap .toastui-editor-defaultUI-toolbar {
   height: auto !important;
-  min-height: 42px;
+  min-height: 28px;
   flex-wrap: wrap !important;
-  padding: 4px 8px !important;
+  align-items: center;
+  padding: 2px 5px !important;
   gap: 1px;
   background: var(--bg-sidebar) !important;
   border: 1px solid var(--border-subtle) !important;
-  border-radius: 8px !important;
+  border-radius: 7px !important;
   box-shadow: var(--shadow-sm);
 }
 
@@ -992,14 +1001,46 @@ textarea {
   box-shadow: var(--shadow-md) !important;
 }
 
+.editor-mount-wrap .toastui-editor-toolbar-group {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: nowrap;
+}
+
 .editor-mount-wrap .toastui-editor-toolbar-divider {
-  margin: 10px 6px !important;
+  height: 12px !important;
+  margin: 4px 3px !important;
   background-color: var(--border-strong) !important;
 }
 
+/* 50% smaller toolbar icons while preserving sprite background-position alignment */
+.editor-mount-wrap .toastui-editor-toolbar-item-wrapper {
+  width: 20px !important;
+  height: 20px !important;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  margin: 1px !important;
+}
+
+.editor-mount-wrap .toastui-editor-toolbar-item-wrapper:has(.tui-custom-btn) {
+  width: auto !important;
+  height: 20px !important;
+}
+
+.editor-mount-wrap .toastui-editor-defaultUI-toolbar button.toastui-editor-toolbar-icons {
+  width: 32px !important;
+  height: 32px !important;
+  margin: -6px !important;
+  padding: 0 !important;
+  transform: scale(0.54);
+  transform-origin: center;
+  border-radius: 6px !important;
+  border: 1px solid transparent !important;
+}
+
 .editor-mount-wrap .toastui-editor-defaultUI-toolbar button {
-  margin: 3px 2px !important;
-  border-radius: 5px !important;
+  border-radius: 4px !important;
   border: 1px solid transparent !important;
 }
 
@@ -1008,18 +1049,20 @@ textarea {
   border-color: var(--border-subtle) !important;
 }
 
-/* Custom rich text buttons inside TOAST UI toolbar */
+/* Custom rich text buttons inside TOAST UI toolbar (~50% compact size) */
 .tui-custom-btn {
   width: auto !important;
-  min-width: 30px;
-  height: 30px !important;
-  padding: 0 7px !important;
+  min-width: 19px;
+  height: 19px !important;
+  margin: 1px !important;
+  padding: 0 4px !important;
   display: inline-flex !important;
   align-items: center;
   justify-content: center;
-  gap: 4px;
-  font-size: 12.5px !important;
+  gap: 2px;
+  font-size: 10.5px !important;
   font-weight: 600;
+  line-height: 1;
   color: var(--text-primary) !important;
   background: transparent;
   background-image: none !important;
@@ -1027,9 +1070,9 @@ textarea {
 }
 .tui-custom-btn.underline-btn {
   text-decoration: underline;
-  text-underline-offset: 3px;
+  text-underline-offset: 2px;
   font-family: Georgia, serif;
-  font-size: 14px !important;
+  font-size: 11px !important;
 }
 .tui-custom-btn.highlight-btn {
   background: var(--mark-bg) !important;
@@ -1897,5 +1940,600 @@ html[data-theme='dark'] .toastui-editor-contents code {
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+/* ───────────────────────── v0.6.0 A4 Paper Canvas Stage ───────────────────────── */
+.a4-desk-stage {
+  background: color-mix(in srgb, var(--bg-sidebar) 88%, #b9bec7 12%);
+  min-height: 100%;
+  padding: 22px 18px 56px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  overflow-x: auto;
+}
+html[data-theme='dark'] .a4-desk-stage {
+  background: #141414;
+}
+
+.a4-scale-outer {
+  position: relative;
+  margin: 0 auto;
+  flex-shrink: 0;
+}
+
+.a4-paper-sheet {
+  width: var(--page-width);
+  min-height: var(--page-min-height);
+  padding: var(--page-margin-top) var(--page-margin-right) var(--page-margin-bottom) var(--page-margin-left);
+  background: var(--bg-main);
+  color: var(--text-primary);
+  box-shadow: 0 8px 32px rgba(15, 23, 42, 0.14), 0 1px 4px rgba(15, 23, 42, 0.08);
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  box-sizing: border-box;
+  position: relative;
+  transform: scale(var(--a4-scale));
+  transform-origin: top left;
+}
+html[data-theme='dark'] .a4-paper-sheet {
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.55), 0 0 0 1px var(--border-subtle);
+}
+
+/* Subtle A4 page-break guide lines every 297mm when enabled */
+.a4-paper-sheet.show-page-guides {
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent calc(var(--page-min-height) - 1px),
+    rgba(35, 131, 226, 0.28) calc(var(--page-min-height) - 1px),
+    rgba(35, 131, 226, 0.28) var(--page-min-height)
+  );
+  background-size: 100% var(--page-min-height);
+}
+
+/* 1:1 printable column fidelity inside A4 sheet: zero inner horizontal padding */
+.a4-paper-sheet #notion-cover-zone {
+  margin-left: calc(-1 * var(--page-margin-left));
+  margin-right: calc(-1 * var(--page-margin-right));
+  margin-top: calc(-1 * var(--page-margin-top));
+  margin-bottom: 18px;
+}
+.a4-paper-sheet .notion-page-column,
+.a4-paper-sheet .notion-page-column.wide-md {
+  max-width: none !important;
+  width: 100%;
+  margin: 0 !important;
+  padding: 0 0 12px !important;
+}
+.a4-paper-sheet .editor-mount-wrap,
+.a4-paper-sheet .editor-mount-wrap.wide-md {
+  max-width: none !important;
+  width: 100%;
+  margin: 0 !important;
+  padding: 0 0 40px !important;
+}
+.a4-paper-sheet .page-status-footer {
+  max-width: none !important;
+  width: 100%;
+  margin: 12px 0 0 !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+.a4-paper-sheet .toastui-editor-ww-container .toastui-editor-contents,
+.a4-paper-sheet .toastui-editor-md-container .ProseMirror {
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+.a4-paper-sheet .toastui-editor-md-container .ProseMirror {
+  padding-left: 8px !important;
+  padding-right: 8px !important;
+}
+
+.a4-ruler-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  padding: 3px 10px;
+  margin-bottom: 10px;
+  box-shadow: var(--shadow-sm);
+}
+
+/* ───────────────────────── v0.6.0 Tags Toggle & Crypto Lock UI ───────────────────────── */
+.tag-toggle-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.tag-toggle-chip:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.tag-toggle-chip.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.sidebar-tags-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.locked-note-card {
+  max-width: 460px;
+  margin: 48px auto;
+  padding: 28px 26px;
+  border-radius: 12px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-md);
+  text-align: center;
+}
+.locked-note-icon {
+  font-size: 40px;
+  margin-bottom: 10px;
+}
+.locked-note-title {
+  font-size: 17px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+.locked-note-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 16px;
+  line-height: 1.5;
+}
+.locked-note-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.locked-note-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  background: var(--bg-inset);
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+
+/* ───────────────────────── v0.6.0 Inline Find & Replace Bar ───────────────────────── */
+.editor-find-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  margin-bottom: 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-sm);
+}
+.editor-find-bar .input-sm {
+  height: 28px;
+  font-size: 12.5px;
+  padding: 2px 8px;
+  min-width: 140px;
+  flex: 1 1 140px;
+}
+.editor-find-count {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  min-width: 48px;
+  text-align: center;
+}
+
+/* ───────────────────────── v0.6.0 Enhanced Document Elements ───────────────────────── */
+.toastui-editor-contents mark,
+#print-root mark {
+  background: var(--mark-bg);
+  color: inherit;
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+
+.toastui-editor-contents kbd,
+#print-root kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 0.84em;
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+}
+
+.callout,
+#print-root .callout {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 15px;
+  margin: 12px 0;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  border-left: 4px solid #3b82f6;
+  background: rgba(59, 130, 246, 0.08);
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+blockquote.callout,
+#print-root blockquote.callout {
+  display: block !important;
+}
+.callout-icon {
+  font-size: 17px;
+  line-height: 1.4;
+  flex-shrink: 0;
+}
+.callout-body {
+  flex: 1;
+  min-width: 0;
+}
+.callout-title {
+  font-weight: 700;
+  font-size: 0.94em;
+  margin-bottom: 3px;
+}
+.callout-note,
+.callout-info {
+  border-left-color: #2383e2;
+  background: rgba(35, 131, 226, 0.08);
+}
+.callout-tip {
+  border-left-color: #0ea5e9;
+  background: rgba(14, 165, 233, 0.08);
+}
+.callout-success {
+  border-left-color: #16a34a;
+  background: rgba(22, 163, 74, 0.09);
+}
+.callout-warning {
+  border-left-color: #d97706;
+  background: rgba(217, 119, 6, 0.1);
+}
+.callout-danger,
+.callout-bug {
+  border-left-color: #dc2626;
+  background: rgba(220, 38, 38, 0.09);
+}
+.callout-important {
+  border-left-color: #9333ea;
+  background: rgba(147, 51, 234, 0.09);
+}
+.callout-question {
+  border-left-color: #ca8a04;
+  background: rgba(202, 138, 4, 0.09);
+}
+.callout-quote {
+  border-left-color: #64748b;
+  background: rgba(100, 116, 139, 0.08);
+}
+.callout-example {
+  border-left-color: #6366f1;
+  background: rgba(99, 102, 241, 0.09);
+}
+.callout-abstract {
+  border-left-color: #0d9488;
+  background: rgba(13, 148, 136, 0.08);
+}
+
+.notion-toggle,
+details.notion-toggle {
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 8px 14px;
+  margin: 10px 0;
+  background: var(--bg-inset);
+}
+details.notion-toggle > summary {
+  cursor: pointer;
+  font-weight: 600;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+details.notion-toggle > summary::before {
+  content: '▸';
+  display: inline-block;
+  transition: transform 0.15s ease;
+}
+details.notion-toggle[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.doc-cols {
+  display: grid;
+  gap: 14px;
+  margin: 12px 0;
+}
+.doc-cols-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.doc-cols-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.doc-col {
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--bg-inset);
+  min-width: 0;
+}
+
+.page-break {
+  margin: 22px 0;
+  border-top: 2px dashed rgba(35, 131, 226, 0.45);
+  position: relative;
+  height: 12px;
+  text-align: center;
+}
+.page-break::after {
+  content: '✂ 페이지 나누기 (인쇄 · PDF)';
+  position: relative;
+  top: -11px;
+  padding: 1px 10px;
+  font-size: 11px;
+  color: var(--accent);
+  background: var(--bg-main);
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+.status-pill.done {
+  background: rgba(22, 163, 74, 0.14);
+  color: #15803d;
+  border-color: rgba(22, 163, 74, 0.35);
+}
+.status-pill.doing {
+  background: rgba(35, 131, 226, 0.14);
+  color: #1d4ed8;
+  border-color: rgba(35, 131, 226, 0.35);
+}
+.status-pill.todo {
+  background: rgba(100, 116, 139, 0.14);
+  color: #475569;
+  border-color: rgba(100, 116, 139, 0.35);
+}
+.status-pill.hold {
+  background: rgba(217, 119, 6, 0.15);
+  color: #b45309;
+  border-color: rgba(217, 119, 6, 0.35);
+}
+.status-pill.urgent {
+  background: rgba(220, 38, 38, 0.14);
+  color: #b91c1c;
+  border-color: rgba(220, 38, 38, 0.35);
+}
+
+.progress-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  vertical-align: middle;
+}
+.progress-inline-track {
+  width: 110px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--bg-active);
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+}
+.progress-inline-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+}
+
+.math-block {
+  font-family: 'Cambria Math', 'Times New Roman', serif;
+  padding: 10px 14px;
+  margin: 10px 0;
+  border-radius: 8px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-subtle);
+  text-align: center;
+  font-size: 1.05em;
+}
+
+.doc-toc-box {
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 10px 0;
+  background: var(--bg-inset);
+}
+
+/* Page Setup modal A4 live preview */
+.page-setup-grid {
+  display: grid;
+  grid-template-columns: 1fr 190px;
+  gap: 16px;
+  align-items: start;
+}
+.page-setup-preview-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-subtle);
+}
+.page-setup-preview-sheet {
+  width: 126px;
+  height: 178px;
+  background: #ffffff;
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-sm);
+  position: relative;
+  box-sizing: border-box;
+  display: flex;
+}
+.page-setup-preview-sheet.landscape {
+  width: 168px;
+  height: 119px;
+}
+.page-setup-preview-content {
+  width: 100%;
+  height: 100%;
+  border: 1px dashed var(--accent);
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(35, 131, 226, 0.14) 0,
+    rgba(35, 131, 226, 0.14) 3px,
+    transparent 3px,
+    transparent 9px
+  );
+  padding: 4px;
+  box-sizing: border-box;
+}
+
+/* ───────────────────────── v0.6.0 1:1 Print & PDF Root ───────────────────────── */
+#print-root {
+  display: none;
+}
+
+@page {
+  size: var(--page-width) var(--page-min-height);
+  margin: var(--page-margin-top) var(--page-margin-right) var(--page-margin-bottom) var(--page-margin-left);
+}
+
+@media print {
+  html,
+  body {
+    background: #ffffff !important;
+    color: #111827 !important;
+    width: auto !important;
+    height: auto !important;
+    overflow: visible !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  #app,
+  .modal-backdrop,
+  .toast-stack,
+  .context-menu {
+    display: none !important;
+  }
+
+  #print-root {
+    display: block !important;
+    position: static !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #ffffff !important;
+    color: #111827 !important;
+    font-family: 'Pretendard', 'Malgun Gothic', -apple-system, sans-serif !important;
+    font-size: 10.5pt;
+    line-height: 1.65;
+  }
+
+  #print-root .print-doc-header {
+    margin-bottom: 14px;
+    padding-bottom: 10px;
+    border-bottom: 1.5px solid #e5e7eb;
+  }
+  #print-root .print-doc-title {
+    margin: 0;
+    font-size: 20pt;
+    font-weight: 800;
+    color: #111827;
+  }
+  #print-root .print-doc-meta {
+    margin-top: 6px;
+    font-size: 9pt;
+    color: #4b5563;
+  }
+  #print-root .print-props-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 8px;
+    font-size: 9pt;
+  }
+  #print-root .print-props-table th,
+  #print-root .print-props-table td {
+    border: 1px solid #d1d5db;
+    padding: 4px 8px;
+    text-align: left;
+  }
+  #print-root .print-props-table th {
+    background: #f9fafb;
+    width: 140px;
+  }
+
+  #print-root .toastui-editor-contents {
+    color: #111827 !important;
+    font-size: 10.5pt !important;
+    line-height: 1.65 !important;
+  }
+
+  #print-root h1,
+  #print-root h2,
+  #print-root h3,
+  #print-root h4 {
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+
+  #print-root pre,
+  #print-root blockquote,
+  #print-root table,
+  #print-root .callout,
+  #print-root .notion-toggle,
+  #print-root .doc-cols,
+  #print-root img {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  #print-root .page-break {
+    page-break-before: always;
+    break-before: page;
+    height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: none !important;
+    visibility: hidden;
+  }
+  #print-root .page-break::after {
+    display: none !important;
   }
 }

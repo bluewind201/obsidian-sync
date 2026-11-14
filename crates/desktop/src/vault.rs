@@ -3,6 +3,7 @@
 //! - 위키링크(`[[노트]]`, `[[노트|별칭]]`, `[[노트#헤딩]]`), 백링크(연결됨/연결 안 됨), 리네임 리팩토링
 //! - 볼트 트리 스캔, 전문/태그/경로 검색, 지식 그래프(BFS 서브그래프 포함), 템플릿, 데일리 노트, 휴지통(`.trash`), 첨부파일
 
+use crate::crypto::{self, VaultCryptoSession};
 use crate::platform;
 use anyhow::{bail, Context, Result};
 use base64::Engine as _;
@@ -46,6 +47,40 @@ pub fn default_daily_folder() -> String {
 pub fn default_templates_folder() -> String {
     "Templates".into()
 }
+pub fn default_show_tags() -> bool {
+    false
+}
+pub fn default_page_layout() -> String {
+    "a4".into()
+}
+pub fn default_page_orientation() -> String {
+    "portrait".into()
+}
+pub fn default_margin_top_cm() -> f64 {
+    2.0
+}
+pub fn default_margin_bottom_cm() -> f64 {
+    1.0
+}
+pub fn default_margin_left_cm() -> f64 {
+    3.0
+}
+pub fn default_margin_right_cm() -> f64 {
+    3.0
+}
+pub fn default_true() -> bool {
+    true
+}
+pub fn default_editor_zoom() -> u32 {
+    100
+}
+
+fn clamp_margin_cm(v: f64) -> f64 {
+    if !v.is_finite() {
+        return 2.0;
+    }
+    (v.clamp(0.0, 6.0) * 100.0).round() / 100.0
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct VaultRef {
@@ -81,6 +116,32 @@ pub struct WorkspaceState {
     pub daily_folder: String,
     #[serde(default = "default_templates_folder")]
     pub templates_folder: String,
+    #[serde(default = "default_show_tags")]
+    pub show_tags: bool,
+    #[serde(default = "default_page_layout")]
+    pub page_layout: String,
+    #[serde(default = "default_page_orientation")]
+    pub page_orientation: String,
+    #[serde(default = "default_margin_top_cm")]
+    pub margin_top_cm: f64,
+    #[serde(default = "default_margin_bottom_cm")]
+    pub margin_bottom_cm: f64,
+    #[serde(default = "default_margin_left_cm")]
+    pub margin_left_cm: f64,
+    #[serde(default = "default_margin_right_cm")]
+    pub margin_right_cm: f64,
+    #[serde(default = "default_true")]
+    pub auto_fit_a4: bool,
+    #[serde(default = "default_true")]
+    pub show_page_guides: bool,
+    #[serde(default = "default_true")]
+    pub print_include_title: bool,
+    #[serde(default)]
+    pub print_include_properties: bool,
+    #[serde(default = "default_editor_zoom")]
+    pub editor_zoom: u32,
+    #[serde(default)]
+    pub daily_folders_by_vault: HashMap<String, String>,
 }
 
 impl Default for WorkspaceState {
@@ -97,6 +158,19 @@ impl Default for WorkspaceState {
             editor_mode: default_editor_mode(),
             daily_folder: default_daily_folder(),
             templates_folder: default_templates_folder(),
+            show_tags: default_show_tags(),
+            page_layout: default_page_layout(),
+            page_orientation: default_page_orientation(),
+            margin_top_cm: default_margin_top_cm(),
+            margin_bottom_cm: default_margin_bottom_cm(),
+            margin_left_cm: default_margin_left_cm(),
+            margin_right_cm: default_margin_right_cm(),
+            auto_fit_a4: true,
+            show_page_guides: true,
+            print_include_title: true,
+            print_include_properties: false,
+            editor_zoom: default_editor_zoom(),
+            daily_folders_by_vault: HashMap::new(),
         }
     }
 }
@@ -186,15 +260,80 @@ impl WorkspaceState {
             }
         }
         if let Some(s) = obj.get("daily_folder").and_then(|v| v.as_str()) {
-            if !s.trim().is_empty() {
-                self.daily_folder = s.trim().trim_matches(['/', '\\']).to_string();
-            }
+            self.daily_folder = s.trim().trim_matches(['/', '\\']).to_string();
         }
         if let Some(s) = obj.get("templates_folder").and_then(|v| v.as_str()) {
             if !s.trim().is_empty() {
                 self.templates_folder = s.trim().trim_matches(['/', '\\']).to_string();
             }
         }
+        if let Some(b) = obj.get("show_tags").and_then(|v| v.as_bool()) {
+            self.show_tags = b;
+        }
+        if let Some(s) = obj.get("page_layout").and_then(|v| v.as_str()) {
+            let clean = s.trim().to_ascii_lowercase();
+            if clean == "a4" || clean == "full" {
+                self.page_layout = clean;
+            }
+        }
+        if let Some(s) = obj.get("page_orientation").and_then(|v| v.as_str()) {
+            let clean = s.trim().to_ascii_lowercase();
+            if clean == "portrait" || clean == "landscape" {
+                self.page_orientation = clean;
+            }
+        }
+        if let Some(n) = obj.get("margin_top_cm").and_then(|v| v.as_f64()) {
+            self.margin_top_cm = clamp_margin_cm(n);
+        }
+        if let Some(n) = obj.get("margin_bottom_cm").and_then(|v| v.as_f64()) {
+            self.margin_bottom_cm = clamp_margin_cm(n);
+        }
+        if let Some(n) = obj.get("margin_left_cm").and_then(|v| v.as_f64()) {
+            self.margin_left_cm = clamp_margin_cm(n);
+        }
+        if let Some(n) = obj.get("margin_right_cm").and_then(|v| v.as_f64()) {
+            self.margin_right_cm = clamp_margin_cm(n);
+        }
+        if let Some(b) = obj.get("auto_fit_a4").and_then(|v| v.as_bool()) {
+            self.auto_fit_a4 = b;
+        }
+        if let Some(b) = obj.get("show_page_guides").and_then(|v| v.as_bool()) {
+            self.show_page_guides = b;
+        }
+        if let Some(b) = obj.get("print_include_title").and_then(|v| v.as_bool()) {
+            self.print_include_title = b;
+        }
+        if let Some(b) = obj
+            .get("print_include_properties")
+            .and_then(|v| v.as_bool())
+        {
+            self.print_include_properties = b;
+        }
+        if let Some(z) = obj.get("editor_zoom").and_then(|v| v.as_u64()) {
+            self.editor_zoom = (z as u32).clamp(80, 150);
+        }
+        if let Some(v) = obj.get("daily_folders_by_vault") {
+            if let Ok(map) = serde_json::from_value::<HashMap<String, String>>(v.clone()) {
+                let cleaned = map
+                    .into_iter()
+                    .map(|(k, val)| (k, val.trim().trim_matches(['/', '\\']).to_string()))
+                    .collect();
+                self.daily_folders_by_vault = cleaned;
+            }
+        }
+    }
+
+    pub fn resolve_daily_folder(&self, vault_path: &str) -> String {
+        let target_key = norm_fs_key(vault_path);
+        for (k, v) in &self.daily_folders_by_vault {
+            if norm_fs_key(k) == target_key {
+                return v.trim().trim_matches(['/', '\\']).to_string();
+            }
+        }
+        self.daily_folder
+            .trim()
+            .trim_matches(['/', '\\'])
+            .to_string()
     }
 
     pub fn sync_vaults_with_config(&mut self, cfg: &AppConfig) {
@@ -404,6 +543,10 @@ pub struct TreeNodeDto {
     pub icon: Option<String>,
     pub children: Vec<TreeNodeDto>,
     pub modified: i64,
+    #[serde(default)]
+    pub encrypted: bool,
+    #[serde(default)]
+    pub locked: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -414,6 +557,10 @@ pub struct NoteMetaDto {
     pub tags: Vec<String>,
     pub updated_at: String,
     pub word_count: usize,
+    #[serde(default)]
+    pub encrypted: bool,
+    #[serde(default)]
+    pub locked: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -430,6 +577,16 @@ pub struct VaultScanDto {
     pub total_notes: usize,
     pub total_folders: usize,
     pub revision: u64,
+    #[serde(default)]
+    pub encrypted_notes: usize,
+    #[serde(default)]
+    pub vault_auto_encrypt: bool,
+    #[serde(default)]
+    pub vault_unlocked: bool,
+    #[serde(default)]
+    pub vault_has_crypto_config: bool,
+    #[serde(default)]
+    pub vault_crypto_hint: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -471,6 +628,21 @@ pub struct NoteDocumentDto {
     pub word_count: usize,
     pub char_count: usize,
     pub updated_at: String,
+    #[serde(default)]
+    pub encrypted: bool,
+    #[serde(default)]
+    pub locked: bool,
+    #[serde(default)]
+    pub encryption_hint: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct VaultBatchCryptoResult {
+    pub encrypted_count: usize,
+    pub decrypted_count: usize,
+    pub unlocked_count: usize,
+    pub skipped_locked_count: usize,
+    pub total_notes: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -546,6 +718,15 @@ pub struct PickedAttachmentDto {
     pub rel_path: Option<String>,
     pub media_url: Option<String>,
     pub filename: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PickedFileAttachmentDto {
+    pub picked: bool,
+    pub rel_path: Option<String>,
+    pub media_url: Option<String>,
+    pub file_name: Option<String>,
+    pub is_image: bool,
 }
 
 // ───────────────────────────── 경로 검증 및 유틸리티 ─────────────────────────────
@@ -1089,11 +1270,11 @@ fn is_hex_color(tag: &str) -> bool {
     (tag.len() == 3 || tag.len() == 6) && tag.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-pub fn extract_tags(fm: &ParsedFrontmatter, body: &str) -> Vec<String> {
+pub fn extract_tags_from_properties(properties: &[NotePropertyDto], body: &str) -> Vec<String> {
     let mut tags = Vec::new();
     let mut seen = HashSet::new();
 
-    for p in &fm.properties {
+    for p in properties {
         if p.prop_type == "tags"
             || p.key.eq_ignore_ascii_case("tags")
             || p.key.eq_ignore_ascii_case("tag")
@@ -1180,6 +1361,69 @@ pub fn extract_tags(fm: &ParsedFrontmatter, body: &str) -> Vec<String> {
     tags
 }
 
+pub fn extract_tags(fm: &ParsedFrontmatter, body: &str) -> Vec<String> {
+    extract_tags_from_properties(&fm.properties, body)
+}
+
+fn properties_from_encrypted_payload(
+    payload: &crypto::EncryptedNotePayload,
+) -> Vec<NotePropertyDto> {
+    if !payload.property_list.is_empty() {
+        return payload
+            .property_list
+            .iter()
+            .map(|e| NotePropertyDto {
+                key: e.key.clone(),
+                value: e.value.clone(),
+                prop_type: e.prop_type.clone(),
+            })
+            .collect();
+    }
+    payload
+        .properties
+        .iter()
+        .map(|(k, v)| NotePropertyDto {
+            key: k.clone(),
+            value: match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            },
+            prop_type: "text".to_string(),
+        })
+        .collect()
+}
+
+fn payload_from_note_fields(
+    icon: Option<&str>,
+    cover: Option<&str>,
+    properties: &[NotePropertyDto],
+    body: &str,
+) -> crypto::EncryptedNotePayload {
+    let property_list: Vec<crypto::EncryptedPropEntry> = properties
+        .iter()
+        .filter(|p| !p.key.trim().is_empty())
+        .map(|p| crypto::EncryptedPropEntry {
+            key: p.key.trim().to_string(),
+            value: p.value.clone(),
+            prop_type: p.prop_type.clone(),
+        })
+        .collect();
+    let prop_map = crypto::props_map_from_entries(&property_list);
+    crypto::EncryptedNotePayload {
+        icon: icon
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        cover: cover
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        properties: prop_map,
+        property_list,
+        body: body.to_string(),
+    }
+}
+
 // ───────────────────────────── 볼트 인덱싱 및 백링크 ─────────────────────────────
 
 struct IndexedNote {
@@ -1192,9 +1436,14 @@ struct IndexedNote {
     body: String,
     updated_at: String,
     word_count: usize,
+    encrypted: bool,
+    locked: bool,
 }
 
-fn collect_indexed_notes(vault_root: &Path) -> Vec<IndexedNote> {
+fn collect_indexed_notes_with_session(
+    vault_root: &Path,
+    session: Option<&VaultCryptoSession>,
+) -> Vec<IndexedNote> {
     let mut notes = Vec::new();
     if !vault_root.is_dir() {
         return notes;
@@ -1232,11 +1481,52 @@ fn collect_indexed_notes(vault_root: &Path) -> Vec<IndexedNote> {
         };
         let meta = entry.metadata().ok();
         let (_, updated_at) = format_mtime(meta.as_ref());
+        let stem = note_title_from_rel(&rel_path);
+        let rel_no_ext = strip_md_ext(&rel_path).to_string();
+
+        if crypto::is_encrypted_markdown(&raw).is_some() {
+            if let Some((payload, _, _)) =
+                session.and_then(|s| s.try_decrypt_with_session(vault_root, &rel_path, &raw))
+            {
+                let props = properties_from_encrypted_payload(&payload);
+                let tags = extract_tags_from_properties(&props, &payload.body);
+                let outgoing = extract_outgoing_links(&payload.body);
+                let word_count = count_words(&payload.body);
+                notes.push(IndexedNote {
+                    rel_path,
+                    stem,
+                    rel_no_ext,
+                    icon: payload.icon,
+                    tags,
+                    outgoing,
+                    body: payload.body,
+                    updated_at,
+                    word_count,
+                    encrypted: true,
+                    locked: false,
+                });
+            } else {
+                // 잠긴 암호화 노트는 복호화 전까지 본문/태그/링크를 인덱스에 노출하지 않음
+                notes.push(IndexedNote {
+                    rel_path,
+                    stem,
+                    rel_no_ext,
+                    icon: Some("🔒".into()),
+                    tags: Vec::new(),
+                    outgoing: Vec::new(),
+                    body: String::new(),
+                    updated_at,
+                    word_count: 0,
+                    encrypted: true,
+                    locked: true,
+                });
+            }
+            continue;
+        }
+
         let (fm, body) = parse_frontmatter_and_body(&raw);
         let tags = extract_tags(&fm, &body);
         let outgoing = extract_outgoing_links(&body);
-        let stem = note_title_from_rel(&rel_path);
-        let rel_no_ext = strip_md_ext(&rel_path).to_string();
         let word_count = count_words(&body);
 
         notes.push(IndexedNote {
@@ -1249,6 +1539,8 @@ fn collect_indexed_notes(vault_root: &Path) -> Vec<IndexedNote> {
             body,
             updated_at,
             word_count,
+            encrypted: false,
+            locked: false,
         });
     }
 
@@ -1389,12 +1681,13 @@ fn find_unlinked_snippet(body: &str, target_title: &str) -> Option<String> {
     None
 }
 
-fn compute_backlinks(
+pub fn compute_backlinks_with_session(
     vault_root: &Path,
     target_rel_path: &str,
     target_title: &str,
+    session: Option<&VaultCryptoSession>,
 ) -> Vec<BacklinkDto> {
-    let indexed = collect_indexed_notes(vault_root);
+    let indexed = collect_indexed_notes_with_session(vault_root, session);
     let target_stem_lower = target_title.to_lowercase();
     let target_rel_no_ext_lower = strip_md_ext(target_rel_path).to_lowercase();
 
@@ -1402,7 +1695,7 @@ fn compute_backlinks(
     let mut unlinked_list = Vec::new();
 
     for n in indexed {
-        if n.rel_path.eq_ignore_ascii_case(target_rel_path) {
+        if n.locked || n.rel_path.eq_ignore_ascii_case(target_rel_path) {
             continue;
         }
         let is_linked = n
@@ -1440,7 +1733,7 @@ fn compute_backlinks(
 fn build_tree_recursive(
     vault_root: &Path,
     dir: &Path,
-    icon_map: &HashMap<String, Option<String>>,
+    note_map: &HashMap<String, (Option<String>, bool, bool)>,
     folder_count: &mut usize,
 ) -> Vec<TreeNodeDto> {
     let Ok(read_dir) = fs::read_dir(dir) else {
@@ -1478,7 +1771,7 @@ fn build_tree_recursive(
         *folder_count += 1;
         let rel_str = rel.to_string_lossy().replace('\\', "/");
         let (modified, _) = format_mtime(meta.as_ref());
-        let children = build_tree_recursive(vault_root, &path, icon_map, folder_count);
+        let children = build_tree_recursive(vault_root, &path, note_map, folder_count);
         nodes.push(TreeNodeDto {
             name,
             path: rel_str,
@@ -1486,6 +1779,8 @@ fn build_tree_recursive(
             icon: None,
             children,
             modified,
+            encrypted: false,
+            locked: false,
         });
     }
 
@@ -1496,7 +1791,10 @@ fn build_tree_recursive(
         let rel_str = rel.to_string_lossy().replace('\\', "/");
         let (modified, _) = format_mtime(meta.as_ref());
         let display = name.strip_suffix(".md").unwrap_or(&name).to_string();
-        let icon = icon_map.get(&rel_str).cloned().flatten();
+        let (icon, encrypted, locked) = note_map
+            .get(&rel_str)
+            .cloned()
+            .unwrap_or((None, false, false));
         nodes.push(TreeNodeDto {
             name: display,
             path: rel_str,
@@ -1504,23 +1802,34 @@ fn build_tree_recursive(
             icon,
             children: Vec::new(),
             modified,
+            encrypted,
+            locked,
         });
     }
 
     nodes
 }
 
-pub fn scan_vault(vault_root: &Path, revision: u64) -> Result<VaultScanDto> {
+pub fn scan_vault_with_session(
+    vault_root: &Path,
+    revision: u64,
+    session: Option<&VaultCryptoSession>,
+) -> Result<VaultScanDto> {
     if !vault_root.is_dir() {
         bail!("볼트 폴더를 찾을 수 없습니다: {}", vault_root.display());
     }
-    let indexed = collect_indexed_notes(vault_root);
-    let mut icon_map: HashMap<String, Option<String>> = HashMap::with_capacity(indexed.len());
+    let indexed = collect_indexed_notes_with_session(vault_root, session);
+    let mut note_map: HashMap<String, (Option<String>, bool, bool)> =
+        HashMap::with_capacity(indexed.len());
     let mut tag_counts: BTreeMap<String, (String, usize)> = BTreeMap::new();
     let mut notes = Vec::with_capacity(indexed.len());
+    let mut encrypted_notes = 0usize;
 
     for n in &indexed {
-        icon_map.insert(n.rel_path.clone(), n.icon.clone());
+        if n.encrypted {
+            encrypted_notes += 1;
+        }
+        note_map.insert(n.rel_path.clone(), (n.icon.clone(), n.encrypted, n.locked));
         for t in &n.tags {
             let key = t.to_lowercase();
             let entry = tag_counts.entry(key).or_insert_with(|| (t.clone(), 0));
@@ -1533,11 +1842,13 @@ pub fn scan_vault(vault_root: &Path, revision: u64) -> Result<VaultScanDto> {
             tags: n.tags.clone(),
             updated_at: n.updated_at.clone(),
             word_count: n.word_count,
+            encrypted: n.encrypted,
+            locked: n.locked,
         });
     }
 
     let mut total_folders = 0usize;
-    let tree = build_tree_recursive(vault_root, vault_root, &icon_map, &mut total_folders);
+    let tree = build_tree_recursive(vault_root, vault_root, &note_map, &mut total_folders);
 
     let mut tags: Vec<TagCountDto> = tag_counts
         .into_values()
@@ -1546,6 +1857,12 @@ pub fn scan_vault(vault_root: &Path, revision: u64) -> Result<VaultScanDto> {
     tags.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.tag.cmp(&b.tag)));
 
     let total_notes = notes.len();
+    let crypto_cfg = crypto::load_vault_crypto_config(vault_root);
+    let vault_auto_encrypt = crypto_cfg.as_ref().is_some_and(|c| c.auto_encrypt);
+    let vault_has_crypto_config = crypto_cfg.is_some();
+    let vault_crypto_hint = crypto_cfg.and_then(|c| c.hint);
+    let vault_unlocked = session.is_some_and(|s| s.is_vault_unlocked(vault_root));
+
     Ok(VaultScanDto {
         tree,
         notes,
@@ -1553,12 +1870,25 @@ pub fn scan_vault(vault_root: &Path, revision: u64) -> Result<VaultScanDto> {
         total_notes,
         total_folders,
         revision,
+        encrypted_notes,
+        vault_auto_encrypt,
+        vault_unlocked,
+        vault_has_crypto_config,
+        vault_crypto_hint,
     })
+}
+
+pub fn scan_vault(vault_root: &Path, revision: u64) -> Result<VaultScanDto> {
+    scan_vault_with_session(vault_root, revision, None)
 }
 
 // ───────────────────────────── 노트 읽기/쓰기/생성/복제 ─────────────────────────────
 
-pub fn read_note(vault_root: &Path, rel_path: &str) -> Result<NoteDocumentDto> {
+pub fn read_note_with_session(
+    vault_root: &Path,
+    rel_path: &str,
+    session: Option<&VaultCryptoSession>,
+) -> Result<NoteDocumentDto> {
     let norm = normalize_rel_path(rel_path)?;
     if norm.is_empty() {
         bail!("노트 경로가 비어 있습니다");
@@ -1571,13 +1901,69 @@ pub fn read_note(vault_root: &Path, rel_path: &str) -> Result<NoteDocumentDto> {
         .with_context(|| format!("노트 파일을 읽을 수 없습니다: {norm}"))?;
     let meta = fs::metadata(&abs).ok();
     let (_, updated_at) = format_mtime(meta.as_ref());
+    let title = note_title_from_rel(&norm);
+
+    if let Some(hdr) = crypto::is_encrypted_markdown(&raw) {
+        if let Some((payload, _, sess_hint)) =
+            session.and_then(|s| s.try_decrypt_with_session(vault_root, &norm, &raw))
+        {
+            let props = properties_from_encrypted_payload(&payload);
+            let body = payload.body;
+            let headings = extract_headings(&body);
+            let outgoing_links = extract_outgoing_links(&body);
+            let tags = extract_tags_from_properties(&props, &body);
+            let backlinks = compute_backlinks_with_session(vault_root, &norm, &title, session);
+            let word_count = count_words(&body);
+            let char_count = body.chars().count();
+
+            return Ok(NoteDocumentDto {
+                path: norm,
+                title,
+                icon: payload.icon,
+                cover: payload.cover,
+                properties: props,
+                raw_frontmatter: String::new(),
+                body,
+                headings,
+                outgoing_links,
+                backlinks,
+                tags,
+                word_count,
+                char_count,
+                updated_at,
+                encrypted: true,
+                locked: false,
+                encryption_hint: hdr.hint.or(sess_hint),
+            });
+        }
+
+        // 잠긴 상태: 평문이나 메타데이터를 노출하지 않고 잠금 카드 정보만 반환
+        return Ok(NoteDocumentDto {
+            path: norm,
+            title,
+            icon: Some("🔒".into()),
+            cover: None,
+            properties: Vec::new(),
+            raw_frontmatter: String::new(),
+            body: String::new(),
+            headings: Vec::new(),
+            outgoing_links: Vec::new(),
+            backlinks: Vec::new(),
+            tags: Vec::new(),
+            word_count: 0,
+            char_count: 0,
+            updated_at,
+            encrypted: true,
+            locked: true,
+            encryption_hint: hdr.hint,
+        });
+    }
 
     let (fm, body) = parse_frontmatter_and_body(&raw);
-    let title = note_title_from_rel(&norm);
     let headings = extract_headings(&body);
     let outgoing_links = extract_outgoing_links(&body);
     let tags = extract_tags(&fm, &body);
-    let backlinks = compute_backlinks(vault_root, &norm, &title);
+    let backlinks = compute_backlinks_with_session(vault_root, &norm, &title, session);
     let word_count = count_words(&body);
     let char_count = body.chars().count();
 
@@ -1596,7 +1982,58 @@ pub fn read_note(vault_root: &Path, rel_path: &str) -> Result<NoteDocumentDto> {
         word_count,
         char_count,
         updated_at,
+        encrypted: false,
+        locked: false,
+        encryption_hint: None,
     })
+}
+
+pub fn read_note(vault_root: &Path, rel_path: &str) -> Result<NoteDocumentDto> {
+    read_note_with_session(vault_root, rel_path, None)
+}
+
+pub fn save_note_with_session(
+    vault_root: &Path,
+    rel_path: &str,
+    icon: Option<&str>,
+    cover: Option<&str>,
+    properties: &[NotePropertyDto],
+    body: &str,
+    session: Option<&VaultCryptoSession>,
+) -> Result<NoteDocumentDto> {
+    let norm = normalize_rel_path(rel_path)?;
+    if norm.is_empty() {
+        bail!("노트 경로가 비어 있습니다");
+    }
+    let abs = resolve_safe_path(vault_root, &norm)?;
+    if let Some(parent) = abs.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    if abs.is_file() {
+        if let Ok(existing_raw) = fs::read_to_string(&abs) {
+            if let Some(hdr) = crypto::is_encrypted_markdown(&existing_raw) {
+                let Some((_, pw, sess_hint)) = session
+                    .and_then(|s| s.try_decrypt_with_session(vault_root, &norm, &existing_raw))
+                else {
+                    bail!(
+                        "잠긴 암호화 노트는 비밀번호 잠금 해제 후에만 저장할 수 있습니다: {norm}"
+                    );
+                };
+                let hint = hdr.hint.or(sess_hint);
+                let payload = payload_from_note_fields(icon, cover, properties, body);
+                let armored = crypto::encrypt_note_payload(&payload, &pw, hint.as_deref())?;
+                crypto::atomic_write_string(&abs, &armored)
+                    .with_context(|| format!("암호화 노트를 저장하지 못했습니다: {norm}"))?;
+                return read_note_with_session(vault_root, &norm, session);
+            }
+        }
+    }
+
+    let full = serialize_note_content(icon, cover, properties, body);
+    crypto::atomic_write_string(&abs, &full)
+        .with_context(|| format!("노트를 저장하지 못했습니다: {norm}"))?;
+    read_note_with_session(vault_root, &norm, session)
 }
 
 pub fn save_note(
@@ -1607,26 +2044,17 @@ pub fn save_note(
     properties: &[NotePropertyDto],
     body: &str,
 ) -> Result<NoteDocumentDto> {
-    let norm = normalize_rel_path(rel_path)?;
-    if norm.is_empty() {
-        bail!("노트 경로가 비어 있습니다");
-    }
-    let abs = resolve_safe_path(vault_root, &norm)?;
-    if let Some(parent) = abs.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let full = serialize_note_content(icon, cover, properties, body);
-    fs::write(&abs, full).with_context(|| format!("노트를 저장하지 못했습니다: {norm}"))?;
-    read_note(vault_root, &norm)
+    save_note_with_session(vault_root, rel_path, icon, cover, properties, body, None)
 }
 
-pub fn create_note(
+pub fn create_note_with_session(
     vault_root: &Path,
     folder: &str,
     title: &str,
     body: Option<&str>,
     icon: Option<&str>,
     properties: &[NotePropertyDto],
+    session: Option<&VaultCryptoSession>,
 ) -> Result<(String, NoteDocumentDto)> {
     let folder_norm = normalize_rel_path(folder)?;
     let raw_title = if title.trim().is_empty() {
@@ -1653,8 +2081,46 @@ pub fn create_note(
     };
 
     let initial_body = body.unwrap_or("");
-    let doc = save_note(vault_root, &rel_path, icon, None, properties, initial_body)?;
+    if let Some(cfg) = crypto::load_vault_crypto_config(vault_root) {
+        if cfg.auto_encrypt {
+            let Some(pw) = session.and_then(|s| s.vault_password(vault_root)) else {
+                bail!(
+                    "볼트 자동 암호화가 활성화되어 있습니다. 먼저 볼트 암호를 잠금 해제해 주세요."
+                );
+            };
+            let abs = resolve_safe_path(vault_root, &rel_path)?;
+            if let Some(parent) = abs.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let payload = payload_from_note_fields(icon, None, properties, initial_body);
+            let armored = crypto::encrypt_note_payload(&payload, &pw, cfg.hint.as_deref())?;
+            crypto::atomic_write_string(&abs, &armored)?;
+            let doc = read_note_with_session(vault_root, &rel_path, session)?;
+            return Ok((rel_path, doc));
+        }
+    }
+
+    let doc = save_note_with_session(
+        vault_root,
+        &rel_path,
+        icon,
+        None,
+        properties,
+        initial_body,
+        session,
+    )?;
     Ok((rel_path, doc))
+}
+
+pub fn create_note(
+    vault_root: &Path,
+    folder: &str,
+    title: &str,
+    body: Option<&str>,
+    icon: Option<&str>,
+    properties: &[NotePropertyDto],
+) -> Result<(String, NoteDocumentDto)> {
+    create_note_with_session(vault_root, folder, title, body, icon, properties, None)
 }
 
 pub fn duplicate_note(vault_root: &Path, rel_path: &str) -> Result<String> {
@@ -1778,7 +2244,12 @@ fn rewrite_wikilinks_in_markdown(
     (out, updated)
 }
 
-pub fn rename_entry(vault_root: &Path, rel_path: &str, new_name: &str) -> Result<RenameResult> {
+pub fn rename_entry_with_session(
+    vault_root: &Path,
+    rel_path: &str,
+    new_name: &str,
+    mut session: Option<&mut VaultCryptoSession>,
+) -> Result<RenameResult> {
     let norm = normalize_rel_path(rel_path)?;
     if norm.is_empty() {
         bail!("이름을 변경할 대상이 지정되지 않았습니다");
@@ -1788,6 +2259,7 @@ pub fn rename_entry(vault_root: &Path, rel_path: &str, new_name: &str) -> Result
         bail!("대상을 찾을 수 없습니다: {norm}");
     }
 
+    let is_dir = abs.is_dir();
     let is_note = abs.is_file()
         && abs
             .extension()
@@ -1829,6 +2301,14 @@ pub fn rename_entry(vault_root: &Path, rel_path: &str, new_name: &str) -> Result
 
     fs::rename(&abs, &new_abs)?;
 
+    if let Some(sess) = session.as_deref_mut() {
+        if is_dir {
+            sess.rename_folder_prefix(vault_root, &norm, &new_rel);
+        } else if is_note {
+            sess.rename_note_key(vault_root, &norm, &new_rel);
+        }
+    }
+
     let mut updated_links = 0usize;
     if is_note {
         let old_stem = note_title_from_rel(&norm);
@@ -1846,6 +2326,7 @@ pub fn rename_entry(vault_root: &Path, rel_path: &str, new_name: &str) -> Result
             true
         });
 
+        let sess_ro = session.as_deref();
         for entry in walker.flatten() {
             if !entry.file_type().is_file() {
                 continue;
@@ -1861,6 +2342,31 @@ pub fn rename_entry(vault_root: &Path, rel_path: &str, new_name: &str) -> Result
             let Ok(raw) = fs::read_to_string(p) else {
                 continue;
             };
+            if let Some(hdr) = crypto::is_encrypted_markdown(&raw) {
+                let Ok(rel_p) = p.strip_prefix(vault_root) else {
+                    continue;
+                };
+                let p_rel = rel_p.to_string_lossy().replace('\\', "/");
+                if let Some((mut payload, pw, sess_hint)) =
+                    sess_ro.and_then(|s| s.try_decrypt_with_session(vault_root, &p_rel, &raw))
+                {
+                    let (rewritten, count) = rewrite_wikilinks_in_markdown(
+                        &payload.body,
+                        &old_stem,
+                        &old_rel_no_ext,
+                        &new_stem,
+                        &new_rel_no_ext,
+                    );
+                    if count > 0 {
+                        payload.body = rewritten;
+                        let hint = hdr.hint.or(sess_hint);
+                        let armored = crypto::encrypt_note_payload(&payload, &pw, hint.as_deref())?;
+                        crypto::atomic_write_string(p, &armored)?;
+                        updated_links += count;
+                    }
+                }
+                continue;
+            }
             let (rewritten, count) = rewrite_wikilinks_in_markdown(
                 &raw,
                 &old_stem,
@@ -1869,7 +2375,7 @@ pub fn rename_entry(vault_root: &Path, rel_path: &str, new_name: &str) -> Result
                 &new_rel_no_ext,
             );
             if count > 0 {
-                fs::write(p, rewritten)?;
+                crypto::atomic_write_string(p, &rewritten)?;
                 updated_links += count;
             }
         }
@@ -1881,7 +2387,16 @@ pub fn rename_entry(vault_root: &Path, rel_path: &str, new_name: &str) -> Result
     })
 }
 
-pub fn move_entry(vault_root: &Path, rel_path: &str, target_folder: &str) -> Result<String> {
+pub fn rename_entry(vault_root: &Path, rel_path: &str, new_name: &str) -> Result<RenameResult> {
+    rename_entry_with_session(vault_root, rel_path, new_name, None)
+}
+
+pub fn move_entry_with_session(
+    vault_root: &Path,
+    rel_path: &str,
+    target_folder: &str,
+    session: Option<&mut VaultCryptoSession>,
+) -> Result<String> {
     let norm = normalize_rel_path(rel_path)?;
     if norm.is_empty() {
         bail!("이동할 경로가 비어 있습니다");
@@ -1891,7 +2406,8 @@ pub fn move_entry(vault_root: &Path, rel_path: &str, target_folder: &str) -> Res
     if !abs.exists() {
         bail!("이동할 대상을 찾을 수 없습니다: {norm}");
     }
-    if abs.is_dir() && (target_norm == norm || target_norm.starts_with(&format!("{norm}/"))) {
+    let is_dir = abs.is_dir();
+    if is_dir && (target_norm == norm || target_norm.starts_with(&format!("{norm}/"))) {
         bail!("폴더를 자기 자신이나 하위 폴더 안으로 이동할 수 없습니다");
     }
     let leaf = norm.rsplit('/').next().unwrap_or(&norm);
@@ -1911,15 +2427,27 @@ pub fn move_entry(vault_root: &Path, rel_path: &str, target_folder: &str) -> Res
         fs::create_dir_all(parent)?;
     }
     fs::rename(&abs, &new_abs)?;
+    if let Some(sess) = session {
+        if is_dir {
+            sess.rename_folder_prefix(vault_root, &norm, &new_rel);
+        } else {
+            sess.rename_note_key(vault_root, &norm, &new_rel);
+        }
+    }
     Ok(new_rel)
+}
+
+pub fn move_entry(vault_root: &Path, rel_path: &str, target_folder: &str) -> Result<String> {
+    move_entry_with_session(vault_root, rel_path, target_folder, None)
 }
 
 // ───────────────────────────── 연결 안 된 멘션 링크 변환 ─────────────────────────────
 
-pub fn link_unlinked_mention(
+pub fn link_unlinked_mention_with_session(
     vault_root: &Path,
     source_path: &str,
     target_title: &str,
+    session: Option<&VaultCryptoSession>,
 ) -> Result<()> {
     let norm = normalize_rel_path(source_path)?;
     let abs = resolve_safe_path(vault_root, &norm)?;
@@ -1931,7 +2459,22 @@ pub fn link_unlinked_mention(
         bail!("링크할 제목이 비어 있습니다");
     }
     let raw = fs::read_to_string(&abs)?;
-    let (fm, body) = parse_frontmatter_and_body(&raw);
+    let encrypted_ctx = if let Some(hdr) = crypto::is_encrypted_markdown(&raw) {
+        let Some((payload, pw, sess_hint)) =
+            session.and_then(|s| s.try_decrypt_with_session(vault_root, &norm, &raw))
+        else {
+            bail!("잠긴 암호화 노트는 잠금 해제 후 링크를 변환할 수 있습니다: {norm}");
+        };
+        Some((payload, pw, hdr.hint.or(sess_hint)))
+    } else {
+        None
+    };
+
+    let (fm, body) = if let Some((ref payload, _, _)) = encrypted_ctx {
+        (ParsedFrontmatter::default(), payload.body.clone())
+    } else {
+        parse_frontmatter_and_body(&raw)
+    };
 
     let mut in_fence = false;
     let mut fence_marker = ' ';
@@ -1976,19 +2519,33 @@ pub fn link_unlinked_mention(
     }
 
     if replaced {
-        let updated = if !fm.raw_frontmatter.is_empty()
-            || fm.icon.is_some()
-            || fm.cover.is_some()
-            || !fm.properties.is_empty()
-        {
-            format!("---\n{}\n---\n{}", fm.raw_frontmatter, new_body)
+        if let Some((mut payload, pw, hint)) = encrypted_ctx {
+            payload.body = new_body;
+            let armored = crypto::encrypt_note_payload(&payload, &pw, hint.as_deref())?;
+            crypto::atomic_write_string(&abs, &armored)?;
         } else {
-            new_body
-        };
-        fs::write(&abs, updated)?;
+            let updated = if !fm.raw_frontmatter.is_empty()
+                || fm.icon.is_some()
+                || fm.cover.is_some()
+                || !fm.properties.is_empty()
+            {
+                format!("---\n{}\n---\n{}", fm.raw_frontmatter, new_body)
+            } else {
+                new_body
+            };
+            crypto::atomic_write_string(&abs, &updated)?;
+        }
     }
 
     Ok(())
+}
+
+pub fn link_unlinked_mention(
+    vault_root: &Path,
+    source_path: &str,
+    target_title: &str,
+) -> Result<()> {
+    link_unlinked_mention_with_session(vault_root, source_path, target_title, None)
 }
 
 // ───────────────────────────── 휴지통 (.trash) ─────────────────────────────
@@ -2008,7 +2565,11 @@ fn save_trash_manifest(trash_dir: &Path, map: &HashMap<String, String>) -> Resul
     Ok(())
 }
 
-pub fn delete_to_trash(vault_root: &Path, rel_path: &str) -> Result<()> {
+pub fn delete_to_trash_with_session(
+    vault_root: &Path,
+    rel_path: &str,
+    session: Option<&mut VaultCryptoSession>,
+) -> Result<()> {
     let norm = normalize_rel_path(rel_path)?;
     if norm.is_empty() {
         bail!("삭제할 대상이 지정되지 않았습니다");
@@ -2033,10 +2594,17 @@ pub fn delete_to_trash(vault_root: &Path, rel_path: &str) -> Result<()> {
     }
 
     fs::rename(&abs, trash_dir.join(&trash_name))?;
+    if let Some(sess) = session {
+        sess.remove_note_key(vault_root, &norm);
+    }
     let mut manifest = load_trash_manifest(&trash_dir);
     manifest.insert(trash_name, norm);
     let _ = save_trash_manifest(&trash_dir, &manifest);
     Ok(())
+}
+
+pub fn delete_to_trash(vault_root: &Path, rel_path: &str) -> Result<()> {
+    delete_to_trash_with_session(vault_root, rel_path, None)
 }
 
 pub fn list_trash(vault_root: &Path) -> Result<Vec<TrashItemDto>> {
@@ -2126,7 +2694,11 @@ pub fn empty_trash(vault_root: &Path) -> Result<()> {
 
 // ───────────────────────────── 볼트 전문 검색 ─────────────────────────────
 
-pub fn search_vault(vault_root: &Path, query: &str) -> Result<Vec<SearchHitDto>> {
+pub fn search_vault_with_session(
+    vault_root: &Path,
+    query: &str,
+    session: Option<&VaultCryptoSession>,
+) -> Result<Vec<SearchHitDto>> {
     let q = query.trim();
     if q.is_empty() {
         return Ok(Vec::new());
@@ -2162,7 +2734,7 @@ pub fn search_vault(vault_root: &Path, query: &str) -> Result<Vec<SearchHitDto>>
     }
 
     let full_free_lower = free_terms.join(" ");
-    let indexed = collect_indexed_notes(vault_root);
+    let indexed = collect_indexed_notes_with_session(vault_root, session);
     let mut hits = Vec::new();
 
     for n in indexed {
@@ -2191,11 +2763,15 @@ pub fn search_vault(vault_root: &Path, query: &str) -> Result<Vec<SearchHitDto>>
 
         if !free_terms.is_empty() {
             let title_lower = n.stem.to_lowercase();
-            let body_lower = n.body.to_lowercase();
+            let body_lower = if n.locked {
+                String::new()
+            } else {
+                n.body.to_lowercase()
+            };
 
             let all_terms_present = free_terms
                 .iter()
-                .all(|term| title_lower.contains(term) || body_lower.contains(term));
+                .all(|term| title_lower.contains(term) || (!n.locked && body_lower.contains(term)));
             if !all_terms_present {
                 continue;
             }
@@ -2208,20 +2784,32 @@ pub fn search_vault(vault_root: &Path, query: &str) -> Result<Vec<SearchHitDto>>
                 score += 80;
             }
 
-            for (idx, line) in n.body.lines().enumerate() {
-                let ll = line.to_lowercase();
-                if free_terms.iter().any(|term| ll.contains(term)) {
-                    score += 10;
-                    if matches.len() < 5 {
-                        matches.push(SearchMatchDto {
-                            line: idx + 1,
-                            snippet: trim_snippet(line),
-                        });
+            if n.locked {
+                matches.push(SearchMatchDto {
+                    line: 1,
+                    snippet: "🔒 암호화된 노트 (제목 일치)".into(),
+                });
+            } else {
+                for (idx, line) in n.body.lines().enumerate() {
+                    let ll = line.to_lowercase();
+                    if free_terms.iter().any(|term| ll.contains(term)) {
+                        score += 10;
+                        if matches.len() < 5 {
+                            matches.push(SearchMatchDto {
+                                line: idx + 1,
+                                snippet: trim_snippet(line),
+                            });
+                        }
                     }
                 }
             }
         } else if matches.is_empty() {
-            if let Some(first_non_empty) = n.body.lines().find(|l| !l.trim().is_empty()) {
+            if n.locked {
+                matches.push(SearchMatchDto {
+                    line: 1,
+                    snippet: "🔒 암호화된 노트".into(),
+                });
+            } else if let Some(first_non_empty) = n.body.lines().find(|l| !l.trim().is_empty()) {
                 matches.push(SearchMatchDto {
                     line: 1,
                     snippet: trim_snippet(first_non_empty),
@@ -2244,15 +2832,20 @@ pub fn search_vault(vault_root: &Path, query: &str) -> Result<Vec<SearchHitDto>>
     Ok(hits)
 }
 
+pub fn search_vault(vault_root: &Path, query: &str) -> Result<Vec<SearchHitDto>> {
+    search_vault_with_session(vault_root, query, None)
+}
+
 // ───────────────────────────── 지식 그래프 빌더 ─────────────────────────────
 
-pub fn build_graph(
+pub fn build_graph_with_session(
     vault_root: &Path,
     center_path: Option<&str>,
     depth: Option<usize>,
     include_tags: bool,
+    session: Option<&VaultCryptoSession>,
 ) -> Result<GraphDto> {
-    let indexed = collect_indexed_notes(vault_root);
+    let indexed = collect_indexed_notes_with_session(vault_root, session);
 
     let mut stem_to_id: HashMap<String, String> = HashMap::new();
     let mut rel_to_id: HashMap<String, String> = HashMap::new();
@@ -2286,6 +2879,9 @@ pub fn build_graph(
     let mut edges: Vec<GraphEdgeDto> = Vec::new();
 
     for n in &indexed {
+        if n.locked {
+            continue;
+        }
         let src_id = n.rel_path.clone();
         for link in &n.outgoing {
             let norm_link = strip_md_ext(link.trim()).trim_matches('/');
@@ -2402,19 +2998,29 @@ pub fn build_graph(
     })
 }
 
+pub fn build_graph(
+    vault_root: &Path,
+    center_path: Option<&str>,
+    depth: Option<usize>,
+    include_tags: bool,
+) -> Result<GraphDto> {
+    build_graph_with_session(vault_root, center_path, depth, include_tags, None)
+}
+
 // ───────────────────────────── 데일리 노트 & 템플릿 ─────────────────────────────
 
-pub fn open_daily_note(vault_root: &Path, daily_folder: &str) -> Result<(String, NoteDocumentDto)> {
-    let folder = {
-        let norm = normalize_rel_path(daily_folder)?;
-        if norm.is_empty() {
-            default_daily_folder()
-        } else {
-            norm
-        }
-    };
+pub fn open_daily_note_with_session(
+    vault_root: &Path,
+    daily_folder: &str,
+    session: Option<&VaultCryptoSession>,
+) -> Result<(String, NoteDocumentDto)> {
+    let folder = normalize_rel_path(daily_folder)?;
     let today = Local::now().format("%Y-%m-%d").to_string();
-    let rel_path = format!("{folder}/{today}.md");
+    let rel_path = if folder.is_empty() {
+        format!("{today}.md")
+    } else {
+        format!("{folder}/{today}.md")
+    };
     let abs = resolve_safe_path(vault_root, &rel_path)?;
 
     if !abs.exists() {
@@ -2433,12 +3039,39 @@ pub fn open_daily_note(vault_root: &Path, daily_folder: &str) -> Result<(String,
         let body = format!(
             "# {today} 데일리 노트\n\n## 오늘의 할 일\n- [ ] 가장 중요한 핵심 작업 1가지 집중하기\n- [ ] 받은 메시지 및 일정 점검\n\n## 메모 & 아이디어\n- \n\n## 오늘의 회고\n- **잘한 점**: \n- **내일 개선할 점**: \n"
         );
-        let doc = save_note(vault_root, &rel_path, Some("📅"), None, &props, &body)?;
+        if let Some(cfg) = crypto::load_vault_crypto_config(vault_root) {
+            if cfg.auto_encrypt {
+                let Some(pw) = session.and_then(|s| s.vault_password(vault_root)) else {
+                    bail!("볼트 자동 암호화가 활성화되어 있습니다. 먼저 볼트 암호를 잠금 해제해 주세요.");
+                };
+                if let Some(parent) = abs.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                let payload = payload_from_note_fields(Some("📅"), None, &props, &body);
+                let armored = crypto::encrypt_note_payload(&payload, &pw, cfg.hint.as_deref())?;
+                crypto::atomic_write_string(&abs, &armored)?;
+                let doc = read_note_with_session(vault_root, &rel_path, session)?;
+                return Ok((rel_path, doc));
+            }
+        }
+        let doc = save_note_with_session(
+            vault_root,
+            &rel_path,
+            Some("📅"),
+            None,
+            &props,
+            &body,
+            session,
+        )?;
         return Ok((rel_path, doc));
     }
 
-    let doc = read_note(vault_root, &rel_path)?;
+    let doc = read_note_with_session(vault_root, &rel_path, session)?;
     Ok((rel_path, doc))
+}
+
+pub fn open_daily_note(vault_root: &Path, daily_folder: &str) -> Result<(String, NoteDocumentDto)> {
+    open_daily_note_with_session(vault_root, daily_folder, None)
 }
 
 fn substitute_template_vars(text: &str, today: &str, now_time: &str) -> String {
@@ -2694,23 +3327,16 @@ pub fn upload_attachment(
     })
 }
 
-pub fn pick_attachment(vault_root: &Path) -> Result<PickedAttachmentDto> {
-    if !vault_root.is_dir() {
-        bail!("볼트 폴더가 존재하지 않습니다");
-    }
-    let Some(picked_path) = platform::pick_image_file() else {
-        return Ok(PickedAttachmentDto {
-            picked: false,
-            rel_path: None,
-            media_url: None,
-            filename: None,
-        });
-    };
-    let bytes = fs::read(&picked_path).context("선택한 이미지 파일을 읽을 수 없습니다")?;
+fn copy_file_to_attachments(
+    vault_root: &Path,
+    picked_path: &Path,
+    fallback_name: &str,
+) -> Result<(String, String, String)> {
+    let bytes = fs::read(picked_path).context("선택한 파일을 읽을 수 없습니다")?;
     let orig_name = picked_path
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "image.png".into());
+        .unwrap_or_else(|| fallback_name.to_string());
 
     let attach_dir = vault_root.join("attachments");
     fs::create_dir_all(&attach_dir)?;
@@ -2721,12 +3347,440 @@ pub fn pick_attachment(vault_root: &Path) -> Result<PickedAttachmentDto> {
 
     let rel_path = format!("attachments/{final_name}");
     let media_url = make_media_url(vault_root, &rel_path);
+    Ok((rel_path, media_url, orig_name))
+}
+
+fn is_image_filename(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" | "avif"
+            )
+        })
+}
+
+pub fn save_picked_image_attachment(
+    vault_root: &Path,
+    picked_path: Option<PathBuf>,
+) -> Result<PickedAttachmentDto> {
+    if !vault_root.is_dir() {
+        bail!("볼트 폴더가 존재하지 않습니다");
+    }
+    let Some(path) = picked_path else {
+        return Ok(PickedAttachmentDto {
+            picked: false,
+            rel_path: None,
+            media_url: None,
+            filename: None,
+        });
+    };
+    let (rel_path, media_url, orig_name) =
+        copy_file_to_attachments(vault_root, &path, "image.png")?;
     Ok(PickedAttachmentDto {
         picked: true,
         rel_path: Some(rel_path),
         media_url: Some(media_url),
         filename: Some(orig_name),
     })
+}
+
+pub fn pick_attachment(vault_root: &Path) -> Result<PickedAttachmentDto> {
+    if !vault_root.is_dir() {
+        bail!("볼트 폴더가 존재하지 않습니다");
+    }
+    let picked = platform::pick_image_file();
+    save_picked_image_attachment(vault_root, picked)
+}
+
+pub fn save_picked_file_attachment(
+    vault_root: &Path,
+    picked_path: Option<PathBuf>,
+) -> Result<PickedFileAttachmentDto> {
+    if !vault_root.is_dir() {
+        bail!("볼트 폴더가 존재하지 않습니다");
+    }
+    let Some(path) = picked_path else {
+        return Ok(PickedFileAttachmentDto {
+            picked: false,
+            rel_path: None,
+            media_url: None,
+            file_name: None,
+            is_image: false,
+        });
+    };
+    let (rel_path, media_url, orig_name) =
+        copy_file_to_attachments(vault_root, &path, "attachment.bin")?;
+    let is_image = is_image_filename(&orig_name);
+    Ok(PickedFileAttachmentDto {
+        picked: true,
+        rel_path: Some(rel_path),
+        media_url: Some(media_url),
+        file_name: Some(orig_name),
+        is_image,
+    })
+}
+
+pub fn pick_file_attachment(vault_root: &Path) -> Result<PickedFileAttachmentDto> {
+    if !vault_root.is_dir() {
+        bail!("볼트 폴더가 존재하지 않습니다");
+    }
+    let picked = platform::pick_any_file();
+    save_picked_file_attachment(vault_root, picked)
+}
+
+// ───────────────────────────── 노트 / 볼트 암호화 워크플로 ─────────────────────────────
+
+fn walk_vault_markdown_files(vault_root: &Path) -> Vec<(String, PathBuf)> {
+    let mut files = Vec::new();
+    if !vault_root.is_dir() {
+        return files;
+    }
+    let walker = WalkDir::new(vault_root).into_iter().filter_entry(|e| {
+        if e.depth() == 0 {
+            return true;
+        }
+        if e.file_type().is_dir() {
+            let name = e.file_name().to_string_lossy();
+            return !is_ignored_dir_name(&name);
+        }
+        true
+    });
+    for entry in walker.flatten() {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if !path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+        {
+            continue;
+        }
+        let Ok(rel) = path.strip_prefix(vault_root) else {
+            continue;
+        };
+        files.push((rel.to_string_lossy().replace('\\', "/"), path.to_path_buf()));
+    }
+    files.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    files
+}
+
+fn payload_from_plaintext_markdown(raw: &str) -> crypto::EncryptedNotePayload {
+    let (fm, body) = parse_frontmatter_and_body(raw);
+    payload_from_note_fields(
+        fm.icon.as_deref(),
+        fm.cover.as_deref(),
+        &fm.properties,
+        &body,
+    )
+}
+
+fn plaintext_markdown_from_payload(payload: &crypto::EncryptedNotePayload) -> String {
+    let props = properties_from_encrypted_payload(payload);
+    serialize_note_content(
+        payload.icon.as_deref(),
+        payload.cover.as_deref(),
+        &props,
+        &payload.body,
+    )
+}
+
+pub fn encrypt_single_note(
+    vault_root: &Path,
+    rel_path: &str,
+    password: &str,
+    hint: Option<&str>,
+    session: &mut VaultCryptoSession,
+) -> Result<NoteDocumentDto> {
+    if password.is_empty() {
+        bail!("암호화 비밀번호를 입력하세요.");
+    }
+    let norm = normalize_rel_path(rel_path)?;
+    if norm.is_empty() {
+        bail!("노트 경로가 비어 있습니다");
+    }
+    let abs = resolve_safe_path(vault_root, &norm)?;
+    if !abs.is_file() {
+        bail!("노트 파일을 찾을 수 없습니다: {norm}");
+    }
+    let raw = fs::read_to_string(&abs)?;
+    let clean_hint = hint.map(str::trim).filter(|s| !s.is_empty());
+
+    let payload = if crypto::is_encrypted_markdown(&raw).is_some() {
+        if let Some((p, _, _)) = session.try_decrypt_with_session(vault_root, &norm, &raw) {
+            p
+        } else {
+            crypto::decrypt_note_markdown(&raw, password)
+                .context("이미 암호화된 노트입니다. 기존 암호를 해제한 뒤 변경하세요")?
+        }
+    } else {
+        payload_from_plaintext_markdown(&raw)
+    };
+
+    let armored = crypto::encrypt_note_payload(&payload, password, clean_hint)?;
+    crypto::atomic_write_string(&abs, &armored)?;
+    session.unlock_note(vault_root, &norm, password, clean_hint.map(str::to_string));
+    read_note_with_session(vault_root, &norm, Some(session))
+}
+
+pub fn decrypt_single_note(
+    vault_root: &Path,
+    rel_path: &str,
+    password: &str,
+    session: &mut VaultCryptoSession,
+) -> Result<NoteDocumentDto> {
+    let norm = normalize_rel_path(rel_path)?;
+    if norm.is_empty() {
+        bail!("노트 경로가 비어 있습니다");
+    }
+    let abs = resolve_safe_path(vault_root, &norm)?;
+    if !abs.is_file() {
+        bail!("노트 파일을 찾을 수 없습니다: {norm}");
+    }
+    let raw = fs::read_to_string(&abs)?;
+    if crypto::is_encrypted_markdown(&raw).is_none() {
+        bail!("암호화된 노트가 아닙니다: {norm}");
+    }
+
+    let payload = if !password.is_empty() {
+        crypto::decrypt_note_markdown(&raw, password)?
+    } else if let Some((p, _, _)) = session.try_decrypt_with_session(vault_root, &norm, &raw) {
+        p
+    } else {
+        bail!("노트 복호화를 위해 비밀번호를 입력하세요.");
+    };
+
+    let plain = plaintext_markdown_from_payload(&payload);
+    crypto::atomic_write_string(&abs, &plain)?;
+    session.remove_note_key(vault_root, &norm);
+    read_note_with_session(vault_root, &norm, Some(session))
+}
+
+pub fn unlock_single_note(
+    vault_root: &Path,
+    rel_path: &str,
+    password: &str,
+    session: &mut VaultCryptoSession,
+) -> Result<NoteDocumentDto> {
+    if password.is_empty() {
+        bail!("비밀번호를 입력하세요.");
+    }
+    let norm = normalize_rel_path(rel_path)?;
+    if norm.is_empty() {
+        bail!("노트 경로가 비어 있습니다");
+    }
+    let abs = resolve_safe_path(vault_root, &norm)?;
+    if !abs.is_file() {
+        bail!("노트 파일을 찾을 수 없습니다: {norm}");
+    }
+    let raw = fs::read_to_string(&abs)?;
+    let hdr = crypto::is_encrypted_markdown(&raw)
+        .ok_or_else(|| anyhow::anyhow!("암호화된 노트가 아닙니다: {norm}"))?;
+    let _ = crypto::decrypt_note_markdown(&raw, password)?;
+    session.unlock_note(vault_root, &norm, password, hdr.hint);
+    read_note_with_session(vault_root, &norm, Some(session))
+}
+
+pub fn lock_single_note(
+    vault_root: &Path,
+    rel_path: &str,
+    session: &mut VaultCryptoSession,
+) -> Result<NoteDocumentDto> {
+    let norm = normalize_rel_path(rel_path)?;
+    session.lock_note(vault_root, &norm);
+    read_note_with_session(vault_root, &norm, Some(session))
+}
+
+pub fn encrypt_entire_vault(
+    vault_root: &Path,
+    password: &str,
+    hint: Option<&str>,
+    auto_encrypt: bool,
+    session: &mut VaultCryptoSession,
+) -> Result<VaultBatchCryptoResult> {
+    if !vault_root.is_dir() {
+        bail!("볼트 폴더를 찾을 수 없습니다: {}", vault_root.display());
+    }
+    if password.is_empty() {
+        bail!("볼트 암호화 비밀번호를 입력하세요.");
+    }
+    if let Some(existing) = crypto::load_vault_crypto_config(vault_root) {
+        if !crypto::verify_vault_password(&existing, password) {
+            bail!("기존 볼트 비밀번호와 일치하지 않습니다.");
+        }
+    }
+
+    let clean_hint = hint.map(str::trim).filter(|s| !s.is_empty());
+    crypto::save_vault_crypto_config(vault_root, password, auto_encrypt, clean_hint)?;
+    session.unlock_vault(vault_root, password);
+
+    let files = walk_vault_markdown_files(vault_root);
+    let total_notes = files.len();
+    let mut encrypted_count = 0usize;
+    let mut unlocked_count = 0usize;
+    let mut skipped_locked_count = 0usize;
+
+    for (rel, path) in files {
+        let Ok(raw) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if crypto::is_encrypted_markdown(&raw).is_some() {
+            if crypto::decrypt_note_markdown(&raw, password).is_ok() {
+                unlocked_count += 1;
+            } else {
+                skipped_locked_count += 1;
+            }
+            continue;
+        }
+        let payload = payload_from_plaintext_markdown(&raw);
+        let armored = crypto::encrypt_note_payload(&payload, password, clean_hint)?;
+        crypto::atomic_write_string(&path, &armored)?;
+        session.unlock_note(vault_root, &rel, password, clean_hint.map(str::to_string));
+        encrypted_count += 1;
+    }
+
+    Ok(VaultBatchCryptoResult {
+        encrypted_count,
+        decrypted_count: 0,
+        unlocked_count,
+        skipped_locked_count,
+        total_notes,
+    })
+}
+
+pub fn unlock_entire_vault(
+    vault_root: &Path,
+    password: &str,
+    session: &mut VaultCryptoSession,
+) -> Result<VaultBatchCryptoResult> {
+    if !vault_root.is_dir() {
+        bail!("볼트 폴더를 찾을 수 없습니다: {}", vault_root.display());
+    }
+    if password.is_empty() {
+        bail!("비밀번호를 입력하세요.");
+    }
+    let cfg = crypto::load_vault_crypto_config(vault_root);
+    if let Some(ref c) = cfg {
+        if !crypto::verify_vault_password(c, password) {
+            bail!("볼트 비밀번호가 올바르지 않습니다.");
+        }
+    }
+
+    let files = walk_vault_markdown_files(vault_root);
+    let total_notes = files.len();
+    let mut unlocked_count = 0usize;
+    let mut skipped_locked_count = 0usize;
+
+    for (_rel, path) in files {
+        let Ok(raw) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if crypto::is_encrypted_markdown(&raw).is_some() {
+            if crypto::decrypt_note_markdown(&raw, password).is_ok() {
+                unlocked_count += 1;
+            } else {
+                skipped_locked_count += 1;
+            }
+        }
+    }
+
+    if cfg.is_none() && unlocked_count == 0 && skipped_locked_count > 0 {
+        bail!("입력한 비밀번호로 잠금 해제할 수 있는 노트가 없습니다.");
+    }
+
+    session.unlock_vault(vault_root, password);
+
+    Ok(VaultBatchCryptoResult {
+        encrypted_count: 0,
+        decrypted_count: 0,
+        unlocked_count,
+        skipped_locked_count,
+        total_notes,
+    })
+}
+
+pub fn lock_entire_vault(vault_root: &Path, session: &mut VaultCryptoSession) {
+    session.lock_vault(vault_root);
+}
+
+pub fn decrypt_entire_vault(
+    vault_root: &Path,
+    password: &str,
+    session: &mut VaultCryptoSession,
+) -> Result<VaultBatchCryptoResult> {
+    if !vault_root.is_dir() {
+        bail!("볼트 폴더를 찾을 수 없습니다: {}", vault_root.display());
+    }
+    if password.is_empty() {
+        bail!("볼트 복호화 비밀번호를 입력하세요.");
+    }
+    let cfg = crypto::load_vault_crypto_config(vault_root);
+    if let Some(ref c) = cfg {
+        if !crypto::verify_vault_password(c, password) {
+            bail!("볼트 비밀번호가 올바르지 않습니다.");
+        }
+    }
+
+    let files = walk_vault_markdown_files(vault_root);
+    let total_notes = files.len();
+    let mut decrypted_count = 0usize;
+    let mut skipped_locked_count = 0usize;
+
+    for (rel, path) in files {
+        let Ok(raw) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if crypto::is_encrypted_markdown(&raw).is_some() {
+            match crypto::decrypt_note_markdown(&raw, password) {
+                Ok(payload) => {
+                    let plain = plaintext_markdown_from_payload(&payload);
+                    crypto::atomic_write_string(&path, &plain)?;
+                    session.remove_note_key(vault_root, &rel);
+                    decrypted_count += 1;
+                }
+                Err(_) => {
+                    skipped_locked_count += 1;
+                }
+            }
+        }
+    }
+
+    if cfg.is_none() && decrypted_count == 0 && skipped_locked_count > 0 {
+        bail!("입력한 비밀번호와 일치하는 암호화 노트가 없습니다.");
+    }
+
+    if skipped_locked_count == 0 {
+        crypto::remove_vault_crypto_config(vault_root)?;
+        session.lock_vault(vault_root);
+    }
+
+    Ok(VaultBatchCryptoResult {
+        encrypted_count: 0,
+        decrypted_count,
+        unlocked_count: 0,
+        skipped_locked_count,
+        total_notes,
+    })
+}
+
+pub fn set_vault_auto_encrypt(
+    vault_root: &Path,
+    enabled: bool,
+    session: &VaultCryptoSession,
+) -> Result<()> {
+    if !vault_root.is_dir() {
+        bail!("볼트 폴더를 찾을 수 없습니다: {}", vault_root.display());
+    }
+    let Some(pw) = session.vault_password(vault_root) else {
+        bail!("자동 암호화 설정을 변경하려면 먼저 볼트 잠금을 해제하세요.");
+    };
+    let existing_hint = crypto::load_vault_crypto_config(vault_root).and_then(|c| c.hint);
+    crypto::save_vault_crypto_config(vault_root, &pw, enabled, existing_hint.as_deref())?;
+    Ok(())
 }
 
 pub fn resolve_vault_media_file(vault_root: &Path, rel_or_name: &str) -> Option<PathBuf> {
@@ -3020,5 +4074,261 @@ mod tests {
         assert!(resolve_safe_path(tmp.path(), "../secret.md").is_err());
         assert!(resolve_safe_path(tmp.path(), "a/../../secret.md").is_err());
         assert!(resolve_safe_path(tmp.path(), "C:/Windows/win.ini").is_err());
+    }
+
+    #[test]
+    fn workspace_state_defaults_clamping_and_daily_folder_resolution() {
+        let def = WorkspaceState::default();
+        assert!(!def.show_tags);
+        assert_eq!(def.page_layout, "a4");
+        assert_eq!(def.page_orientation, "portrait");
+        assert!((def.margin_top_cm - 2.0).abs() < 1e-6);
+        assert!((def.margin_bottom_cm - 1.0).abs() < 1e-6);
+        assert!((def.margin_left_cm - 3.0).abs() < 1e-6);
+        assert!((def.margin_right_cm - 3.0).abs() < 1e-6);
+
+        let mut ws = WorkspaceState::default();
+        ws.merge_json(&serde_json::json!({
+            "show_tags": true,
+            "margin_top_cm": 9.9,
+            "margin_bottom_cm": -1.5,
+            "margin_left_cm": 3.5,
+            "editor_zoom": 300,
+            "daily_folders_by_vault": {
+                "C:/VaultA": "일일업무/2026",
+                "C:/VaultRoot": "/"
+            }
+        }));
+        assert!(ws.show_tags);
+        assert!((ws.margin_top_cm - 6.0).abs() < 1e-6);
+        assert!((ws.margin_bottom_cm - 0.0).abs() < 1e-6);
+        assert!((ws.margin_left_cm - 3.5).abs() < 1e-6);
+        assert_eq!(ws.editor_zoom, 150);
+        assert_eq!(ws.resolve_daily_folder("c:\\VaultA"), "일일업무/2026");
+        assert_eq!(ws.resolve_daily_folder("C:/VaultRoot"), "");
+        assert_eq!(ws.resolve_daily_folder("C:/OtherVault"), "Daily");
+
+        // 데일리 노트가 빈 폴더("")로 설정되면 볼트 루트에 직접 생성됨
+        let tmp = tempfile::tempdir().unwrap();
+        let (root_rel, root_doc) = open_daily_note_with_session(tmp.path(), "", None).unwrap();
+        assert!(!root_rel.contains('/'));
+        assert!(tmp.path().join(&root_rel).is_file());
+        assert_eq!(root_doc.icon.as_deref(), Some("📅"));
+
+        let (sub_rel, _) = open_daily_note_with_session(tmp.path(), "일일업무", None).unwrap();
+        assert!(sub_rel.starts_with("일일업무/"));
+        assert!(tmp.path().join(&sub_rel).is_file());
+    }
+
+    #[test]
+    fn single_note_encryption_lock_save_refusal_unlock_and_decrypt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = tmp.path();
+        let mut session = VaultCryptoSession::new();
+
+        let props = vec![NotePropertyDto {
+            key: "tags".into(),
+            value: "secret, finance".into(),
+            prop_type: "tags".into(),
+        }];
+        let (rel, _) = create_note(
+            vault,
+            "Private",
+            "비밀노트",
+            Some("# 비밀 계획\n기밀 프로젝트 예산은 5000만원입니다. #internal"),
+            Some("🗝️"),
+            &props,
+        )
+        .unwrap();
+
+        // 1) 개별 노트 암호화 -> 세션에는 잠금 해제 상태로 유지
+        let enc_doc = encrypt_single_note(
+            vault,
+            &rel,
+            "my-strong-pw!",
+            Some("개인 암호 힌트"),
+            &mut session,
+        )
+        .unwrap();
+        assert!(enc_doc.encrypted);
+        assert!(!enc_doc.locked);
+        assert!(enc_doc.body.contains("기밀 프로젝트"));
+
+        // 디스크 상 .md 파일에는 평문/태그가 전혀 노출되지 않음
+        let raw_disk = fs::read_to_string(vault.join(&rel)).unwrap();
+        assert!(raw_disk.contains("obsync_encrypted: true"));
+        assert!(!raw_disk.contains("기밀 프로젝트"));
+        assert!(!raw_disk.contains("finance"));
+
+        // 2) 잠금 -> 본문/태그/검색 비노출 + 잠금 중 저장 거부
+        let locked_doc = lock_single_note(vault, &rel, &mut session).unwrap();
+        assert!(locked_doc.encrypted);
+        assert!(locked_doc.locked);
+        assert!(locked_doc.body.is_empty());
+        assert!(locked_doc.tags.is_empty());
+
+        let locked_search = search_vault_with_session(vault, "기밀", Some(&session)).unwrap();
+        assert!(locked_search.is_empty());
+        let title_search = search_vault_with_session(vault, "비밀노트", Some(&session)).unwrap();
+        assert_eq!(title_search.len(), 1);
+        assert!(title_search[0].matches[0].snippet.contains("암호화"));
+
+        assert!(save_note_with_session(
+            vault,
+            &rel,
+            None,
+            None,
+            &[],
+            "덮어쓰기 시도",
+            Some(&session)
+        )
+        .is_err());
+
+        // 3) 잘못된 비밀번호 거부 -> 올바른 비밀번호 잠금 해제 -> 편집 저장 후에도 암호문 유지
+        assert!(unlock_single_note(vault, &rel, "wrong-pw", &mut session).is_err());
+        let unlocked = unlock_single_note(vault, &rel, "my-strong-pw!", &mut session).unwrap();
+        assert!(unlocked.encrypted);
+        assert!(!unlocked.locked);
+        assert_eq!(unlocked.icon.as_deref(), Some("🗝️"));
+        assert!(unlocked.tags.contains(&"finance".to_string()));
+
+        let saved = save_note_with_session(
+            vault,
+            &rel,
+            unlocked.icon.as_deref(),
+            None,
+            &unlocked.properties,
+            "# 비밀 계획\n업데이트된 기밀 본문",
+            Some(&session),
+        )
+        .unwrap();
+        assert!(saved.body.contains("업데이트된 기밀 본문"));
+        let disk_after_edit = fs::read_to_string(vault.join(&rel)).unwrap();
+        assert!(disk_after_edit.contains("obsync_encrypted: true"));
+        assert!(!disk_after_edit.contains("업데이트된 기밀 본문"));
+
+        // 4) 영구 복호화 -> 일반 마크다운/프론트매터로 복원
+        let dec = decrypt_single_note(vault, &rel, "my-strong-pw!", &mut session).unwrap();
+        assert!(!dec.encrypted);
+        assert!(!dec.locked);
+        let disk_plain = fs::read_to_string(vault.join(&rel)).unwrap();
+        assert!(!disk_plain.contains("obsync_encrypted"));
+        assert!(disk_plain.contains("업데이트된 기밀 본문"));
+    }
+
+    #[test]
+    fn whole_vault_encryption_unlock_auto_encrypt_and_decrypt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = tmp.path();
+        let mut session = VaultCryptoSession::new();
+
+        create_note(vault, "", "노트1", Some("첫 번째 평문"), None, &[]).unwrap();
+        create_note(vault, "Sub", "노트2", Some("두 번째 평문"), None, &[]).unwrap();
+        // 별도 암호로 미리 잠근 노트는 볼트 암호화 시 그대로 보호(skip)
+        create_note(vault, "", "개별잠금", Some("타인 암호"), None, &[]).unwrap();
+        encrypt_single_note(vault, "개별잠금.md", "other-key", None, &mut session).unwrap();
+        lock_single_note(vault, "개별잠금.md", &mut session).unwrap();
+
+        let enc_res = encrypt_entire_vault(
+            vault,
+            "vault-master-pw",
+            Some("마스터 힌트"),
+            true,
+            &mut session,
+        )
+        .unwrap();
+        assert_eq!(enc_res.encrypted_count, 2);
+        assert_eq!(enc_res.skipped_locked_count, 1);
+        assert!(vault.join(".obsidian-sync-crypto.json").is_file());
+
+        // 자동 암호화 ON + 볼트 잠금 해제 상태에서 새 노트 생성 시 즉시 암호화 저장
+        let (auto_rel, auto_doc) = create_note_with_session(
+            vault,
+            "",
+            "자동암호화노트",
+            Some("자동 보호 내용"),
+            None,
+            &[],
+            Some(&session),
+        )
+        .unwrap();
+        assert!(auto_doc.encrypted);
+        assert!(!fs::read_to_string(vault.join(&auto_rel))
+            .unwrap()
+            .contains("자동 보호 내용"));
+
+        // 볼트 잠금 후 스캔 -> 4개 노트 모두 암호화 상태 & 잠금, auto_encrypt=true일 때 새 노트 생성 차단
+        lock_entire_vault(vault, &mut session);
+        let scan_locked = scan_vault_with_session(vault, 1, Some(&session)).unwrap();
+        assert_eq!(scan_locked.encrypted_notes, 4);
+        assert!(!scan_locked.vault_unlocked);
+        assert!(scan_locked.vault_auto_encrypt);
+        assert!(create_note_with_session(
+            vault,
+            "",
+            "잠금중생성",
+            Some("실패해야함"),
+            None,
+            &[],
+            Some(&session)
+        )
+        .is_err());
+
+        // 잘못된 암호 거부 -> 올바른 볼트 암호 잠금 해제
+        assert!(unlock_entire_vault(vault, "bad-pw", &mut session).is_err());
+        let unlock_res = unlock_entire_vault(vault, "vault-master-pw", &mut session).unwrap();
+        assert_eq!(unlock_res.unlocked_count, 3);
+        assert_eq!(unlock_res.skipped_locked_count, 1);
+
+        // 자동 암호화 OFF 변경 후 새 노트는 평문 생성
+        set_vault_auto_encrypt(vault, false, &session).unwrap();
+        let (plain_rel, plain_doc) = create_note_with_session(
+            vault,
+            "",
+            "평문노트",
+            Some("일반 마크다운"),
+            None,
+            &[],
+            Some(&session),
+        )
+        .unwrap();
+        assert!(!plain_doc.encrypted);
+        assert!(fs::read_to_string(vault.join(&plain_rel))
+            .unwrap()
+            .contains("일반 마크다운"));
+
+        // 개별잠금 노트를 개별 해제 후 볼트 전체 복호화 -> 설정 파일까지 완전 제거
+        decrypt_single_note(vault, "개별잠금.md", "other-key", &mut session).unwrap();
+        let dec_res = decrypt_entire_vault(vault, "vault-master-pw", &mut session).unwrap();
+        assert_eq!(dec_res.decrypted_count, 3);
+        assert_eq!(dec_res.skipped_locked_count, 0);
+        assert!(!vault.join(".obsidian-sync-crypto.json").exists());
+        assert!(!fs::read_to_string(vault.join("노트1.md"))
+            .unwrap()
+            .contains("obsync_encrypted"));
+    }
+
+    #[test]
+    fn pick_file_attachment_copies_non_image_and_detects_image() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = tmp.path().join("vault");
+        let src_dir = tmp.path().join("src");
+        fs::create_dir_all(&vault).unwrap();
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let pdf_src = src_dir.join("보고서 2026.pdf");
+        fs::write(&pdf_src, b"%PDF-1.4 dummy").unwrap();
+        let res_pdf = save_picked_file_attachment(&vault, Some(pdf_src)).unwrap();
+        assert!(res_pdf.picked);
+        assert!(!res_pdf.is_image);
+        assert_eq!(res_pdf.file_name.as_deref(), Some("보고서 2026.pdf"));
+        assert!(vault.join(res_pdf.rel_path.unwrap()).is_file());
+
+        let img_src = src_dir.join("diagram.PNG");
+        fs::write(&img_src, b"png-bytes").unwrap();
+        let res_img = save_picked_file_attachment(&vault, Some(img_src)).unwrap();
+        assert!(res_img.picked);
+        assert!(res_img.is_image);
+        assert!(vault.join(res_img.rel_path.unwrap()).is_file());
     }
 }

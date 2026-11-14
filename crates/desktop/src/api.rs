@@ -12,17 +12,33 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+#[cfg(windows)]
+pub type SharedEventProxy = Option<tao::event_loop::EventLoopProxy<crate::AppUserEvent>>;
+#[cfg(not(windows))]
+pub type SharedEventProxy = Option<()>;
+
 pub struct BackendState {
     pub sync: App,
     pub workspace: WorkspaceManager,
+    pub crypto: crate::crypto::VaultCryptoSession,
+    pub event_proxy: SharedEventProxy,
 }
 
 impl BackendState {
     pub fn new(trigger: SharedTrigger) -> Self {
+        Self::new_with_proxy(trigger, None)
+    }
+
+    pub fn new_with_proxy(trigger: SharedTrigger, event_proxy: SharedEventProxy) -> Self {
         let (config_path, data_dir) = sync_controller::app_dirs();
         let sync = App::new(config_path, data_dir.clone(), trigger);
         let workspace = WorkspaceManager::new(data_dir, &sync.cfg);
-        Self { sync, workspace }
+        Self {
+            sync,
+            workspace,
+            crypto: crate::crypto::VaultCryptoSession::new(),
+            event_proxy,
+        }
     }
 }
 
@@ -102,8 +118,51 @@ struct CreateNoteReq {
 #[derive(Deserialize)]
 struct DailyNoteReq {
     vault: String,
-    #[serde(default = "vault::default_daily_folder")]
-    daily_folder: String,
+    #[serde(default)]
+    daily_folder: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ExportPdfReq {
+    #[serde(default)]
+    default_filename: Option<String>,
+    #[serde(default)]
+    landscape: Option<bool>,
+    #[serde(default)]
+    margin_top_cm: Option<f64>,
+    #[serde(default)]
+    margin_bottom_cm: Option<f64>,
+    #[serde(default)]
+    margin_left_cm: Option<f64>,
+    #[serde(default)]
+    margin_right_cm: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct CryptoNotePasswordReq {
+    vault: String,
+    path: String,
+    #[serde(default)]
+    password: String,
+    #[serde(default)]
+    hint: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CryptoVaultReq {
+    vault: String,
+    #[serde(default)]
+    password: String,
+    #[serde(default)]
+    hint: Option<String>,
+    #[serde(default)]
+    auto_encrypt: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct CryptoAutoEncryptReq {
+    vault: String,
+    enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -238,29 +297,48 @@ fn bump_revision(state: &Arc<Mutex<BackendState>>) -> u64 {
     state.lock().unwrap().workspace.watcher.bump()
 }
 
-fn current_revision(state: &Arc<Mutex<BackendState>>) -> u64 {
-    state.lock().unwrap().workspace.watcher.revision()
+fn current_revision_and_crypto(
+    state: &Arc<Mutex<BackendState>>,
+) -> (u64, crate::crypto::VaultCryptoSession) {
+    let st = state.lock().unwrap();
+    (st.workspace.watcher.revision(), st.crypto.clone())
+}
+
+fn bump_revision_and_crypto(
+    state: &Arc<Mutex<BackendState>>,
+) -> (u64, crate::crypto::VaultCryptoSession) {
+    let st = state.lock().unwrap();
+    (st.workspace.watcher.bump(), st.crypto.clone())
+}
+
+fn crypto_snapshot(state: &Arc<Mutex<BackendState>>) -> crate::crypto::VaultCryptoSession {
+    state.lock().unwrap().crypto.clone()
 }
 
 fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Result<Value> {
     match endpoint {
         // ── 워크스페이스 & 볼트 관리 ──
         "/api/bootstrap" => {
-            let (ws_state, rev, sync_snap) = {
+            let (ws_state, rev, sync_snap, crypto_snap) = {
                 let mut st = state.lock().unwrap();
-                let BackendState { sync, workspace } = &mut *st;
+                let BackendState {
+                    sync,
+                    workspace,
+                    crypto,
+                    ..
+                } = &mut *st;
                 workspace.state.sync_vaults_with_config(&sync.cfg);
                 let _ = workspace.save_and_refresh_watcher();
                 let rev = workspace.watcher.revision();
                 let snap = sync.snapshot();
-                (workspace.state.clone(), rev, snap)
+                (workspace.state.clone(), rev, snap, crypto.clone())
             };
             let vault_scan = ws_state
                 .active_vault
                 .as_deref()
                 .map(Path::new)
                 .filter(|p| p.is_dir())
-                .and_then(|p| vault::scan_vault(p, rev).ok());
+                .and_then(|p| vault::scan_vault_with_session(p, rev, Some(&crypto_snap)).ok());
 
             Ok(json!({
                 "workspace": ws_state,
@@ -281,20 +359,24 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
 
         "/api/workspace/open_vault_dialog" => {
             let picked = platform::pick_folder();
-            let (ws_state, rev) = {
+            let (ws_state, rev, crypto_snap) = {
                 let mut st = state.lock().unwrap();
                 if let Some(ref p) = picked {
                     st.workspace.state.add_or_select_vault(p);
                     st.workspace.save_and_refresh_watcher()?;
                 }
-                (st.workspace.state.clone(), st.workspace.watcher.revision())
+                (
+                    st.workspace.state.clone(),
+                    st.workspace.watcher.revision(),
+                    st.crypto.clone(),
+                )
             };
             let vault_scan = ws_state
                 .active_vault
                 .as_deref()
                 .map(Path::new)
                 .filter(|p| p.is_dir())
-                .and_then(|p| vault::scan_vault(p, rev).ok());
+                .and_then(|p| vault::scan_vault_with_session(p, rev, Some(&crypto_snap)).ok());
 
             Ok(json!({
                 "picked": picked,
@@ -307,13 +389,17 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
             let data_dir: PathBuf = state.lock().unwrap().workspace.data_dir.clone();
             let sample_path = vault::create_sample_vault(&data_dir)?;
             let sample_str = sample_path.to_string_lossy().to_string();
-            let (ws_state, rev) = {
+            let (ws_state, rev, crypto_snap) = {
                 let mut st = state.lock().unwrap();
                 st.workspace.state.add_or_select_vault(&sample_str);
                 st.workspace.save_and_refresh_watcher()?;
-                (st.workspace.state.clone(), st.workspace.watcher.revision())
+                (
+                    st.workspace.state.clone(),
+                    st.workspace.watcher.revision(),
+                    st.crypto.clone(),
+                )
             };
-            let scan = vault::scan_vault(&sample_path, rev)?;
+            let scan = vault::scan_vault_with_session(&sample_path, rev, Some(&crypto_snap))?;
             Ok(json!({
                 "path": sample_str,
                 "workspace": ws_state,
@@ -327,13 +413,18 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
             if clean.is_empty() || !Path::new(&clean).is_dir() {
                 bail!("선택한 볼트 폴더가 존재하지 않습니다: {clean}");
             }
-            let (ws_state, rev) = {
+            let (ws_state, rev, crypto_snap) = {
                 let mut st = state.lock().unwrap();
                 st.workspace.state.add_or_select_vault(&clean);
                 st.workspace.save_and_refresh_watcher()?;
-                (st.workspace.state.clone(), st.workspace.watcher.revision())
+                (
+                    st.workspace.state.clone(),
+                    st.workspace.watcher.revision(),
+                    st.crypto.clone(),
+                )
             };
-            let scan = vault::scan_vault(Path::new(&clean), rev).ok();
+            let scan =
+                vault::scan_vault_with_session(Path::new(&clean), rev, Some(&crypto_snap)).ok();
             Ok(json!({
                 "workspace": ws_state,
                 "vault_scan": scan,
@@ -342,18 +433,22 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
 
         "/api/workspace/remove_vault" => {
             let req: PathOnlyReq = parse_body(body)?;
-            let (ws_state, rev) = {
+            let (ws_state, rev, crypto_snap) = {
                 let mut st = state.lock().unwrap();
                 st.workspace.state.remove_vault(&req.path);
                 st.workspace.save_and_refresh_watcher()?;
-                (st.workspace.state.clone(), st.workspace.watcher.revision())
+                (
+                    st.workspace.state.clone(),
+                    st.workspace.watcher.revision(),
+                    st.crypto.clone(),
+                )
             };
             let scan = ws_state
                 .active_vault
                 .as_deref()
                 .map(Path::new)
                 .filter(|p| p.is_dir())
-                .and_then(|p| vault::scan_vault(p, rev).ok());
+                .and_then(|p| vault::scan_vault_with_session(p, rev, Some(&crypto_snap)).ok());
             Ok(json!({
                 "workspace": ws_state,
                 "vault_scan": scan,
@@ -362,8 +457,12 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
 
         "/api/vault/scan" => {
             let req: VaultOnlyReq = parse_body(body)?;
-            let rev = current_revision(state);
-            let scan = vault::scan_vault(Path::new(req.vault.trim()), rev)?;
+            let (rev, crypto_snap) = current_revision_and_crypto(state);
+            let scan = vault::scan_vault_with_session(
+                Path::new(req.vault.trim()),
+                rev,
+                Some(&crypto_snap),
+            )?;
             ok_json(scan)
         }
 
@@ -388,19 +487,26 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
         // ── 노트 및 파일 작업 ──
         "/api/note/read" => {
             let req: VaultPathReq = parse_body(body)?;
-            let doc = vault::read_note(Path::new(req.vault.trim()), &req.path)?;
+            let crypto_snap = crypto_snapshot(state);
+            let doc = vault::read_note_with_session(
+                Path::new(req.vault.trim()),
+                &req.path,
+                Some(&crypto_snap),
+            )?;
             ok_json(doc)
         }
 
         "/api/note/save" => {
             let req: SaveNoteReq = parse_body(body)?;
-            let doc = vault::save_note(
+            let crypto_snap = crypto_snapshot(state);
+            let doc = vault::save_note_with_session(
                 Path::new(req.vault.trim()),
                 &req.path,
                 req.icon.as_deref(),
                 req.cover.as_deref(),
                 &req.properties,
                 &req.body,
+                Some(&crypto_snap),
             )?;
             bump_revision(state);
             ok_json(doc)
@@ -409,16 +515,18 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
         "/api/note/create" => {
             let req: CreateNoteReq = parse_body(body)?;
             let root = Path::new(req.vault.trim());
-            let (path, doc) = vault::create_note(
+            let crypto_snap = crypto_snapshot(state);
+            let (path, doc) = vault::create_note_with_session(
                 root,
                 &req.folder,
                 &req.title,
                 req.body.as_deref(),
                 req.icon.as_deref(),
                 &req.properties,
+                Some(&crypto_snap),
             )?;
-            let rev = bump_revision(state);
-            let scan = vault::scan_vault(root, rev)?;
+            let (rev, crypto_after) = bump_revision_and_crypto(state);
+            let scan = vault::scan_vault_with_session(root, rev, Some(&crypto_after))?;
             Ok(json!({
                 "path": path,
                 "doc": doc,
@@ -430,8 +538,8 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
             let req: VaultPathReq = parse_body(body)?;
             let root = Path::new(req.vault.trim());
             let path = vault::duplicate_note(root, &req.path)?;
-            let rev = bump_revision(state);
-            let scan = vault::scan_vault(root, rev)?;
+            let (rev, crypto_after) = bump_revision_and_crypto(state);
+            let scan = vault::scan_vault_with_session(root, rev, Some(&crypto_after))?;
             Ok(json!({
                 "path": path,
                 "scan": scan,
@@ -440,10 +548,20 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
 
         "/api/note/daily" => {
             let req: DailyNoteReq = parse_body(body)?;
-            let root = Path::new(req.vault.trim());
-            let (path, doc) = vault::open_daily_note(root, &req.daily_folder)?;
-            let rev = bump_revision(state);
-            let scan = vault::scan_vault(root, rev)?;
+            let vault_str = req.vault.trim();
+            let root = Path::new(vault_str);
+            let (daily_folder, crypto_snap) = {
+                let st = state.lock().unwrap();
+                let df = match req.daily_folder {
+                    Some(f) => f,
+                    None => st.workspace.state.resolve_daily_folder(vault_str),
+                };
+                (df, st.crypto.clone())
+            };
+            let (path, doc) =
+                vault::open_daily_note_with_session(root, &daily_folder, Some(&crypto_snap))?;
+            let (rev, crypto_after) = bump_revision_and_crypto(state);
+            let scan = vault::scan_vault_with_session(root, rev, Some(&crypto_after))?;
             Ok(json!({
                 "path": path,
                 "doc": doc,
@@ -451,12 +569,79 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
             }))
         }
 
+        "/api/note/export_pdf" => {
+            let req: ExportPdfReq = parse_body(body)?;
+            let (ws_landscape, ws_top, ws_bottom, ws_left, ws_right, proxy) = {
+                let st = state.lock().unwrap();
+                (
+                    st.workspace.state.page_orientation == "landscape",
+                    st.workspace.state.margin_top_cm,
+                    st.workspace.state.margin_bottom_cm,
+                    st.workspace.state.margin_left_cm,
+                    st.workspace.state.margin_right_cm,
+                    st.event_proxy.clone(),
+                )
+            };
+            let default_name = req
+                .default_filename
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("document.pdf");
+            let Some(output_path) = platform::save_pdf_dialog(default_name) else {
+                return Ok(json!({ "exported": false, "path": Value::Null }));
+            };
+
+            #[cfg(windows)]
+            {
+                let Some(proxy) = proxy else {
+                    bail!("PDF 내보내기 이벤트 채널이 초기화되지 않았습니다.");
+                };
+                let (tx, rx) = std::sync::mpsc::channel();
+                proxy
+                    .send_event(crate::AppUserEvent::ExportPdf {
+                        output_path: output_path.clone(),
+                        landscape: req.landscape.unwrap_or(ws_landscape),
+                        margin_top_cm: req.margin_top_cm.unwrap_or(ws_top).clamp(0.0, 6.0),
+                        margin_bottom_cm: req.margin_bottom_cm.unwrap_or(ws_bottom).clamp(0.0, 6.0),
+                        margin_left_cm: req.margin_left_cm.unwrap_or(ws_left).clamp(0.0, 6.0),
+                        margin_right_cm: req.margin_right_cm.unwrap_or(ws_right).clamp(0.0, 6.0),
+                        reply: tx,
+                    })
+                    .map_err(|_| anyhow::anyhow!("PDF 내보내기 요청을 전달할 수 없습니다."))?;
+
+                let res = rx
+                    .recv_timeout(std::time::Duration::from_secs(30))
+                    .context("PDF 저장 응답 시간이 초과되었습니다.")?;
+                if let Err(msg) = res {
+                    bail!("{msg}");
+                }
+                Ok(json!({
+                    "exported": true,
+                    "path": output_path.to_string_lossy(),
+                }))
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = (
+                    ws_landscape,
+                    ws_top,
+                    ws_bottom,
+                    ws_left,
+                    ws_right,
+                    proxy,
+                    output_path,
+                );
+                bail!("PDF 직접 내보내기는 Windows WebView2 환경에서 지원됩니다. 인쇄 창에서 PDF로 저장해 주세요.");
+            }
+        }
+
         "/api/vault/create_folder" => {
             let req: CreateFolderReq = parse_body(body)?;
             let root = Path::new(req.vault.trim());
             let path = vault::create_folder(root, &req.parent, &req.name)?;
-            let rev = bump_revision(state);
-            let scan = vault::scan_vault(root, rev)?;
+            let (rev, crypto_after) = bump_revision_and_crypto(state);
+            let scan = vault::scan_vault_with_session(root, rev, Some(&crypto_after))?;
             Ok(json!({
                 "path": path,
                 "scan": scan,
@@ -466,9 +651,15 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
         "/api/vault/rename" => {
             let req: RenameReq = parse_body(body)?;
             let root = Path::new(req.vault.trim());
-            let res = vault::rename_entry(root, &req.path, &req.new_name)?;
-            let rev = bump_revision(state);
-            let scan = vault::scan_vault(root, rev)?;
+            let mut st = state.lock().unwrap();
+            let res = vault::rename_entry_with_session(
+                root,
+                &req.path,
+                &req.new_name,
+                Some(&mut st.crypto),
+            )?;
+            let rev = st.workspace.watcher.bump();
+            let scan = vault::scan_vault_with_session(root, rev, Some(&st.crypto))?;
             Ok(json!({
                 "new_path": res.new_path,
                 "updated_links": res.updated_links,
@@ -479,9 +670,15 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
         "/api/vault/move" => {
             let req: MoveReq = parse_body(body)?;
             let root = Path::new(req.vault.trim());
-            let new_path = vault::move_entry(root, &req.path, &req.target_folder)?;
-            let rev = bump_revision(state);
-            let scan = vault::scan_vault(root, rev)?;
+            let mut st = state.lock().unwrap();
+            let new_path = vault::move_entry_with_session(
+                root,
+                &req.path,
+                &req.target_folder,
+                Some(&mut st.crypto),
+            )?;
+            let rev = st.workspace.watcher.bump();
+            let scan = vault::scan_vault_with_session(root, rev, Some(&st.crypto))?;
             Ok(json!({
                 "new_path": new_path,
                 "scan": scan,
@@ -491,9 +688,10 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
         "/api/vault/delete" => {
             let req: VaultPathReq = parse_body(body)?;
             let root = Path::new(req.vault.trim());
-            vault::delete_to_trash(root, &req.path)?;
-            let rev = bump_revision(state);
-            let scan = vault::scan_vault(root, rev)?;
+            let mut st = state.lock().unwrap();
+            vault::delete_to_trash_with_session(root, &req.path, Some(&mut st.crypto))?;
+            let rev = st.workspace.watcher.bump();
+            let scan = vault::scan_vault_with_session(root, rev, Some(&st.crypto))?;
             Ok(json!({ "scan": scan }))
         }
 
@@ -507,8 +705,8 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
             let req: TrashRestoreReq = parse_body(body)?;
             let root = Path::new(req.vault.trim());
             let restored_path = vault::restore_trash(root, &req.trash_name)?;
-            let rev = bump_revision(state);
-            let scan = vault::scan_vault(root, rev)?;
+            let (rev, crypto_after) = bump_revision_and_crypto(state);
+            let scan = vault::scan_vault_with_session(root, rev, Some(&crypto_after))?;
             Ok(json!({
                 "restored_path": restored_path,
                 "scan": scan,
@@ -523,10 +721,12 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
 
         "/api/vault/link_mention" => {
             let req: LinkMentionReq = parse_body(body)?;
-            vault::link_unlinked_mention(
+            let crypto_snap = crypto_snapshot(state);
+            vault::link_unlinked_mention_with_session(
                 Path::new(req.vault.trim()),
                 &req.source_path,
                 &req.target_title,
+                Some(&crypto_snap),
             )?;
             bump_revision(state);
             Ok(json!({}))
@@ -534,17 +734,24 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
 
         "/api/vault/search" => {
             let req: SearchReq = parse_body(body)?;
-            let hits = vault::search_vault(Path::new(req.vault.trim()), &req.query)?;
+            let crypto_snap = crypto_snapshot(state);
+            let hits = vault::search_vault_with_session(
+                Path::new(req.vault.trim()),
+                &req.query,
+                Some(&crypto_snap),
+            )?;
             Ok(json!({ "hits": hits }))
         }
 
         "/api/vault/graph" => {
             let req: GraphReq = parse_body(body)?;
-            let graph = vault::build_graph(
+            let crypto_snap = crypto_snapshot(state);
+            let graph = vault::build_graph_with_session(
                 Path::new(req.vault.trim()),
                 req.center_path.as_deref(),
                 req.depth,
                 req.include_tags.unwrap_or(false),
+                Some(&crypto_snap),
             )?;
             ok_json(graph)
         }
@@ -569,11 +776,133 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
 
         "/api/vault/pick_attachment" => {
             let req: VaultOnlyReq = parse_body(body)?;
-            let res = vault::pick_attachment(Path::new(req.vault.trim()))?;
+            let root = Path::new(req.vault.trim());
+            if !root.is_dir() {
+                bail!("볼트 폴더가 존재하지 않습니다");
+            }
+            let picked = platform::pick_image_file();
+            let res = vault::save_picked_image_attachment(root, picked)?;
             if res.picked {
                 bump_revision(state);
             }
             ok_json(res)
+        }
+
+        "/api/vault/pick_file_attachment" => {
+            let req: VaultOnlyReq = parse_body(body)?;
+            let root = Path::new(req.vault.trim());
+            if !root.is_dir() {
+                bail!("볼트 폴더가 존재하지 않습니다");
+            }
+            let picked = platform::pick_any_file();
+            let res = vault::save_picked_file_attachment(root, picked)?;
+            if res.picked {
+                bump_revision(state);
+            }
+            ok_json(res)
+        }
+
+        // ── 노트/볼트 암호화 및 잠금 관리 ──
+        "/api/crypto/encrypt_note" => {
+            let req: CryptoNotePasswordReq = parse_body(body)?;
+            let root = Path::new(req.vault.trim());
+            let mut st = state.lock().unwrap();
+            let doc = vault::encrypt_single_note(
+                root,
+                &req.path,
+                &req.password,
+                req.hint.as_deref(),
+                &mut st.crypto,
+            )?;
+            let rev = st.workspace.watcher.bump();
+            let scan = vault::scan_vault_with_session(root, rev, Some(&st.crypto))?;
+            Ok(json!({ "doc": doc, "scan": scan }))
+        }
+
+        "/api/crypto/decrypt_note" => {
+            let req: CryptoNotePasswordReq = parse_body(body)?;
+            let root = Path::new(req.vault.trim());
+            let mut st = state.lock().unwrap();
+            let doc = vault::decrypt_single_note(root, &req.path, &req.password, &mut st.crypto)?;
+            let rev = st.workspace.watcher.bump();
+            let scan = vault::scan_vault_with_session(root, rev, Some(&st.crypto))?;
+            Ok(json!({ "doc": doc, "scan": scan }))
+        }
+
+        "/api/crypto/unlock_note" => {
+            let req: CryptoNotePasswordReq = parse_body(body)?;
+            let root = Path::new(req.vault.trim());
+            let mut st = state.lock().unwrap();
+            let doc = vault::unlock_single_note(root, &req.path, &req.password, &mut st.crypto)?;
+            let rev = st.workspace.watcher.revision();
+            let scan = vault::scan_vault_with_session(root, rev, Some(&st.crypto))?;
+            Ok(json!({ "doc": doc, "scan": scan }))
+        }
+
+        "/api/crypto/lock_note" => {
+            let req: VaultPathReq = parse_body(body)?;
+            let root = Path::new(req.vault.trim());
+            let mut st = state.lock().unwrap();
+            let doc = vault::lock_single_note(root, &req.path, &mut st.crypto)?;
+            let rev = st.workspace.watcher.revision();
+            let scan = vault::scan_vault_with_session(root, rev, Some(&st.crypto))?;
+            Ok(json!({ "doc": doc, "scan": scan }))
+        }
+
+        "/api/crypto/encrypt_vault" => {
+            let req: CryptoVaultReq = parse_body(body)?;
+            let root = Path::new(req.vault.trim());
+            let mut st = state.lock().unwrap();
+            let result = vault::encrypt_entire_vault(
+                root,
+                &req.password,
+                req.hint.as_deref(),
+                req.auto_encrypt.unwrap_or(false),
+                &mut st.crypto,
+            )?;
+            let rev = st.workspace.watcher.bump();
+            let scan = vault::scan_vault_with_session(root, rev, Some(&st.crypto))?;
+            Ok(json!({ "result": result, "scan": scan }))
+        }
+
+        "/api/crypto/decrypt_vault" => {
+            let req: CryptoVaultReq = parse_body(body)?;
+            let root = Path::new(req.vault.trim());
+            let mut st = state.lock().unwrap();
+            let result = vault::decrypt_entire_vault(root, &req.password, &mut st.crypto)?;
+            let rev = st.workspace.watcher.bump();
+            let scan = vault::scan_vault_with_session(root, rev, Some(&st.crypto))?;
+            Ok(json!({ "result": result, "scan": scan }))
+        }
+
+        "/api/crypto/unlock_vault" => {
+            let req: CryptoVaultReq = parse_body(body)?;
+            let root = Path::new(req.vault.trim());
+            let mut st = state.lock().unwrap();
+            let result = vault::unlock_entire_vault(root, &req.password, &mut st.crypto)?;
+            let rev = st.workspace.watcher.revision();
+            let scan = vault::scan_vault_with_session(root, rev, Some(&st.crypto))?;
+            Ok(json!({ "result": result, "scan": scan }))
+        }
+
+        "/api/crypto/lock_vault" => {
+            let req: VaultOnlyReq = parse_body(body)?;
+            let root = Path::new(req.vault.trim());
+            let mut st = state.lock().unwrap();
+            vault::lock_entire_vault(root, &mut st.crypto);
+            let rev = st.workspace.watcher.revision();
+            let scan = vault::scan_vault_with_session(root, rev, Some(&st.crypto))?;
+            Ok(json!({ "scan": scan }))
+        }
+
+        "/api/crypto/set_auto_encrypt" => {
+            let req: CryptoAutoEncryptReq = parse_body(body)?;
+            let root = Path::new(req.vault.trim());
+            let st = state.lock().unwrap();
+            vault::set_vault_auto_encrypt(root, req.enabled, &st.crypto)?;
+            let rev = st.workspace.watcher.revision();
+            let scan = vault::scan_vault_with_session(root, rev, Some(&st.crypto))?;
+            Ok(json!({ "scan": scan }))
         }
 
         // ── 동기화 서비스 & 원격 저장소 제어 ──
@@ -815,7 +1144,12 @@ mod tests {
         let trigger: SharedTrigger = Arc::new(Mutex::new(None));
         let sync = App::new(data_dir.join("config.json"), data_dir.clone(), trigger);
         let workspace = WorkspaceManager::new(data_dir, &sync.cfg);
-        let state = Arc::new(Mutex::new(BackendState { sync, workspace }));
+        let state = Arc::new(Mutex::new(BackendState {
+            sync,
+            workspace,
+            crypto: crate::crypto::VaultCryptoSession::new(),
+            event_proxy: None,
+        }));
 
         // 1) save_config 시 Obsidian 프로필이 자동으로 볼트 목록에 동기화되는지 검증
         let mut cfg = AppConfig::default();
@@ -878,5 +1212,141 @@ mod tests {
         let (mime, bytes) = handle_vault_media(Some(query)).unwrap();
         assert_eq!(mime, "image/png");
         assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn api_router_crypto_and_daily_folder_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let vault_dir = tmp.path().join("vault");
+        std::fs::create_dir_all(&vault_dir).unwrap();
+        let vault_str = vault_dir.to_string_lossy().to_string();
+
+        let trigger: SharedTrigger = Arc::new(Mutex::new(None));
+        let sync = App::new(data_dir.join("config.json"), data_dir.clone(), trigger);
+        let workspace = WorkspaceManager::new(data_dir, &sync.cfg);
+        let state = Arc::new(Mutex::new(BackendState {
+            sync,
+            workspace,
+            crypto: crate::crypto::VaultCryptoSession::new(),
+            event_proxy: None,
+        }));
+
+        // 1) 워크스페이스에 볼트별 일일노트 폴더("일일업무") 저장 후 daily_folder 생략 요청
+        let ws_patch = serde_json::to_vec(&json!({
+            "workspace": {
+                "daily_folders_by_vault": {
+                    &vault_str: "일일업무"
+                }
+            }
+        }))
+        .unwrap();
+        let ws_resp: Value =
+            serde_json::from_slice(&handle_api(&state, "/api/workspace/save", &ws_patch)).unwrap();
+        assert_eq!(ws_resp["ok"], true);
+
+        let daily_req = serde_json::to_vec(&json!({ "vault": &vault_str })).unwrap();
+        let daily_resp: Value =
+            serde_json::from_slice(&handle_api(&state, "/api/note/daily", &daily_req)).unwrap();
+        assert_eq!(daily_resp["ok"], true);
+        let daily_path = daily_resp["data"]["path"].as_str().unwrap().to_string();
+        assert!(daily_path.starts_with("일일업무/"));
+
+        // 2) 단일 노트 암호화 -> 잠금 -> 읽기 시 잠금 상태 -> 잠금 해제 -> 복호화
+        let enc_req = serde_json::to_vec(&json!({
+            "vault": &vault_str,
+            "path": &daily_path,
+            "password": "pw-1234",
+            "hint": "숫자4자리"
+        }))
+        .unwrap();
+        let enc_resp: Value =
+            serde_json::from_slice(&handle_api(&state, "/api/crypto/encrypt_note", &enc_req))
+                .unwrap();
+        assert_eq!(enc_resp["ok"], true);
+        assert_eq!(enc_resp["data"]["doc"]["encrypted"], true);
+        assert_eq!(enc_resp["data"]["doc"]["locked"], false);
+
+        let lock_req = serde_json::to_vec(&json!({
+            "vault": &vault_str,
+            "path": &daily_path
+        }))
+        .unwrap();
+        let lock_resp: Value =
+            serde_json::from_slice(&handle_api(&state, "/api/crypto/lock_note", &lock_req))
+                .unwrap();
+        assert_eq!(lock_resp["ok"], true);
+        assert_eq!(lock_resp["data"]["doc"]["locked"], true);
+        assert_eq!(lock_resp["data"]["doc"]["body"], "");
+
+        let unlock_req = serde_json::to_vec(&json!({
+            "vault": &vault_str,
+            "path": &daily_path,
+            "password": "pw-1234"
+        }))
+        .unwrap();
+        let unlock_resp: Value =
+            serde_json::from_slice(&handle_api(&state, "/api/crypto/unlock_note", &unlock_req))
+                .unwrap();
+        assert_eq!(unlock_resp["ok"], true);
+        assert_eq!(unlock_resp["data"]["doc"]["locked"], false);
+
+        // 3) 전체 볼트 암호화 -> 볼트 잠금 -> 볼트 잠금 해제 -> 볼트 복호화
+        let dec_note_resp: Value =
+            serde_json::from_slice(&handle_api(&state, "/api/crypto/decrypt_note", &unlock_req))
+                .unwrap();
+        assert_eq!(dec_note_resp["ok"], true);
+        assert_eq!(dec_note_resp["data"]["doc"]["encrypted"], false);
+
+        let ev_req = serde_json::to_vec(&json!({
+            "vault": &vault_str,
+            "password": "vault-pw",
+            "auto_encrypt": true
+        }))
+        .unwrap();
+        let ev_resp: Value =
+            serde_json::from_slice(&handle_api(&state, "/api/crypto/encrypt_vault", &ev_req))
+                .unwrap();
+        assert_eq!(ev_resp["ok"], true);
+        assert_eq!(ev_resp["data"]["result"]["encrypted_count"], 1);
+        assert_eq!(ev_resp["data"]["scan"]["vault_auto_encrypt"], true);
+
+        let lv_req = serde_json::to_vec(&json!({ "vault": &vault_str })).unwrap();
+        let lv_resp: Value =
+            serde_json::from_slice(&handle_api(&state, "/api/crypto/lock_vault", &lv_req)).unwrap();
+        assert_eq!(lv_resp["ok"], true);
+        assert_eq!(lv_resp["data"]["scan"]["vault_unlocked"], false);
+
+        let uv_req = serde_json::to_vec(&json!({
+            "vault": &vault_str,
+            "password": "vault-pw"
+        }))
+        .unwrap();
+        let uv_resp: Value =
+            serde_json::from_slice(&handle_api(&state, "/api/crypto/unlock_vault", &uv_req))
+                .unwrap();
+        assert_eq!(uv_resp["ok"], true);
+        assert_eq!(uv_resp["data"]["scan"]["vault_unlocked"], true);
+
+        let auto_req = serde_json::to_vec(&json!({
+            "vault": &vault_str,
+            "enabled": false
+        }))
+        .unwrap();
+        let auto_resp: Value = serde_json::from_slice(&handle_api(
+            &state,
+            "/api/crypto/set_auto_encrypt",
+            &auto_req,
+        ))
+        .unwrap();
+        assert_eq!(auto_resp["ok"], true);
+        assert_eq!(auto_resp["data"]["scan"]["vault_auto_encrypt"], false);
+
+        let dv_resp: Value =
+            serde_json::from_slice(&handle_api(&state, "/api/crypto/decrypt_vault", &uv_req))
+                .unwrap();
+        assert_eq!(dv_resp["ok"], true);
+        assert_eq!(dv_resp["data"]["result"]["decrypted_count"], 1);
+        assert_eq!(dv_resp["data"]["scan"]["vault_has_crypto_config"], false);
     }
 }

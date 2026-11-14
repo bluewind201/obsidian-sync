@@ -1,6 +1,6 @@
 import './styles/notion.css';
 import { api, hydrateMarkdownMediaUrls } from './api';
-import { renderSplitViewer, StudioEditorController } from './editor';
+import { renderPrintableHtml, renderSplitViewer, StudioEditorController } from './editor';
 import { ForceGraphCanvas } from './graph';
 import {
   closeContextMenu,
@@ -8,10 +8,15 @@ import {
   ContextMenuEntry,
   openCommandPaletteModal,
   openCoverPickerModal,
+  openDailyNoteFolderModal,
   openEmojiPickerModal,
+  openNoteCryptoModal,
+  openPageSetupModal,
   openTemplatesModal,
   openTrashModal,
+  openVaultCryptoModal,
   openWikiLinkPickerModal,
+  PageSetupValues,
   QuickCommandItem,
   showContextMenu,
   showFolderMoveModal,
@@ -106,6 +111,8 @@ class ObsidianSyncStudioApp {
   private graphViewWrapEl!: HTMLElement;
   private syncViewWrapEl!: HTMLElement;
   private toastStackEl!: HTMLElement;
+  private printRootEl: HTMLElement | null = null;
+  private resizeObserver: ResizeObserver | null = null;
 
   private pollTimer: number | null = null;
 
@@ -114,8 +121,13 @@ class ObsidianSyncStudioApp {
   }
 
   public async init(): Promise<void> {
+    this.printRootEl = document.getElementById('print-root');
     this.buildShellDom();
     this.bindGlobalShortcuts();
+    this.setupResizeObserver();
+    window.addEventListener('afterprint', () => {
+      if (this.printRootEl) this.printRootEl.innerHTML = '';
+    });
 
     try {
       const boot = await api.bootstrap();
@@ -125,6 +137,7 @@ class ObsidianSyncStudioApp {
       this.vaultRevision = boot.vault_revision;
 
       this.applyTheme(this.workspace.theme || 'light');
+      this.applyPageLayoutVariables();
       this.expandInitialFolders();
 
       this.renderChrome();
@@ -241,10 +254,20 @@ class ObsidianSyncStudioApp {
       const mod = ev.ctrlKey || ev.metaKey;
       const key = ev.key.toLowerCase();
 
-      if (mod && (key === 'k' || key === 'p')) {
+      if (mod && key === 'k') {
         ev.preventDefault();
         closeContextMenu();
         this.openCommandPalette();
+        return;
+      }
+      if (mod && key === 'p') {
+        ev.preventDefault();
+        closeContextMenu();
+        if (!ev.shiftKey && this.mainView === 'editor' && this.currentDoc && !this.currentDoc.locked) {
+          void this.handlePrintNote();
+        } else {
+          this.openCommandPalette();
+        }
         return;
       }
       if (mod && key === 's') {
@@ -266,8 +289,335 @@ class ObsidianSyncStudioApp {
         ev.preventDefault();
         this.sidebarCollapsed = !this.sidebarCollapsed;
         this.sidebarEl.classList.toggle('collapsed', this.sidebarCollapsed);
+        requestAnimationFrame(() => this.applyPageLayoutVariables());
       }
     });
+  }
+
+  // ───────────────────────── v0.6.0 A4 / Daily Folder / Print / Crypto Helpers ─────────────────────────
+  private getActiveDailyFolder(): string {
+    const vault = this.workspace?.active_vault;
+    const map = this.workspace?.daily_folders_by_vault;
+    if (vault && map && Object.prototype.hasOwnProperty.call(map, vault)) {
+      return map[vault];
+    }
+    return this.workspace?.daily_folder ?? 'Daily';
+  }
+
+  private setupResizeObserver(): void {
+    if (typeof ResizeObserver === 'undefined') return;
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = new ResizeObserver(() => {
+      this.applyPageLayoutVariables();
+    });
+    if (this.editorPaneEl) {
+      this.resizeObserver.observe(this.editorPaneEl);
+    }
+  }
+
+  private applyPageLayoutVariables(): void {
+    if (!this.workspace) return;
+    const isLand = this.workspace.page_orientation === 'landscape';
+    const pageWidthMm = isLand ? 297 : 210;
+    const pageHeightMm = isLand ? 210 : 297;
+
+    const mTop = Number.isFinite(this.workspace.margin_top_cm) ? this.workspace.margin_top_cm : 2.0;
+    const mBottom = Number.isFinite(this.workspace.margin_bottom_cm)
+      ? this.workspace.margin_bottom_cm
+      : 1.0;
+    const mLeft = Number.isFinite(this.workspace.margin_left_cm) ? this.workspace.margin_left_cm : 3.0;
+    const mRight = Number.isFinite(this.workspace.margin_right_cm)
+      ? this.workspace.margin_right_cm
+      : 3.0;
+
+    const rootStyle = document.documentElement.style;
+    rootStyle.setProperty('--page-width', `${pageWidthMm}mm`);
+    rootStyle.setProperty('--page-min-height', `${pageHeightMm}mm`);
+    rootStyle.setProperty('--page-margin-top', `${mTop}cm`);
+    rootStyle.setProperty('--page-margin-bottom', `${mBottom}cm`);
+    rootStyle.setProperty('--page-margin-left', `${mLeft}cm`);
+    rootStyle.setProperty('--page-margin-right', `${mRight}cm`);
+
+    const zoomFactor = Math.min(1.5, Math.max(0.5, (this.workspace.editor_zoom || 100) / 100));
+    const sheetEl = document.getElementById('a4-paper-sheet') as HTMLElement | null;
+    const scaleOuter = document.getElementById('a4-scale-outer') as HTMLElement | null;
+
+    let finalScale = zoomFactor;
+    if (
+      sheetEl &&
+      this.workspace.page_layout !== 'full' &&
+      this.workspace.auto_fit_a4 !== false &&
+      this.editorPaneEl
+    ) {
+      const availWidth = Math.max(240, this.editorPaneEl.clientWidth - 48);
+      const naturalWidth = sheetEl.offsetWidth || pageWidthMm * 3.7795275591;
+      if (naturalWidth > 0 && naturalWidth * zoomFactor > availWidth) {
+        finalScale = Math.max(0.45, availWidth / naturalWidth);
+      }
+    }
+
+    rootStyle.setProperty('--a4-scale', finalScale.toFixed(4));
+
+    if (sheetEl && scaleOuter) {
+      const naturalW = sheetEl.offsetWidth;
+      const naturalH = sheetEl.offsetHeight;
+      if (naturalW > 0) {
+        scaleOuter.style.width = `${Math.round(naturalW * finalScale)}px`;
+        scaleOuter.style.height = `${Math.round(naturalH * finalScale)}px`;
+      }
+    }
+  }
+
+  private getPageSetupValues(): PageSetupValues {
+    return {
+      page_layout: this.workspace.page_layout || 'a4',
+      page_orientation: this.workspace.page_orientation || 'portrait',
+      margin_top_cm: this.workspace.margin_top_cm ?? 2.0,
+      margin_bottom_cm: this.workspace.margin_bottom_cm ?? 1.0,
+      margin_left_cm: this.workspace.margin_left_cm ?? 3.0,
+      margin_right_cm: this.workspace.margin_right_cm ?? 3.0,
+      auto_fit_a4: this.workspace.auto_fit_a4 ?? true,
+      show_page_guides: this.workspace.show_page_guides ?? true,
+      editor_zoom: this.workspace.editor_zoom ?? 100,
+      print_include_title: this.workspace.print_include_title ?? true,
+      print_include_properties: this.workspace.print_include_properties ?? false,
+    };
+  }
+
+  private openPageSetupDialog(): void {
+    const applyPatch = async (patch: PageSetupValues) => {
+      const prevMode = this.workspace.page_layout;
+      const prevGuides = this.workspace.show_page_guides;
+      await this.persistWorkspace(patch);
+      this.applyPageLayoutVariables();
+      if (prevMode !== patch.page_layout || prevGuides !== patch.show_page_guides) {
+        this.renderEditorMainArea(true);
+      } else {
+        this.renderEditorMainArea(false);
+      }
+      this.renderTopbar();
+    };
+
+    openPageSetupModal({
+      initial: this.getPageSetupValues(),
+      onApply: async (patch) => {
+        await applyPatch(patch);
+        this.showToast('용지 및 여백 설정을 적용했습니다.');
+      },
+      onPrintNow: async (patch) => {
+        await applyPatch(patch);
+        await this.handlePrintNote();
+      },
+      onExportPdfNow: async (patch) => {
+        await applyPatch(patch);
+        await this.handleExportPdf();
+      },
+    });
+  }
+
+  private openDailyNoteFolderDialog(): void {
+    const vault = this.workspace.active_vault;
+    if (!vault) {
+      this.showToast('먼저 볼트 폴더를 열어 주세요.', true);
+      return;
+    }
+    const folders = this.scan ? collectFoldersFromTree(this.scan.tree) : [];
+    const currentFolder = this.getActiveDailyFolder();
+
+    openDailyNoteFolderModal({
+      vault,
+      folders,
+      currentFolder,
+      onSelect: async (folder) => {
+        const nextMap = { ...(this.workspace.daily_folders_by_vault || {}), [vault]: folder };
+        await this.persistWorkspace({
+          daily_folders_by_vault: nextMap,
+          daily_folder: folder || this.workspace.daily_folder,
+        });
+        this.renderSidebar();
+        this.showToast(
+          folder
+            ? `일일 문서 저장 폴더가 '${folder}'(으)로 설정되었습니다.`
+            : '일일 문서 저장 폴더가 볼트 최상위 루트로 설정되었습니다.'
+        );
+      },
+      onFolderCreated: async () => {
+        this.scan = await api.vaultScan(vault);
+        this.vaultRevision = this.scan.revision;
+        this.renderSidebar();
+      },
+      onToast: (m, err) => this.showToast(m, err),
+    });
+  }
+
+  private async openNoteCryptoDialog(targetPath?: string): Promise<void> {
+    const vault = this.workspace.active_vault;
+    if (!vault) return;
+    const notePath = targetPath || this.currentDoc?.path;
+    if (!notePath) return;
+
+    await this.flushSave(false);
+    const meta = this.scan?.notes.find((n) => n.path === notePath);
+    const isCurrent = this.currentDoc?.path === notePath;
+    const encrypted = isCurrent ? Boolean(this.currentDoc?.encrypted) : Boolean(meta?.encrypted);
+    const locked = isCurrent ? Boolean(this.currentDoc?.locked) : Boolean(meta?.locked);
+    const title = isCurrent
+      ? this.currentDoc!.title
+      : meta?.title || stripMdExt(notePath.split('/').pop() || notePath);
+
+    openNoteCryptoModal({
+      vault,
+      notePath,
+      noteTitle: title,
+      encrypted,
+      locked,
+      hint: isCurrent ? this.currentDoc?.encryption_hint : null,
+      onCompleted: async () => {
+        this.scan = await api.vaultScan(vault);
+        this.vaultRevision = this.scan.revision;
+        if (this.currentDoc?.path === notePath) {
+          this.mountedNotePath = null;
+          await this.openNote(notePath);
+        } else {
+          this.renderSidebar();
+          this.renderTabsStrip();
+        }
+      },
+      onToast: (m, err) => this.showToast(m, err),
+    });
+  }
+
+  private async openVaultCryptoDialog(): Promise<void> {
+    const vault = this.workspace.active_vault;
+    if (!vault) {
+      this.showToast('먼저 볼트를 열어 주세요.', true);
+      return;
+    }
+    await this.flushSave(false);
+    try {
+      const freshScan = await api.vaultScan(vault);
+      this.scan = freshScan;
+      this.vaultRevision = freshScan.revision;
+      const encryptedCount =
+        freshScan.encrypted_notes ?? freshScan.notes.filter((n) => n.encrypted).length;
+      const unlockedCount = freshScan.notes.filter((n) => n.encrypted && !n.locked).length;
+      const status = {
+        vault_encrypted: Boolean(freshScan.vault_has_crypto_config || encryptedCount > 0),
+        vault_unlocked: Boolean(freshScan.vault_unlocked),
+        total_notes: freshScan.total_notes,
+        encrypted_notes: encryptedCount,
+        unlocked_notes: unlockedCount,
+        auto_encrypt_new_notes: Boolean(freshScan.vault_auto_encrypt),
+        hint: freshScan.vault_crypto_hint ?? null,
+      };
+      openVaultCryptoModal({
+        vault,
+        status,
+        onCompleted: async () => {
+          this.scan = await api.vaultScan(vault);
+          this.vaultRevision = this.scan.revision;
+          if (this.currentDoc) {
+            const p = this.currentDoc.path;
+            this.mountedNotePath = null;
+            await this.openNote(p);
+          } else {
+            this.renderChrome();
+          }
+        },
+        onToast: (m, err) => this.showToast(m, err),
+      });
+    } catch (err: any) {
+      this.showToast(err?.message || '암호화 상태를 불러오지 못했습니다.', true);
+    }
+  }
+
+  private async toggleShowTags(): Promise<void> {
+    const next = !this.workspace.show_tags;
+    await this.persistWorkspace({ show_tags: next });
+    this.renderSidebar();
+    this.renderPropertiesRows();
+    this.renderTopbar();
+  }
+
+  private async preparePrintDom(): Promise<boolean> {
+    if (!this.currentDoc || !this.workspace.active_vault) {
+      this.showToast('인쇄할 문서를 먼저 열어 주세요.', true);
+      return false;
+    }
+    if (this.currentDoc.locked) {
+      this.showToast('잠긴 문서는 먼저 잠금 해제 후 인쇄 또는 PDF 출력할 수 있습니다.', true);
+      return false;
+    }
+    await this.flushSave(false);
+    this.applyPageLayoutVariables();
+
+    const printRoot = this.printRootEl || document.getElementById('print-root');
+    if (!printRoot) return false;
+    this.printRootEl = printRoot;
+
+    const md = this.editorCtrl ? this.editorCtrl.getCleanMarkdown() : this.draftBody;
+    const bodyHtml = renderPrintableHtml(md, this.workspace.active_vault);
+
+    let headerHtml = '';
+    const incTitle = this.workspace.print_include_title !== false;
+    const incProps = Boolean(this.workspace.print_include_properties);
+    if (incTitle || (incProps && this.draftProperties.length > 0)) {
+      let propsTable = '';
+      if (incProps && this.draftProperties.length > 0) {
+        const rows = this.draftProperties
+          .filter((p) => p.key.trim())
+          .map(
+            (p) =>
+              `<tr><th>${escapeHtml(p.key)}</th><td>${escapeHtml(p.value)}</td></tr>`
+          )
+          .join('');
+        if (rows) {
+          propsTable = `<table class="print-props-table">${rows}</table>`;
+        }
+      }
+      headerHtml = `
+        <div class="print-doc-header">
+          ${incTitle ? `<h1 class="print-doc-title">${this.draftIcon ? `${escapeHtml(this.draftIcon)} ` : ''}${escapeHtml(this.currentDoc.title)}</h1>` : ''}
+          ${propsTable}
+        </div>
+      `;
+    }
+
+    printRoot.innerHTML = `${headerHtml}${bodyHtml}`;
+    return true;
+  }
+
+  private async handlePrintNote(): Promise<void> {
+    const ok = await this.preparePrintDom();
+    if (!ok) return;
+    requestAnimationFrame(() => {
+      window.print();
+    });
+  }
+
+  private async handleExportPdf(): Promise<void> {
+    const ok = await this.preparePrintDom();
+    if (!ok || !this.currentDoc) return;
+    try {
+      const safeName = `${this.currentDoc.title.replace(/[\\/:*?"<>|]/g, '_') || 'document'}.pdf`;
+      const res = await api.exportPdf({
+        default_filename: safeName,
+        landscape: this.workspace.page_orientation === 'landscape',
+        margin_top_cm: this.workspace.margin_top_cm ?? 2.0,
+        margin_bottom_cm: this.workspace.margin_bottom_cm ?? 1.0,
+        margin_left_cm: this.workspace.margin_left_cm ?? 3.0,
+        margin_right_cm: this.workspace.margin_right_cm ?? 3.0,
+      });
+      if (res.exported && res.path) {
+        this.showToast(`PDF로 저장했습니다: ${res.path}`);
+      }
+    } catch (err: any) {
+      this.showToast(err?.message || 'PDF 출력에 실패했습니다.', true);
+    } finally {
+      if (this.printRootEl) {
+        this.printRootEl.innerHTML = '';
+      }
+    }
   }
 
   // ───────────────────────── Background Polling ─────────────────────────
@@ -409,11 +759,14 @@ class ObsidianSyncStudioApp {
           <span class="nav-label">빠른 검색 / 명령어</span>
           <span class="kbd-hint">Ctrl+K</span>
         </button>
-        <button type="button" class="nav-item" data-daily-note>
-          <span class="nav-icon">📅</span>
-          <span class="nav-label">오늘의 일일 노트</span>
-          <span class="kbd-hint">Ctrl+D</span>
-        </button>
+        <div style="display:flex;align-items:center;gap:2px;">
+          <button type="button" class="nav-item" style="flex:1;" data-daily-note title="저장 폴더: ${escapeAttr(this.getActiveDailyFolder() || '(루트)')}">
+            <span class="nav-icon">📅</span>
+            <span class="nav-label">오늘의 일일 노트</span>
+            <span class="kbd-hint">Ctrl+D</span>
+          </button>
+          <button type="button" class="icon-btn" data-daily-note-settings title="일일 문서 저장 폴더 설정 (${escapeAttr(this.getActiveDailyFolder() || '루트')})">⚙️</button>
+        </div>
         <button type="button" class="nav-item ${this.mainView === 'graph' ? 'active' : ''}" data-open-graph>
           <span class="nav-icon">🕸️</span>
           <span class="nav-label">그래프 뷰</span>
@@ -432,6 +785,9 @@ class ObsidianSyncStudioApp {
       <div class="sidebar-scroll" data-sidebar-scroll></div>
 
       <div class="sidebar-footer">
+        <button type="button" class="ghost-action-btn" data-vault-crypto ${!activeVaultPath ? 'disabled' : ''} title="볼트 전체 암호화/잠금 관리">
+          🔐 암호화
+        </button>
         <button type="button" class="ghost-action-btn" data-open-trash ${!activeVaultPath ? 'disabled' : ''}>
           🗑️ 휴지통
         </button>
@@ -512,6 +868,12 @@ class ObsidianSyncStudioApp {
     });
     this.sidebarEl.querySelector('[data-daily-note]')?.addEventListener('click', () => {
       void this.openTodayDailyNote();
+    });
+    this.sidebarEl.querySelector('[data-daily-note-settings]')?.addEventListener('click', () => {
+      this.openDailyNoteFolderDialog();
+    });
+    this.sidebarEl.querySelector('[data-vault-crypto]')?.addEventListener('click', () => {
+      void this.openVaultCryptoDialog();
     });
     this.sidebarEl.querySelector('[data-open-graph]')?.addEventListener('click', () => {
       void this.switchMainView(this.mainView === 'graph' ? 'editor' : 'graph');
@@ -620,27 +982,36 @@ class ObsidianSyncStudioApp {
     }
     scrollEl.appendChild(pagesSec);
 
-    // 3. Tags Section
+    // 3. Tags Section (hidden by default; toggle on demand)
     if (this.scan.tags.length > 0) {
       const tagsSec = document.createElement('div');
       tagsSec.className = 'sidebar-section';
+      const showTags = Boolean(this.workspace.show_tags);
       tagsSec.innerHTML = `
-        <div class="sidebar-section-header">
+        <div class="sidebar-section-header sidebar-tags-head">
           <span>🏷️ 태그 (${this.scan.tags.length})</span>
+          <button type="button" class="tag-toggle-chip${showTags ? ' active' : ''}" data-toggle-sidebar-tags>
+            ${showTags ? '숨기기' : '보기'}
+          </button>
         </div>
-        <div class="tag-cloud" data-tags-cloud></div>
+        ${showTags ? '<div class="tag-cloud" data-tags-cloud></div>' : ''}
       `;
-      const cloud = tagsSec.querySelector('[data-tags-cloud]')!;
-      for (const t of this.scan.tags) {
-        const cleanTag = t.tag.replace(/^#+/, '');
-        const chip = document.createElement('button');
-        chip.type = 'button';
-        chip.className = 'tag-chip';
-        chip.innerHTML = `<span>#${escapeHtml(cleanTag)}</span><span class="tag-count">${t.count}</span>`;
-        chip.addEventListener('click', () => {
-          this.openCommandPalette(`tag:#${cleanTag}`);
-        });
-        cloud.appendChild(chip);
+      tagsSec.querySelector('[data-toggle-sidebar-tags]')?.addEventListener('click', () => {
+        void this.toggleShowTags();
+      });
+      if (showTags) {
+        const cloud = tagsSec.querySelector('[data-tags-cloud]')!;
+        for (const t of this.scan.tags) {
+          const cleanTag = t.tag.replace(/^#+/, '');
+          const chip = document.createElement('button');
+          chip.type = 'button';
+          chip.className = 'tag-chip';
+          chip.innerHTML = `<span>#${escapeHtml(cleanTag)}</span><span class="tag-count">${t.count}</span>`;
+          chip.addEventListener('click', () => {
+            this.openCommandPalette(`tag:#${cleanTag}`);
+          });
+          cloud.appendChild(chip);
+        }
       }
       scrollEl.appendChild(tagsSec);
     }
@@ -657,12 +1028,13 @@ class ObsidianSyncStudioApp {
     row.style.paddingLeft = `${6 + depth * 14}px`;
 
     const displayLabel = isFolder ? node.name : stripMdExt(node.name);
+    const lockPrefix = !isFolder && node.encrypted ? (node.locked ? '🔒 ' : '🔓 ') : '';
     const icon = isFolder ? (isExpanded ? '📂' : '📁') : node.icon || '📄';
 
     row.innerHTML = `
       <span class="tree-chevron ${isFolder ? (isExpanded ? 'expanded' : '') : 'spacer'}">▶</span>
       <span class="tree-icon">${escapeHtml(icon)}</span>
-      <span class="tree-label">${escapeHtml(displayLabel)}</span>
+      <span class="tree-label">${escapeHtml(lockPrefix + displayLabel)}</span>
       <span class="tree-hover-actions">
         ${isFolder ? `<button type="button" class="mini-icon-btn" data-add-child title="이 폴더에 새 노트">＋</button>` : ''}
         <button type="button" class="mini-icon-btn" data-more-menu title="더보기">⋯</button>
@@ -777,6 +1149,11 @@ class ObsidianSyncStudioApp {
           label: '같은 폴더에 새 노트',
           onClick: () => this.promptCreateNote(parentFolderOf(node.path)),
         },
+        {
+          icon: '🔐',
+          label: '암호화 / 잠금 설정…',
+          onClick: () => this.openNoteCryptoDialog(node.path),
+        },
         { separator: true },
         {
           icon: '🗑️',
@@ -800,6 +1177,7 @@ class ObsidianSyncStudioApp {
     toggleSidebarBtn.addEventListener('click', () => {
       this.sidebarCollapsed = !this.sidebarCollapsed;
       this.sidebarEl.classList.toggle('collapsed', this.sidebarCollapsed);
+      requestAnimationFrame(() => this.applyPageLayoutVariables());
     });
     this.tabsStripEl.appendChild(toggleSidebarBtn);
 
@@ -810,13 +1188,14 @@ class ObsidianSyncStudioApp {
       const meta = this.scan?.notes.find((n) => n.path === tabPath);
       const title = meta?.title || stripMdExt(tabPath.split('/').pop() || tabPath);
       const icon = meta?.icon || '📄';
+      const lockBadge = meta?.encrypted ? (meta.locked ? '🔒 ' : '🔓 ') : '';
       const active = this.mainView === 'editor' && this.currentDoc?.path === tabPath;
 
       const pill = document.createElement('div');
       pill.className = `tab-pill${active ? ' active' : ''}`;
       pill.innerHTML = `
         <span>${escapeHtml(icon)}</span>
-        <span class="tab-pill-title">${escapeHtml(title)}</span>
+        <span class="tab-pill-title">${escapeHtml(lockBadge + title)}</span>
         <button type="button" class="tab-close" title="탭 닫기">✕</button>
       `;
       pill.addEventListener('click', () => {
@@ -891,23 +1270,72 @@ class ObsidianSyncStudioApp {
       this.applySaveBadgeContent(saveBadge);
       right.appendChild(saveBadge);
 
-      // Prominent Editor Mode Switcher
-      const modeGroup = document.createElement('div');
-      modeGroup.className = 'mode-switcher';
-      const wwBtn = document.createElement('button');
-      wwBtn.type = 'button';
-      wwBtn.className = `mode-btn${this.workspace.editor_mode === 'wysiwyg' ? ' active' : ''}`;
-      wwBtn.textContent = '위지윅 모드 (Notion처럼 바로 편집)';
-      wwBtn.addEventListener('click', () => void this.changeEditorMode('wysiwyg'));
+      if (!this.currentDoc.locked) {
+        // Prominent Editor Mode Switcher
+        const modeGroup = document.createElement('div');
+        modeGroup.className = 'mode-switcher';
+        const wwBtn = document.createElement('button');
+        wwBtn.type = 'button';
+        wwBtn.className = `mode-btn${this.workspace.editor_mode === 'wysiwyg' ? ' active' : ''}`;
+        wwBtn.textContent = '위지윅 모드';
+        wwBtn.title = 'Notion처럼 바로 편집';
+        wwBtn.addEventListener('click', () => void this.changeEditorMode('wysiwyg'));
 
-      const mdBtn = document.createElement('button');
-      mdBtn.type = 'button';
-      mdBtn.className = `mode-btn${this.workspace.editor_mode === 'markdown' ? ' active' : ''}`;
-      mdBtn.textContent = '마크다운 분할 모드';
-      mdBtn.addEventListener('click', () => void this.changeEditorMode('markdown'));
+        const mdBtn = document.createElement('button');
+        mdBtn.type = 'button';
+        mdBtn.className = `mode-btn${this.workspace.editor_mode === 'markdown' ? ' active' : ''}`;
+        mdBtn.textContent = '마크다운 분할';
+        mdBtn.title = '좌측 마크다운 + 우측 실시간 프리뷰';
+        mdBtn.addEventListener('click', () => void this.changeEditorMode('markdown'));
 
-      modeGroup.append(wwBtn, mdBtn);
-      right.appendChild(modeGroup);
+        modeGroup.append(wwBtn, mdBtn);
+        right.appendChild(modeGroup);
+
+        // Page Setup (A4 / Margins)
+        const pageSetupBtn = document.createElement('button');
+        pageSetupBtn.type = 'button';
+        pageSetupBtn.className = `icon-btn${this.workspace.page_layout !== 'full' ? ' active' : ''}`;
+        pageSetupBtn.title = 'A4 용지 및 인쇄/PDF 여백 설정';
+        pageSetupBtn.textContent = '📐';
+        pageSetupBtn.addEventListener('click', () => this.openPageSetupDialog());
+        right.appendChild(pageSetupBtn);
+
+        // Print & PDF
+        const printBtn = document.createElement('button');
+        printBtn.type = 'button';
+        printBtn.className = 'icon-btn';
+        printBtn.title = '인쇄 (Ctrl+P)';
+        printBtn.textContent = '🖨️';
+        printBtn.addEventListener('click', () => void this.handlePrintNote());
+        right.appendChild(printBtn);
+
+        const pdfBtn = document.createElement('button');
+        pdfBtn.type = 'button';
+        pdfBtn.className = 'icon-btn';
+        pdfBtn.title = 'PDF 문서로 내보내기';
+        pdfBtn.textContent = '📄PDF';
+        pdfBtn.style.fontSize = '11px';
+        pdfBtn.style.fontWeight = '700';
+        pdfBtn.addEventListener('click', () => void this.handleExportPdf());
+        right.appendChild(pdfBtn);
+      }
+
+      // Note Crypto Lock / Encrypt button
+      const cryptoBtn = document.createElement('button');
+      cryptoBtn.type = 'button';
+      cryptoBtn.className = `icon-btn${this.currentDoc.encrypted ? ' active' : ''}`;
+      cryptoBtn.title = this.currentDoc.encrypted
+        ? this.currentDoc.locked
+          ? '노트 잠김 (클릭하여 잠금 해제/관리)'
+          : '노트 암호화됨 · 세션 해제 (클릭하여 잠그기/관리)'
+        : '현재 노트 암호화';
+      cryptoBtn.textContent = this.currentDoc.encrypted
+        ? this.currentDoc.locked
+          ? '🔒'
+          : '🔓'
+        : '🔐';
+      cryptoBtn.addEventListener('click', () => void this.openNoteCryptoDialog());
+      right.appendChild(cryptoBtn);
 
       // Split View toggle
       const splitBtn = document.createElement('button');
@@ -926,6 +1354,19 @@ class ObsidianSyncStudioApp {
         }
       });
       right.appendChild(splitBtn);
+    }
+
+    // Tag visibility toggle
+    if (this.mainView === 'editor') {
+      const tagToggleBtn = document.createElement('button');
+      tagToggleBtn.type = 'button';
+      tagToggleBtn.className = `icon-btn${this.workspace.show_tags ? ' active' : ''}`;
+      tagToggleBtn.title = this.workspace.show_tags
+        ? '태그 숨기기'
+        : '태그 보기 (사이드바 및 문서 속성)';
+      tagToggleBtn.textContent = '🏷️';
+      tagToggleBtn.addEventListener('click', () => void this.toggleShowTags());
+      right.appendChild(tagToggleBtn);
     }
 
     // Theme Toggle
@@ -953,6 +1394,7 @@ class ObsidianSyncStudioApp {
         this.inspectorOpen = !this.inspectorOpen;
         this.renderInspector();
         this.renderTopbar();
+        requestAnimationFrame(() => this.applyPageLayoutVariables());
       });
       right.appendChild(inspBtn);
     }
@@ -993,6 +1435,7 @@ class ObsidianSyncStudioApp {
     col?.classList.toggle('wide-md', mode === 'markdown');
     mountWrap?.classList.toggle('wide-md', mode === 'markdown');
     this.renderTopbar();
+    requestAnimationFrame(() => this.applyPageLayoutVariables());
   }
 
   // ───────────────────────── Vault & Note Operations ─────────────────────────
@@ -1150,6 +1593,7 @@ class ObsidianSyncStudioApp {
   }
 
   private scheduleAutoSave(): void {
+    if (!this.currentDoc || this.currentDoc.locked) return;
     this.updateSaveStatus('dirty');
     if (this.autoSaveTimer !== null) {
       window.clearTimeout(this.autoSaveTimer);
@@ -1165,7 +1609,7 @@ class ObsidianSyncStudioApp {
       window.clearTimeout(this.autoSaveTimer);
       this.autoSaveTimer = null;
     }
-    if (!this.workspace.active_vault || !this.currentDoc) return;
+    if (!this.workspace.active_vault || !this.currentDoc || this.currentDoc.locked) return;
     if (this.saveStatus !== 'dirty' && !manualToast) return;
 
     if (this.savingPromise) {
@@ -1258,12 +1702,13 @@ class ObsidianSyncStudioApp {
       return;
     }
     try {
-      const res = await api.noteDaily(
-        this.workspace.active_vault,
-        this.workspace.daily_folder || 'Daily'
-      );
+      const dailyFolder = this.getActiveDailyFolder();
+      const res = await api.noteDaily(this.workspace.active_vault, dailyFolder);
       this.scan = res.scan;
       this.vaultRevision = res.scan.revision;
+      if (dailyFolder) {
+        this.expandedFolders.add(dailyFolder);
+      }
       await this.openNote(res.path);
     } catch (err: any) {
       this.showToast(err?.message || '오늘의 일일 노트 열기 실패', true);
@@ -1518,14 +1963,128 @@ class ObsidianSyncStudioApp {
       return;
     }
 
-    if (remountEditor || this.mountedNotePath !== this.currentDoc.path) {
-      const isWideMd = this.workspace.editor_mode === 'markdown';
+    if (this.currentDoc.locked) {
+      this.editorCtrl?.destroy();
+      this.editorCtrl = null;
+      this.mountedNotePath = null;
+      const hint = this.currentDoc.encryption_hint;
       this.editorPaneEl.innerHTML = `
+        <div class="locked-note-card">
+          <div class="locked-note-icon">🔒</div>
+          <div class="locked-note-title">${escapeHtml(this.currentDoc.title)}</div>
+          <div class="locked-note-desc">
+            이 노트는 <strong>AES-256-GCM</strong>으로 암호화되어 잠겨 있습니다.<br/>
+            암호를 입력하면 앱을 실행하는 동안 안전하게 열람·편집할 수 있습니다.
+          </div>
+          <div class="locked-note-form">
+            ${hint ? `<div class="locked-note-hint">💡 암호 힌트: ${escapeHtml(hint)}</div>` : ''}
+            <input type="password" class="text-input" data-lock-pw placeholder="암호 입력 후 Enter…" />
+            <button type="button" class="btn btn-primary" data-lock-unlock>🔓 이 노트 잠금 해제</button>
+            <div style="display:flex;gap:8px;justify-content:center;margin-top:4px;">
+              <button type="button" class="btn btn-sm" data-lock-vault>🔐 볼트 전체 잠금 해제</button>
+              <button type="button" class="btn btn-sm" data-lock-manage>🗝️ 암호화 관리</button>
+            </div>
+          </div>
+        </div>
+      `;
+
+      const pwIn = this.editorPaneEl.querySelector('[data-lock-pw]') as HTMLInputElement;
+      const submitUnlock = async () => {
+        if (!this.workspace.active_vault || !this.currentDoc) return;
+        if (!pwIn.value) {
+          this.showToast('암호를 입력해 주세요.', true);
+          return;
+        }
+        try {
+          await api.cryptoUnlockNote(this.workspace.active_vault, this.currentDoc.path, pwIn.value);
+          this.scan = await api.vaultScan(this.workspace.active_vault);
+          this.vaultRevision = this.scan.revision;
+          this.mountedNotePath = null;
+          await this.openNote(this.currentDoc.path);
+          this.showToast('노트 잠금이 해제되었습니다.');
+        } catch (err: any) {
+          this.showToast(err?.message || '암호가 올바르지 않습니다.', true);
+        }
+      };
+
+      this.editorPaneEl.querySelector('[data-lock-unlock]')?.addEventListener('click', () => {
+        void submitUnlock();
+      });
+      pwIn.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') {
+          ev.preventDefault();
+          void submitUnlock();
+        }
+      });
+      this.editorPaneEl.querySelector('[data-lock-vault]')?.addEventListener('click', () => {
+        void this.openVaultCryptoDialog();
+      });
+      this.editorPaneEl.querySelector('[data-lock-manage]')?.addEventListener('click', () => {
+        void this.openNoteCryptoDialog();
+      });
+      setTimeout(() => pwIn.focus(), 10);
+      return;
+    }
+
+    const isA4 = (this.workspace.page_layout || 'a4') !== 'full';
+
+    if (remountEditor || this.mountedNotePath !== this.currentDoc.path) {
+      const isWideMd = !isA4 && this.workspace.editor_mode === 'markdown';
+      const orientText = this.workspace.page_orientation === 'landscape' ? 'A4 가로' : 'A4 세로';
+      const mTop = this.workspace.margin_top_cm ?? 2.0;
+      const mBot = this.workspace.margin_bottom_cm ?? 1.0;
+      const mLeft = this.workspace.margin_left_cm ?? 3.0;
+      const mRight = this.workspace.margin_right_cm ?? 3.0;
+      const zoom = this.workspace.editor_zoom ?? 100;
+
+      const innerDocHtml = `
         <div id="notion-cover-zone"></div>
         <div class="notion-page-column ${isWideMd ? 'wide-md' : ''}" id="notion-header-zone"></div>
         <div class="editor-mount-wrap ${isWideMd ? 'wide-md' : ''}" id="toast-editor-host"></div>
         <div class="page-status-footer" id="notion-page-footer"></div>
       `;
+
+      if (isA4) {
+        this.editorPaneEl.innerHTML = `
+          <div class="a4-desk-stage">
+            <div class="a4-ruler-badge">
+              <span>📄 <strong>${orientText}</strong> · 여백 상 ${mTop} / 하 ${mBot} / 좌 ${mLeft} / 우 ${mRight} cm · 배율 <strong data-ruler-zoom>${zoom}%</strong></span>
+              <button type="button" class="mini-icon-btn" data-ruler-pagesetup title="용지·여백·인쇄 설정" style="width:auto;padding:0 6px;font-size:11px;">📐 여백</button>
+              <button type="button" class="mini-icon-btn" data-ruler-toggle-full title="전체 화면 폭으로 전환" style="width:auto;padding:0 6px;font-size:11px;">🖥️ 전체폭</button>
+            </div>
+            <div class="a4-scale-outer" id="a4-scale-outer">
+              <div class="a4-paper-sheet${this.workspace.show_page_guides !== false ? ' show-page-guides' : ''}" id="a4-paper-sheet">
+                ${innerDocHtml}
+              </div>
+            </div>
+          </div>
+        `;
+      } else {
+        this.editorPaneEl.innerHTML = `
+          <div style="padding:10px 24px 0;display:flex;justify-content:center;">
+            <div class="a4-ruler-badge" style="margin-bottom:0;">
+              <span>🖥️ <strong>전체 화면 폭 모드</strong> · 인쇄/PDF 여백 (상 ${mTop}/하 ${mBot}/좌 ${mLeft}/우 ${mRight}cm)</span>
+              <button type="button" class="mini-icon-btn" data-ruler-pagesetup style="width:auto;padding:0 6px;font-size:11px;">📐 설정</button>
+              <button type="button" class="mini-icon-btn" data-ruler-toggle-a4 style="width:auto;padding:0 6px;font-size:11px;">📄 A4 용지 보기</button>
+            </div>
+          </div>
+          ${innerDocHtml}
+        `;
+      }
+
+      this.editorPaneEl.querySelector('[data-ruler-pagesetup]')?.addEventListener('click', () => {
+        this.openPageSetupDialog();
+      });
+      this.editorPaneEl.querySelector('[data-ruler-toggle-full]')?.addEventListener('click', async () => {
+        await this.persistWorkspace({ page_layout: 'full' });
+        this.renderEditorMainArea(true);
+        this.renderTopbar();
+      });
+      this.editorPaneEl.querySelector('[data-ruler-toggle-a4]')?.addEventListener('click', async () => {
+        await this.persistWorkspace({ page_layout: 'a4' });
+        this.renderEditorMainArea(true);
+        this.renderTopbar();
+      });
 
       this.renderNotionCoverZone();
       this.renderNotionHeaderZone();
@@ -1538,6 +2097,7 @@ class ObsidianSyncStudioApp {
         onMarkdownChange: (cleanMd) => {
           this.draftBody = cleanMd;
           this.scheduleAutoSave();
+          requestAnimationFrame(() => this.applyPageLayoutVariables());
         },
         onRequestWikiLinkPicker: () => {
           openWikiLinkPickerModal({
@@ -1553,6 +2113,36 @@ class ObsidianSyncStudioApp {
         onSaveShortcut: () => {
           void this.flushSave(true);
         },
+        onPickFileAttachment: async () => {
+          const activeVault = this.workspace.active_vault;
+          if (!activeVault) {
+            this.showToast('먼저 볼트를 열어 주세요.', true);
+            return;
+          }
+          try {
+            const picked = await api.pickFileAttachment(activeVault);
+            if (picked.picked && picked.media_url) {
+              this.editorCtrl?.insertAttachmentLink(
+                picked.file_name || '첨부파일',
+                picked.media_url,
+                picked.is_image
+              );
+              this.showToast(`파일을 첨부했습니다 (${picked.rel_path || picked.file_name})`);
+            }
+          } catch (err: any) {
+            this.showToast(err?.message || '파일을 첨부하지 못했습니다.', true);
+          }
+        },
+        onZoomDelta: (deltaPct) => {
+          const nextZoom = Math.min(
+            150,
+            Math.max(50, (this.workspace.editor_zoom ?? 100) + deltaPct)
+          );
+          void this.persistWorkspace({ editor_zoom: nextZoom });
+          this.applyPageLayoutVariables();
+          const zEl = this.editorPaneEl.querySelector('[data-ruler-zoom]');
+          if (zEl) zEl.textContent = `${nextZoom}%`;
+        },
         onToast: (m, err) => this.showToast(m, err),
       });
 
@@ -1562,10 +2152,17 @@ class ObsidianSyncStudioApp {
         theme: this.workspace.theme,
       });
       this.mountedNotePath = this.currentDoc.path;
+
+      const sheetEl = document.getElementById('a4-paper-sheet');
+      if (sheetEl && this.resizeObserver) {
+        this.resizeObserver.observe(sheetEl);
+      }
+      requestAnimationFrame(() => this.applyPageLayoutVariables());
     } else {
       this.renderNotionCoverZone();
       this.renderNotionHeaderZone();
       this.updatePageFooterStats();
+      requestAnimationFrame(() => this.applyPageLayoutVariables());
     }
   }
 
@@ -1652,6 +2249,7 @@ class ObsidianSyncStudioApp {
         ${!this.draftCover ? `<button type="button" class="ghost-action-btn" data-add-cover>🖼️ 커버 추가</button>` : ''}
         <button type="button" class="ghost-action-btn" data-apply-tpl>✨ 템플릿 적용</button>
         <button type="button" class="ghost-action-btn" data-toggle-fav>${isFav ? '⭐ 즐겨찾기됨' : '☆ 즐겨찾기'}</button>
+        <button type="button" class="ghost-action-btn" data-hover-crypto>${this.currentDoc.encrypted ? '🔓 암호화 관리' : '🔐 암호화'}</button>
       </div>
       <input type="text" class="notion-title-input" data-note-title placeholder="제목 없음" value="${escapeAttr(this.currentDoc.title)}" />
       <div class="notion-properties" id="notion-props-zone"></div>
@@ -1662,6 +2260,9 @@ class ObsidianSyncStudioApp {
     headerZone.querySelector('[data-add-cover]')?.addEventListener('click', () => this.openCoverPicker());
     headerZone.querySelector('[data-toggle-fav]')?.addEventListener('click', () => {
       if (this.currentDoc) void this.toggleFavorite(this.currentDoc.path);
+    });
+    headerZone.querySelector('[data-hover-crypto]')?.addEventListener('click', () => {
+      void this.openNoteCryptoDialog();
     });
     headerZone.querySelector('[data-apply-tpl]')?.addEventListener('click', () => {
       if (!this.workspace.active_vault) return;
@@ -1727,7 +2328,24 @@ class ObsidianSyncStudioApp {
       text: '≡',
     };
 
+    const showTags = Boolean(this.workspace.show_tags);
+    const tagCount = this.draftProperties
+      .filter((p) => p.prop_type === 'tags' || p.key.toLowerCase() === 'tags')
+      .reduce(
+        (sum, p) =>
+          sum +
+          p.value
+            .split(',')
+            .map((t) => t.trim())
+            .filter(Boolean).length,
+        0
+      );
+
     this.draftProperties.forEach((prop, idx) => {
+      const isTagProp = prop.prop_type === 'tags' || prop.key.toLowerCase() === 'tags';
+      if (isTagProp && !showTags) {
+        return;
+      }
       const row = document.createElement('div');
       row.className = 'prop-row';
 
@@ -1881,11 +2499,14 @@ class ObsidianSyncStudioApp {
       propsZone.appendChild(row);
     });
 
-    // Footer bar (+ 속성 추가 & 원본 YAML 보기)
+    // Footer bar (+ 속성 추가 & 태그 보기/숨기기 & 원본 YAML 보기)
     const footer = document.createElement('div');
     footer.className = 'prop-footer-bar';
     footer.innerHTML = `
       <button type="button" class="ghost-action-btn" data-add-prop>＋ 속성 추가</button>
+      <button type="button" class="tag-toggle-chip${showTags ? ' active' : ''}" data-toggle-prop-tags>
+        🏷️ ${showTags ? '태그 숨기기' : tagCount > 0 ? `태그 보기 (${tagCount})` : '태그 보기'}
+      </button>
       <button type="button" class="ghost-action-btn" data-toggle-yaml>
         ${this.showRawYaml ? '▲ 원본 YAML 접기' : '▼ 원본 YAML 보기'}
       </button>
@@ -1897,8 +2518,19 @@ class ObsidianSyncStudioApp {
           ? { key: `속성${this.draftProperties.length + 1}`, value: '', prop_type: 'text' }
           : { key: 'tags', value: '', prop_type: 'tags' }
       );
-      this.renderPropertiesRows();
+      if (!hasTags && !this.workspace.show_tags) {
+        void this.persistWorkspace({ show_tags: true }).then(() => {
+          this.renderSidebar();
+          this.renderPropertiesRows();
+          this.renderTopbar();
+        });
+      } else {
+        this.renderPropertiesRows();
+      }
       this.scheduleAutoSave();
+    });
+    footer.querySelector('[data-toggle-prop-tags]')?.addEventListener('click', () => {
+      void this.toggleShowTags();
     });
     footer.querySelector('[data-toggle-yaml]')?.addEventListener('click', () => {
       this.showRawYaml = !this.showRawYaml;
@@ -2000,14 +2632,18 @@ class ObsidianSyncStudioApp {
     });
 
     const mount = this.splitPaneEl.querySelector('#split-viewer-mount') as HTMLElement;
-    const viewerHandle = renderSplitViewer({
-      container: mount,
-      markdown: hydrateMarkdownMediaUrls(this.splitDoc.body, this.workspace.active_vault),
-      vault: this.workspace.active_vault,
-      theme: this.workspace.theme,
-      onOpenWikiLink: (t) => void this.openWikiLinkByTitle(t),
-    });
-    this.splitViewerCleanup = viewerHandle.destroy;
+    if (this.splitDoc.locked) {
+      mount.innerHTML = `<div style="padding:24px;text-align:center;color:var(--text-muted);font-size:13px;">🔒 암호화되어 잠긴 노트입니다. 왼쪽 편집기에서 열어 잠금을 해제해 주세요.</div>`;
+    } else {
+      const viewerHandle = renderSplitViewer({
+        container: mount,
+        markdown: hydrateMarkdownMediaUrls(this.splitDoc.body, this.workspace.active_vault),
+        vault: this.workspace.active_vault,
+        theme: this.workspace.theme,
+        onOpenWikiLink: (t) => void this.openWikiLinkByTitle(t),
+      });
+      this.splitViewerCleanup = viewerHandle.destroy;
+    }
   }
 
   // ───────────────────────── Right Inspector Panel ─────────────────────────
@@ -2346,6 +2982,56 @@ class ObsidianSyncStudioApp {
         label: '오늘의 일일 노트 열기',
         shortcut: 'Ctrl+D',
         run: () => this.openTodayDailyNote(),
+      },
+      {
+        id: 'daily_folder',
+        icon: '⚙️',
+        label: '일일 문서 저장 폴더 설정',
+        run: () => this.openDailyNoteFolderDialog(),
+      },
+      {
+        id: 'find_replace',
+        icon: '🔍',
+        label: '현재 문서 내 찾기 / 바꾸기',
+        shortcut: 'Ctrl+F',
+        run: () => this.editorCtrl?.openFindBar(true),
+      },
+      {
+        id: 'page_setup',
+        icon: '📐',
+        label: '페이지 용지(A4)·여백·인쇄 설정',
+        run: () => this.openPageSetupDialog(),
+      },
+      {
+        id: 'print_note',
+        icon: '🖨️',
+        label: '현재 문서 인쇄 (1:1 A4 여백)',
+        shortcut: 'Ctrl+P',
+        run: () => this.handlePrintNote(),
+      },
+      {
+        id: 'export_pdf',
+        icon: '📄',
+        label: '현재 문서 PDF로 내보내기',
+        run: () => this.handleExportPdf(),
+      },
+      {
+        id: 'toggle_tags',
+        icon: '🏷️',
+        label: this.workspace.show_tags ? '태그 숨기기' : '태그 보기',
+        run: () => this.toggleShowTags(),
+      },
+      {
+        id: 'note_crypto',
+        icon: '🔐',
+        label: '현재 노트 암호화 / 잠금 관리',
+        run: () => this.openNoteCryptoDialog(),
+      },
+      {
+        id: 'vault_crypto',
+        icon: '🛡️',
+        label: '전체 볼트 일괄 암호화 설정',
+        run: () => this.openVaultCryptoDialog(),
       },
       {
         id: 'toggle_mode',

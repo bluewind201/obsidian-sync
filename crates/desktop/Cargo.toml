@@ -22,10 +22,14 @@ open = "5"
 log = "0.4"
 percent-encoding = "2"
 base64 = "0.22"
+ring = "0.17"
+zeroize = "1"
 
 [target.'cfg(windows)'.dependencies]
 tao = "0.37"
 wry = "0.57"
+webview2-com = "0.39"
+windows = { version = "0.62", features = ["Win32_Foundation"] }
 tray-icon = "0.25"
 rfd = "0.15"
 winreg = "0.52"

@@ -2,9 +2,23 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 pub mod api;
+pub mod crypto;
 pub mod platform;
 pub mod sync_controller;
 pub mod vault;
+
+#[derive(Debug)]
+pub enum AppUserEvent {
+    ExportPdf {
+        output_path: std::path::PathBuf,
+        landscape: bool,
+        margin_top_cm: f64,
+        margin_bottom_cm: f64,
+        margin_left_cm: f64,
+        margin_right_cm: f64,
+        reply: std::sync::mpsc::Sender<Result<(), String>>,
+    },
+}
 
 #[allow(dead_code)]
 mod web_assets {
@@ -30,8 +44,13 @@ fn main() {
     }
 
     let hide = std::env::args().any(|a| a == "--minimized");
+    let event_loop = tao::event_loop::EventLoopBuilder::<AppUserEvent>::with_user_event().build();
+    let event_proxy = event_loop.create_proxy();
     let trigger: platform::SharedTrigger = Arc::new(Mutex::new(None));
-    let backend_state = Arc::new(Mutex::new(api::BackendState::new(trigger.clone())));
+    let backend_state = Arc::new(Mutex::new(api::BackendState::new_with_proxy(
+        trigger.clone(),
+        Some(event_proxy),
+    )));
     let data_dir = backend_state.lock().unwrap().sync.data_dir.clone();
 
     // 창이 트레이에 숨겨진 동안에도 서비스 중지/재시작/초기화 상태 머신이 멈추지 않도록 주기 폴링
@@ -47,7 +66,6 @@ fn main() {
             });
     }
 
-    let event_loop = tao::event_loop::EventLoop::new();
     let window_icon = tao::window::Icon::from_rgba(platform::icon_rgba(64), 64, 64).ok();
 
     let window = tao::window::WindowBuilder::new()
@@ -153,21 +171,144 @@ fn main() {
         .expect("WebView2를 초기화할 수 없습니다");
 
     event_loop.run(move |event, _, control_flow| {
-        let _keep_alive = (&window, &webview, &web_context, &tray);
+        let _keep_alive = (&window, &web_context, &tray);
         *control_flow = tao::event_loop::ControlFlow::Wait;
 
-        if let tao::event::Event::WindowEvent {
-            event: tao::event::WindowEvent::CloseRequested,
-            ..
-        } = event
-        {
-            if has_tray {
-                platform::hide_window(hwnd);
-            } else {
-                *control_flow = tao::event_loop::ControlFlow::Exit;
+        match event {
+            tao::event::Event::WindowEvent {
+                event: tao::event::WindowEvent::CloseRequested,
+                ..
+            } => {
+                if has_tray {
+                    platform::hide_window(hwnd);
+                } else {
+                    *control_flow = tao::event_loop::ControlFlow::Exit;
+                }
             }
+            tao::event::Event::UserEvent(AppUserEvent::ExportPdf {
+                output_path,
+                landscape,
+                margin_top_cm,
+                margin_bottom_cm,
+                margin_left_cm,
+                margin_right_cm,
+                reply,
+            }) => {
+                export_webview_to_pdf(
+                    &webview,
+                    output_path,
+                    landscape,
+                    margin_top_cm,
+                    margin_bottom_cm,
+                    margin_left_cm,
+                    margin_right_cm,
+                    reply,
+                );
+            }
+            _ => {}
         }
     });
+}
+
+#[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
+fn export_webview_to_pdf(
+    webview: &wry::WebView,
+    output_path: std::path::PathBuf,
+    landscape: bool,
+    margin_top_cm: f64,
+    margin_bottom_cm: f64,
+    margin_left_cm: f64,
+    margin_right_cm: f64,
+    reply: std::sync::mpsc::Sender<Result<(), String>>,
+) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2Environment6, ICoreWebView2_7, COREWEBVIEW2_PRINT_ORIENTATION_LANDSCAPE,
+        COREWEBVIEW2_PRINT_ORIENTATION_PORTRAIT,
+    };
+    use webview2_com::PrintToPdfCompletedHandler;
+    use windows::core::{Interface, HSTRING};
+    use wry::WebViewExtWindows;
+
+    const CM_TO_INCHES: f64 = 1.0 / 2.54;
+
+    let setup = || -> Result<
+        (
+            ICoreWebView2_7,
+            webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2PrintSettings,
+        ),
+        String,
+    > {
+        let controller = webview.controller();
+        let core = unsafe { controller.CoreWebView2() }
+            .map_err(|e| format!("CoreWebView2 접근 실패: {e}"))?;
+        let core7: ICoreWebView2_7 = core
+            .cast()
+            .map_err(|e| format!("ICoreWebView2_7 지원 안됨: {e}"))?;
+        let env = unsafe { core7.Environment() }
+            .map_err(|e| format!("WebView2 Environment 조회 실패: {e}"))?;
+        let env6: ICoreWebView2Environment6 = env
+            .cast()
+            .map_err(|e| format!("ICoreWebView2Environment6 지원 안됨: {e}"))?;
+        let settings = unsafe { env6.CreatePrintSettings() }
+            .map_err(|e| format!("PrintSettings 생성 실패: {e}"))?;
+
+        let orientation = if landscape {
+            COREWEBVIEW2_PRINT_ORIENTATION_LANDSCAPE
+        } else {
+            COREWEBVIEW2_PRINT_ORIENTATION_PORTRAIT
+        };
+        let (page_w, page_h) = if landscape {
+            (29.7 * CM_TO_INCHES, 21.0 * CM_TO_INCHES)
+        } else {
+            (21.0 * CM_TO_INCHES, 29.7 * CM_TO_INCHES)
+        };
+        unsafe {
+            let _ = settings.SetOrientation(orientation);
+            let _ = settings.SetPageWidth(page_w);
+            let _ = settings.SetPageHeight(page_h);
+            let _ = settings.SetMarginTop((margin_top_cm * CM_TO_INCHES).max(0.0));
+            let _ = settings.SetMarginBottom((margin_bottom_cm * CM_TO_INCHES).max(0.0));
+            let _ = settings.SetMarginLeft((margin_left_cm * CM_TO_INCHES).max(0.0));
+            let _ = settings.SetMarginRight((margin_right_cm * CM_TO_INCHES).max(0.0));
+            let _ = settings.SetShouldPrintBackgrounds(true);
+            let _ = settings.SetShouldPrintHeaderAndFooter(false);
+            let _ = settings.SetShouldPrintSelectionOnly(false);
+            let _ = settings.SetScaleFactor(1.0);
+        }
+        Ok((core7, settings))
+    };
+
+    let (core7, settings) = match setup() {
+        Ok(v) => v,
+        Err(msg) => {
+            let _ = reply.send(Err(msg));
+            return;
+        }
+    };
+
+    if let Some(parent) = output_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            let _ = reply.send(Err(format!("PDF 대상 폴더 생성 실패: {e}")));
+            return;
+        }
+    }
+
+    let reply_cb = reply.clone();
+    let handler = PrintToPdfCompletedHandler::create(Box::new(move |hr, is_successful| {
+        let ok: bool = is_successful.into();
+        let res = if hr.is_ok() && ok {
+            Ok(())
+        } else {
+            Err(format!("WebView2 PDF 저장 실패 (hr={hr:?}, ok={ok})"))
+        };
+        let _ = reply_cb.send(res);
+        Ok(())
+    }));
+    let wide_path = HSTRING::from(output_path.as_os_str());
+    if let Err(e) = unsafe { core7.PrintToPdf(&wide_path, &settings, &handler) } {
+        let _ = reply.send(Err(format!("PrintToPdf 호출 실패: {e}")));
+    }
 }
 
 #[cfg(not(windows))]

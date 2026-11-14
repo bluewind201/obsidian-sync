@@ -2087,7 +2087,7 @@ dependencies = [
 
 [[package]]
 name = "obsidian-sync-android"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "jni",
@@ -2097,7 +2097,7 @@ dependencies = [
 
 [[package]]
 name = "obsidian-sync-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2119,7 +2119,7 @@ dependencies = [
 
 [[package]]
 name = "obsidian-sync-desktop"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2131,15 +2131,19 @@ dependencies = [
  "open",
  "percent-encoding",
  "rfd",
+ "ring",
  "serde",
  "serde_json",
  "tao",
  "tempfile",
  "tray-icon",
  "walkdir",
+ "webview2-com",
+ "windows",
  "windows-sys 0.59.0",
  "winreg",
  "wry",
+ "zeroize",
 ]
 
 [[package]]

@@ -5,6 +5,9 @@ export interface VaultRef {
   profile_id: string | null;
 }
 
+export type PageLayoutMode = 'a4' | 'full';
+export type PageOrientation = 'portrait' | 'landscape';
+
 export interface WorkspaceState {
   vaults: VaultRef[];
   active_vault: string | null;
@@ -17,6 +20,19 @@ export interface WorkspaceState {
   editor_mode: 'wysiwyg' | 'markdown';
   daily_folder: string;
   templates_folder: string;
+  show_tags: boolean;
+  page_layout: PageLayoutMode;
+  page_orientation: PageOrientation;
+  margin_top_cm: number;
+  margin_bottom_cm: number;
+  margin_left_cm: number;
+  margin_right_cm: number;
+  auto_fit_a4: boolean;
+  show_page_guides: boolean;
+  print_include_title: boolean;
+  print_include_properties: boolean;
+  editor_zoom: number;
+  daily_folders_by_vault: Record<string, string>;
 }
 
 export interface TreeNodeDto {
@@ -26,6 +42,8 @@ export interface TreeNodeDto {
   icon: string | null;
   children: TreeNodeDto[];
   modified: number;
+  encrypted?: boolean;
+  locked?: boolean;
 }
 
 export interface NoteMetaDto {
@@ -35,6 +53,8 @@ export interface NoteMetaDto {
   tags: string[];
   updated_at: string;
   word_count: number;
+  encrypted?: boolean;
+  locked?: boolean;
 }
 
 export interface TagCountDto {
@@ -49,6 +69,11 @@ export interface VaultScanDto {
   total_notes: number;
   total_folders: number;
   revision: number;
+  encrypted_notes?: number;
+  vault_auto_encrypt?: boolean;
+  vault_unlocked?: boolean;
+  vault_has_crypto_config?: boolean;
+  vault_crypto_hint?: string | null;
 }
 
 export type PropertyType = 'tags' | 'date' | 'checkbox' | 'url' | 'number' | 'text' | string;
@@ -88,6 +113,25 @@ export interface NoteDocumentDto {
   word_count: number;
   char_count: number;
   updated_at: string;
+  encrypted?: boolean;
+  locked?: boolean;
+  encryption_hint?: string | null;
+}
+
+export interface VaultBatchCryptoResult {
+  encrypted_count: number;
+  decrypted_count: number;
+  unlocked_count: number;
+  skipped_locked_count: number;
+  total_notes: number;
+}
+
+export interface PickedFileAttachmentDto {
+  picked: boolean;
+  rel_path?: string | null;
+  media_url?: string | null;
+  file_name?: string | null;
+  is_image: boolean;
 }
 
 export interface TrashItemDto {

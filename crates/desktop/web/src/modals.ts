@@ -828,3 +828,716 @@ export function openCommandPaletteModal(opts: {
     input.setSelectionRange(input.value.length, input.value.length);
   }, 10);
 }
+
+// ───────────────────────── v0.6.0 Modals ─────────────────────────
+
+export interface PageSetupValues {
+  page_layout: 'a4' | 'full';
+  page_orientation: 'portrait' | 'landscape';
+  margin_top_cm: number;
+  margin_bottom_cm: number;
+  margin_left_cm: number;
+  margin_right_cm: number;
+  auto_fit_a4: boolean;
+  show_page_guides: boolean;
+  editor_zoom: number;
+  print_include_title: boolean;
+  print_include_properties: boolean;
+}
+
+export function openPageSetupModal(opts: {
+  initial: PageSetupValues;
+  onApply: (patch: PageSetupValues) => Promise<void> | void;
+  onPrintNow: (patch: PageSetupValues) => Promise<void> | void;
+  onExportPdfNow: (patch: PageSetupValues) => Promise<void> | void;
+}): void {
+  const { card, close } = createModalBase(650);
+  const state: PageSetupValues = { ...opts.initial };
+
+  const clampMargin = (v: number): number => {
+    if (!Number.isFinite(v)) return 0;
+    return Math.round(Math.min(6, Math.max(0, v)) * 10) / 10;
+  };
+
+  card.innerHTML = `
+    <div class="modal-header">
+      <span>📐 페이지 용지(A4) · 여백 · 인쇄/PDF 설정</span>
+      <button type="button" class="icon-btn" data-close>✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="page-setup-grid">
+        <div style="display:flex;flex-direction:column;gap:12px;">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+            <div>
+              <label style="display:block;font-size:12px;color:var(--text-secondary);margin-bottom:4px;">편집기 레이아웃</label>
+              <select class="text-input" data-ps-layout>
+                <option value="a4">📄 A4 용지 기준</option>
+                <option value="full">🖥️ 전체 화면 폭</option>
+              </select>
+            </div>
+            <div>
+              <label style="display:block;font-size:12px;color:var(--text-secondary);margin-bottom:4px;">용지 방향</label>
+              <select class="text-input" data-ps-orient>
+                <option value="portrait">세로 (210 × 297 mm)</option>
+                <option value="landscape">가로 (297 × 210 mm)</option>
+              </select>
+            </div>
+          </div>
+
+          <div>
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+              <span style="font-size:12px;font-weight:700;color:var(--text-secondary);">여백 설정 (0.0 ~ 6.0 cm)</span>
+              <div style="display:flex;gap:4px;flex-wrap:wrap;">
+                <button type="button" class="btn btn-sm" data-preset="default">기본 (상2/하1/좌우3)</button>
+                <button type="button" class="btn btn-sm" data-preset="standard">표준 (2.5)</button>
+                <button type="button" class="btn btn-sm" data-preset="narrow">좁게 (1.5)</button>
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;">
+              <div>
+                <label style="display:block;font-size:11.5px;color:var(--text-muted);margin-bottom:3px;">상단 (cm)</label>
+                <input type="number" step="0.1" min="0" max="6" class="text-input" data-m-top />
+              </div>
+              <div>
+                <label style="display:block;font-size:11.5px;color:var(--text-muted);margin-bottom:3px;">하단 (cm)</label>
+                <input type="number" step="0.1" min="0" max="6" class="text-input" data-m-bottom />
+              </div>
+              <div>
+                <label style="display:block;font-size:11.5px;color:var(--text-muted);margin-bottom:3px;">좌측 (cm)</label>
+                <input type="number" step="0.1" min="0" max="6" class="text-input" data-m-left />
+              </div>
+              <div>
+                <label style="display:block;font-size:11.5px;color:var(--text-muted);margin-bottom:3px;">우측 (cm)</label>
+                <input type="number" step="0.1" min="0" max="6" class="text-input" data-m-right />
+              </div>
+            </div>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:10px;">
+            <span style="font-size:12px;color:var(--text-secondary);min-width:92px;">화면 배율: <strong data-zoom-val>100%</strong></span>
+            <input type="range" min="50" max="150" step="5" data-ps-zoom style="flex:1;" />
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;">
+            <label style="display:flex;align-items:center;gap:7px;cursor:pointer;">
+              <input type="checkbox" data-ps-autofit /> 모니터 창 폭에 맞춰 A4 자동 축소 (Auto-Fit)
+            </label>
+            <label style="display:flex;align-items:center;gap:7px;cursor:pointer;">
+              <input type="checkbox" data-ps-guides /> A4 페이지 구분선 (297mm 단위) 표시
+            </label>
+            <label style="display:flex;align-items:center;gap:7px;cursor:pointer;">
+              <input type="checkbox" data-ps-title /> 인쇄·PDF 상단에 문서 제목 포함
+            </label>
+            <label style="display:flex;align-items:center;gap:7px;cursor:pointer;">
+              <input type="checkbox" data-ps-props /> 인쇄·PDF 상단에 문서 속성 표 포함
+            </label>
+          </div>
+        </div>
+
+        <div class="page-setup-preview-wrap">
+          <div style="font-size:11.5px;font-weight:700;color:var(--text-secondary);">용지 미리보기</div>
+          <div class="page-setup-preview-sheet" data-preview-sheet>
+            <div class="page-setup-preview-content"></div>
+          </div>
+          <div style="font-size:11px;color:var(--text-muted);text-align:center;" data-preview-info></div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer" style="justify-content:space-between;">
+      <div style="display:flex;gap:6px;">
+        <button type="button" class="btn" data-ps-print>🖨️ 인쇄</button>
+        <button type="button" class="btn" data-ps-pdf>📄 PDF 출력</button>
+      </div>
+      <div style="display:flex;gap:6px;">
+        <button type="button" class="btn" data-cancel>취소</button>
+        <button type="button" class="btn btn-primary" data-apply>설정 적용</button>
+      </div>
+    </div>
+  `;
+
+  const layoutSel = card.querySelector('[data-ps-layout]') as HTMLSelectElement;
+  const orientSel = card.querySelector('[data-ps-orient]') as HTMLSelectElement;
+  const topIn = card.querySelector('[data-m-top]') as HTMLInputElement;
+  const bottomIn = card.querySelector('[data-m-bottom]') as HTMLInputElement;
+  const leftIn = card.querySelector('[data-m-left]') as HTMLInputElement;
+  const rightIn = card.querySelector('[data-m-right]') as HTMLInputElement;
+  const zoomIn = card.querySelector('[data-ps-zoom]') as HTMLInputElement;
+  const zoomVal = card.querySelector('[data-zoom-val]') as HTMLElement;
+  const autoFitChk = card.querySelector('[data-ps-autofit]') as HTMLInputElement;
+  const guidesChk = card.querySelector('[data-ps-guides]') as HTMLInputElement;
+  const titleChk = card.querySelector('[data-ps-title]') as HTMLInputElement;
+  const propsChk = card.querySelector('[data-ps-props]') as HTMLInputElement;
+  const previewSheet = card.querySelector('[data-preview-sheet]') as HTMLElement;
+  const previewInfo = card.querySelector('[data-preview-info]') as HTMLElement;
+
+  const syncDomFromState = () => {
+    layoutSel.value = state.page_layout;
+    orientSel.value = state.page_orientation;
+    topIn.value = String(state.margin_top_cm);
+    bottomIn.value = String(state.margin_bottom_cm);
+    leftIn.value = String(state.margin_left_cm);
+    rightIn.value = String(state.margin_right_cm);
+    zoomIn.value = String(state.editor_zoom);
+    zoomVal.textContent = `${state.editor_zoom}%`;
+    autoFitChk.checked = state.auto_fit_a4;
+    guidesChk.checked = state.show_page_guides;
+    titleChk.checked = state.print_include_title;
+    propsChk.checked = state.print_include_properties;
+  };
+
+  const updatePreview = () => {
+    state.page_layout = layoutSel.value === 'full' ? 'full' : 'a4';
+    state.page_orientation = orientSel.value === 'landscape' ? 'landscape' : 'portrait';
+    state.margin_top_cm = clampMargin(Number(topIn.value));
+    state.margin_bottom_cm = clampMargin(Number(bottomIn.value));
+    state.margin_left_cm = clampMargin(Number(leftIn.value));
+    state.margin_right_cm = clampMargin(Number(rightIn.value));
+    state.editor_zoom = Math.min(150, Math.max(50, Math.round(Number(zoomIn.value) || 100)));
+    state.auto_fit_a4 = autoFitChk.checked;
+    state.show_page_guides = guidesChk.checked;
+    state.print_include_title = titleChk.checked;
+    state.print_include_properties = propsChk.checked;
+
+    zoomVal.textContent = `${state.editor_zoom}%`;
+
+    const isLand = state.page_orientation === 'landscape';
+    previewSheet.classList.toggle('landscape', isLand);
+    const pageW = isLand ? 29.7 : 21.0;
+    const pageH = isLand ? 21.0 : 29.7;
+    const sheetPxW = isLand ? 168 : 126;
+    const sheetPxH = isLand ? 119 : 178;
+
+    previewSheet.style.paddingTop = `${Math.round((state.margin_top_cm / pageH) * sheetPxH)}px`;
+    previewSheet.style.paddingBottom = `${Math.round((state.margin_bottom_cm / pageH) * sheetPxH)}px`;
+    previewSheet.style.paddingLeft = `${Math.round((state.margin_left_cm / pageW) * sheetPxW)}px`;
+    previewSheet.style.paddingRight = `${Math.round((state.margin_right_cm / pageW) * sheetPxW)}px`;
+
+    const contentW = Math.max(1, pageW - state.margin_left_cm - state.margin_right_cm);
+    const contentH = Math.max(1, pageH - state.margin_top_cm - state.margin_bottom_cm);
+    previewInfo.textContent = `유효 본문: ${contentW.toFixed(1)} × ${contentH.toFixed(1)} cm`;
+  };
+
+  syncDomFromState();
+  updatePreview();
+
+  for (const el of [
+    layoutSel,
+    orientSel,
+    topIn,
+    bottomIn,
+    leftIn,
+    rightIn,
+    zoomIn,
+    autoFitChk,
+    guidesChk,
+    titleChk,
+    propsChk,
+  ]) {
+    el.addEventListener('input', updatePreview);
+    el.addEventListener('change', updatePreview);
+  }
+
+  card.querySelectorAll('[data-preset]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const kind = btn.getAttribute('data-preset');
+      if (kind === 'default') {
+        state.margin_top_cm = 2.0;
+        state.margin_bottom_cm = 1.0;
+        state.margin_left_cm = 3.0;
+        state.margin_right_cm = 3.0;
+      } else if (kind === 'standard') {
+        state.margin_top_cm = 2.5;
+        state.margin_bottom_cm = 2.5;
+        state.margin_left_cm = 2.5;
+        state.margin_right_cm = 2.5;
+      } else {
+        state.margin_top_cm = 1.5;
+        state.margin_bottom_cm = 1.5;
+        state.margin_left_cm = 1.5;
+        state.margin_right_cm = 1.5;
+      }
+      syncDomFromState();
+      updatePreview();
+    });
+  });
+
+  card.querySelector('[data-close]')?.addEventListener('click', close);
+  card.querySelector('[data-cancel]')?.addEventListener('click', close);
+  card.querySelector('[data-apply]')?.addEventListener('click', () => {
+    updatePreview();
+    close();
+    void opts.onApply({ ...state });
+  });
+  card.querySelector('[data-ps-print]')?.addEventListener('click', () => {
+    updatePreview();
+    close();
+    void opts.onPrintNow({ ...state });
+  });
+  card.querySelector('[data-ps-pdf]')?.addEventListener('click', () => {
+    updatePreview();
+    close();
+    void opts.onExportPdfNow({ ...state });
+  });
+}
+
+export function openDailyNoteFolderModal(opts: {
+  vault: string;
+  folders: string[];
+  currentFolder: string;
+  onSelect: (folder: string) => Promise<void> | void;
+  onFolderCreated: () => Promise<void>;
+  onToast: (msg: string, isError?: boolean) => void;
+}): void {
+  const { card, close } = createModalBase(500);
+  let selected = opts.currentFolder;
+
+  const uniqueFolders = Array.from(
+    new Set(
+      [...opts.folders, opts.currentFolder]
+        .map((f) => f.trim().replace(/^\/+|\/+$/g, ''))
+        .filter((f) => f.length > 0)
+    )
+  ).sort((a, b) => a.localeCompare(b, 'ko'));
+
+  card.innerHTML = `
+    <div class="modal-header">
+      <span>📅 일일 문서 저장 폴더 설정</span>
+      <button type="button" class="icon-btn" data-close>✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:12.5px;color:var(--text-secondary);margin-bottom:10px;line-height:1.5;">
+        현재 볼트에서 <strong>오늘의 일일 노트(Ctrl+D)</strong>를 생성할 대상 폴더를 선택하세요.
+      </div>
+      <div class="palette-list" data-folder-list style="max-height:240px;border:1px solid var(--border-subtle);border-radius:8px;padding:6px;margin-bottom:12px;"></div>
+      <div style="padding-top:10px;border-top:1px solid var(--border-subtle);">
+        <label style="display:block;font-size:12px;font-weight:700;color:var(--text-secondary);margin-bottom:6px;">
+          ✨ 새 일일 폴더 바로 만들기
+        </label>
+        <div style="display:flex;gap:8px;">
+          <input type="text" class="text-input" data-new-folder placeholder="예: 일일업무 또는 Journal/2026" style="flex:1;" />
+          <button type="button" class="btn" data-create-folder>📁 생성 후 지정</button>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn" data-cancel>취소</button>
+      <button type="button" class="btn btn-primary" data-save>이 폴더로 저장</button>
+    </div>
+  `;
+
+  const listEl = card.querySelector('[data-folder-list]') as HTMLElement;
+  const renderList = () => {
+    listEl.innerHTML = '';
+    const choices: Array<{ value: string; label: string }> = [
+      { value: '', label: '📂 (볼트 최상위 루트 폴더)' },
+      ...uniqueFolders.map((f) => ({ value: f, label: `📁 ${f}` })),
+    ];
+    for (const c of choices) {
+      const row = document.createElement('div');
+      row.className = `palette-item${selected === c.value ? ' selected' : ''}`;
+      row.innerHTML = `
+        <span style="flex:1;font-weight:${selected === c.value ? '700' : '500'};">${escapeHtml(c.label)}</span>
+        <span style="font-size:12px;color:var(--accent);">${selected === c.value ? '✓ 선택됨' : ''}</span>
+      `;
+      row.addEventListener('click', () => {
+        selected = c.value;
+        renderList();
+      });
+      listEl.appendChild(row);
+    }
+  };
+  renderList();
+
+  const newFolderInput = card.querySelector('[data-new-folder]') as HTMLInputElement;
+  const handleCreate = async () => {
+    const raw = newFolderInput.value.trim().replace(/^\/+|\/+$/g, '');
+    if (!raw) {
+      opts.onToast('폴더 이름을 입력하세요.', true);
+      return;
+    }
+    try {
+      const res = await api.createFolder(opts.vault, '', raw);
+      await opts.onFolderCreated();
+      close();
+      await opts.onSelect(res.path);
+    } catch (err: any) {
+      opts.onToast(err?.message || '폴더 생성에 실패했습니다.', true);
+    }
+  };
+
+  card.querySelector('[data-create-folder]')?.addEventListener('click', () => void handleCreate());
+  newFolderInput.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      void handleCreate();
+    }
+  });
+
+  card.querySelector('[data-close]')?.addEventListener('click', close);
+  card.querySelector('[data-cancel]')?.addEventListener('click', close);
+  card.querySelector('[data-save]')?.addEventListener('click', () => {
+    close();
+    void opts.onSelect(selected);
+  });
+}
+
+export function openNoteCryptoModal(opts: {
+  vault: string;
+  notePath: string;
+  noteTitle: string;
+  encrypted: boolean;
+  locked: boolean;
+  hint?: string | null;
+  onCompleted: () => Promise<void>;
+  onToast: (msg: string, isError?: boolean) => void;
+}): void {
+  const { card, close } = createModalBase(480);
+
+  card.innerHTML = `
+    <div class="modal-header">
+      <span>🔐 노트 암호화 / 잠금 관리</span>
+      <button type="button" class="icon-btn" data-close>✕</button>
+    </div>
+    <div class="modal-body" data-crypto-body></div>
+  `;
+
+  const body = card.querySelector('[data-crypto-body]') as HTMLElement;
+  card.querySelector('[data-close]')?.addEventListener('click', close);
+
+  if (!opts.encrypted) {
+    body.innerHTML = `
+      <div style="font-size:12.5px;color:var(--text-secondary);margin-bottom:12px;line-height:1.5;">
+        <strong>${escapeHtml(opts.noteTitle)}</strong> 노트를 <strong>AES-256-GCM</strong>으로 암호화합니다.
+        디스크와 모든 클라우드·NAS 동기화 저장소에 암호문만 기록됩니다.
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        <div>
+          <label style="display:block;font-size:12px;margin-bottom:4px;">암호 (4자 이상)</label>
+          <input type="password" class="text-input" data-pw placeholder="암호 입력" />
+        </div>
+        <div>
+          <label style="display:block;font-size:12px;margin-bottom:4px;">암호 확인</label>
+          <input type="password" class="text-input" data-pw2 placeholder="암호 다시 입력" />
+        </div>
+        <div>
+          <label style="display:block;font-size:12px;margin-bottom:4px;">암호 힌트 (선택)</label>
+          <input type="text" class="text-input" data-hint placeholder="예: 자주 쓰는 조합" />
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px;">
+          <button type="button" class="btn" data-cancel>취소</button>
+          <button type="button" class="btn btn-primary" data-encrypt-btn>🔒 이 노트 암호화</button>
+        </div>
+      </div>
+    `;
+    const pw1 = body.querySelector('[data-pw]') as HTMLInputElement;
+    const pw2 = body.querySelector('[data-pw2]') as HTMLInputElement;
+    const hintIn = body.querySelector('[data-hint]') as HTMLInputElement;
+    body.querySelector('[data-cancel]')?.addEventListener('click', close);
+    body.querySelector('[data-encrypt-btn]')?.addEventListener('click', async () => {
+      const p1 = pw1.value;
+      if (p1.length < 4) {
+        opts.onToast('암호는 최소 4자 이상 입력해 주세요.', true);
+        return;
+      }
+      if (p1 !== pw2.value) {
+        opts.onToast('두 암호가 일치하지 않습니다.', true);
+        return;
+      }
+      try {
+        await api.cryptoEncryptNote(opts.vault, opts.notePath, p1, hintIn.value.trim() || null);
+        close();
+        await opts.onCompleted();
+        opts.onToast('노트를 AES-256-GCM으로 암호화했습니다.');
+      } catch (err: any) {
+        opts.onToast(err?.message || '노트 암호화 실패', true);
+      }
+    });
+    setTimeout(() => pw1.focus(), 10);
+    return;
+  }
+
+  body.innerHTML = `
+    <div style="font-size:12.5px;color:var(--text-secondary);margin-bottom:12px;line-height:1.5;">
+      <strong>${escapeHtml(opts.noteTitle)}</strong> 노트는 현재
+      <strong>${opts.locked ? '🔒 잠금 상태' : '🔓 세션 잠금 해제됨'}</strong>입니다.
+      ${opts.hint ? `<div class="locked-note-hint" style="margin-top:8px;">힌트: ${escapeHtml(opts.hint)}</div>` : ''}
+    </div>
+    <div style="display:flex;flex-direction:column;gap:10px;">
+      ${
+        !opts.locked
+          ? `<button type="button" class="btn" data-lock-now>🔒 지금 즉시 이 노트 잠그기</button>`
+          : ''
+      }
+      <div style="padding-top:8px;border-top:1px solid var(--border-subtle);">
+        <label style="display:block;font-size:12px;margin-bottom:4px;">암호 입력 (잠금 해제 또는 영구 복호화)</label>
+        <input type="password" class="text-input" data-pw placeholder="암호 입력" />
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;">
+        <button type="button" class="btn" data-cancel>닫기</button>
+        ${
+          opts.locked
+            ? `<button type="button" class="btn btn-primary" data-unlock-btn>🔓 잠금 해제</button>`
+            : ''
+        }
+        <button type="button" class="btn btn-danger" data-decrypt-btn>⚠️ 암호화 영구 해제 (평문)</button>
+      </div>
+    </div>
+  `;
+
+  const pwIn = body.querySelector('[data-pw]') as HTMLInputElement;
+  body.querySelector('[data-cancel]')?.addEventListener('click', close);
+  body.querySelector('[data-lock-now]')?.addEventListener('click', async () => {
+    try {
+      await api.cryptoLockNote(opts.vault, opts.notePath);
+      close();
+      await opts.onCompleted();
+      opts.onToast('노트를 잠갔습니다.');
+    } catch (err: any) {
+      opts.onToast(err?.message || '노트 잠금 실패', true);
+    }
+  });
+  body.querySelector('[data-unlock-btn]')?.addEventListener('click', async () => {
+    if (!pwIn.value) {
+      opts.onToast('암호를 입력해 주세요.', true);
+      return;
+    }
+    try {
+      await api.cryptoUnlockNote(opts.vault, opts.notePath, pwIn.value);
+      close();
+      await opts.onCompleted();
+      opts.onToast('노트 잠금이 해제되었습니다.');
+    } catch (err: any) {
+      opts.onToast(err?.message || '암호가 올바르지 않습니다.', true);
+    }
+  });
+  body.querySelector('[data-decrypt-btn]')?.addEventListener('click', async () => {
+    if (!pwIn.value) {
+      opts.onToast('영구 복호화하려면 암호를 입력해 주세요.', true);
+      return;
+    }
+    try {
+      await api.cryptoDecryptNote(opts.vault, opts.notePath, pwIn.value);
+      close();
+      await opts.onCompleted();
+      opts.onToast('노트 암호화를 영구 해제(평문 저장)했습니다.');
+    } catch (err: any) {
+      opts.onToast(err?.message || '복호화에 실패했습니다.', true);
+    }
+  });
+  setTimeout(() => pwIn.focus(), 10);
+}
+
+export function openVaultCryptoModal(opts: {
+  vault: string;
+  status: {
+    vault_encrypted: boolean;
+    vault_unlocked: boolean;
+    total_notes: number;
+    encrypted_notes: number;
+    unlocked_notes: number;
+    auto_encrypt_new_notes: boolean;
+    hint: string | null;
+  };
+  onCompleted: () => Promise<void>;
+  onToast: (msg: string, isError?: boolean) => void;
+}): void {
+  const { card, close } = createModalBase(540);
+  const st = opts.status;
+
+  card.innerHTML = `
+    <div class="modal-header">
+      <span>🔐 전체 볼트 암호화 설정 (AES-256-GCM)</span>
+      <button type="button" class="icon-btn" data-close>✕</button>
+    </div>
+    <div class="modal-body" data-vault-crypto-body></div>
+  `;
+
+  card.querySelector('[data-close]')?.addEventListener('click', close);
+  const body = card.querySelector('[data-vault-crypto-body]') as HTMLElement;
+
+  const statsBanner = `
+    <div style="display:flex;gap:12px;flex-wrap:wrap;padding:10px 12px;border-radius:8px;background:var(--bg-inset);border:1px solid var(--border-subtle);margin-bottom:12px;font-size:12px;">
+      <span>📄 전체 노트: <strong>${st.total_notes}</strong></span>
+      <span>🔒 암호화됨: <strong>${st.encrypted_notes}</strong></span>
+      <span>🔓 세션 해제: <strong>${st.unlocked_notes}</strong></span>
+      <span>상태: <strong>${st.vault_encrypted ? (st.vault_unlocked ? '볼트 해제됨' : '볼트 잠금됨') : '평문 볼트'}</strong></span>
+    </div>
+  `;
+
+  if (!st.vault_encrypted) {
+    body.innerHTML = `
+      ${statsBanner}
+      <div style="font-size:12.5px;color:var(--text-secondary);margin-bottom:12px;line-height:1.5;">
+        마스터 암호를 설정해 볼트 내 모든 마크다운 노트를 일괄 암호화합니다.
+        파일 확장자(.md)와 폴더 구조가 유지되므로 6종 클라우드·NAS 동기화가 안전하게 계속 동작합니다.
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        <div>
+          <label style="display:block;font-size:12px;margin-bottom:4px;">볼트 마스터 암호 (4자 이상)</label>
+          <input type="password" class="text-input" data-v-pw placeholder="마스터 암호 입력" />
+        </div>
+        <div>
+          <label style="display:block;font-size:12px;margin-bottom:4px;">암호 확인</label>
+          <input type="password" class="text-input" data-v-pw2 placeholder="마스터 암호 다시 입력" />
+        </div>
+        <div>
+          <label style="display:block;font-size:12px;margin-bottom:4px;">암호 힌트 (선택)</label>
+          <input type="text" class="text-input" data-v-hint placeholder="힌트 입력" />
+        </div>
+        <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;cursor:pointer;">
+          <input type="checkbox" data-v-auto checked /> 새로 만드는 노트·일일 노트도 자동 암호화
+        </label>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px;">
+          <button type="button" class="btn" data-cancel>취소</button>
+          <button type="button" class="btn btn-primary" data-v-encrypt>🔐 볼트 전체 일괄 암호화</button>
+        </div>
+      </div>
+    `;
+
+    const pw1 = body.querySelector('[data-v-pw]') as HTMLInputElement;
+    const pw2 = body.querySelector('[data-v-pw2]') as HTMLInputElement;
+    const hintIn = body.querySelector('[data-v-hint]') as HTMLInputElement;
+    const autoChk = body.querySelector('[data-v-auto]') as HTMLInputElement;
+
+    body.querySelector('[data-cancel]')?.addEventListener('click', close);
+    body.querySelector('[data-v-encrypt]')?.addEventListener('click', async () => {
+      if (pw1.value.length < 4) {
+        opts.onToast('암호는 최소 4자 이상 입력해 주세요.', true);
+        return;
+      }
+      if (pw1.value !== pw2.value) {
+        opts.onToast('두 암호가 일치하지 않습니다.', true);
+        return;
+      }
+      try {
+        const res = await api.cryptoEncryptVault(
+          opts.vault,
+          pw1.value,
+          hintIn.value.trim() || null,
+          autoChk.checked
+        );
+        close();
+        await opts.onCompleted();
+        opts.onToast(`전체 볼트 암호화 완료 (${res.result.encrypted_count}개 암호화됨)`);
+      } catch (err: any) {
+        opts.onToast(err?.message || '볼트 암호화 실패', true);
+      }
+    });
+    setTimeout(() => pw1.focus(), 10);
+    return;
+  }
+
+  body.innerHTML = `
+    ${statsBanner}
+    ${st.hint ? `<div class="locked-note-hint" style="margin-bottom:10px;">힌트: ${escapeHtml(st.hint)}</div>` : ''}
+    <div style="display:flex;flex-direction:column;gap:12px;">
+      <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;cursor:pointer;">
+        <input type="checkbox" data-v-auto ${st.auto_encrypt_new_notes ? 'checked' : ''} />
+        새 노트 및 일일 노트 자동 암호화
+      </label>
+
+      ${
+        st.vault_unlocked
+          ? `<button type="button" class="btn" data-v-lock>🔒 볼트 전체 즉시 잠금 (세션 키 삭제)</button>`
+          : ''
+      }
+
+      <div style="padding-top:10px;border-top:1px solid var(--border-subtle);">
+        <label style="display:block;font-size:12px;margin-bottom:4px;">볼트 마스터 암호</label>
+        <input type="password" class="text-input" data-v-pw placeholder="볼트 마스터 암호 입력" />
+      </div>
+
+      <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;">
+        <button type="button" class="btn" data-cancel>닫기</button>
+        ${
+          !st.vault_unlocked
+            ? `<button type="button" class="btn btn-primary" data-v-unlock>🔓 볼트 잠금 해제</button>`
+            : `<button type="button" class="btn" data-v-reencrypt>🔐 미암호화 노트까지 일괄 암호화</button>`
+        }
+        <button type="button" class="btn btn-danger" data-v-decrypt>⚠️ 전체 암호화 영구 해제</button>
+      </div>
+    </div>
+  `;
+
+  const pwIn = body.querySelector('[data-v-pw]') as HTMLInputElement;
+  const autoChk = body.querySelector('[data-v-auto]') as HTMLInputElement;
+
+  autoChk.addEventListener('change', async () => {
+    try {
+      await api.cryptoSetAutoEncrypt(opts.vault, autoChk.checked);
+      await opts.onCompleted();
+      opts.onToast(
+        autoChk.checked
+          ? '새 노트 자동 암호화를 켰습니다.'
+          : '새 노트 자동 암호화를 껐습니다.'
+      );
+    } catch (err: any) {
+      opts.onToast(err?.message || '설정 변경 실패', true);
+    }
+  });
+
+  body.querySelector('[data-cancel]')?.addEventListener('click', close);
+  body.querySelector('[data-v-lock]')?.addEventListener('click', async () => {
+    try {
+      await api.cryptoLockVault(opts.vault);
+      close();
+      await opts.onCompleted();
+      opts.onToast('볼트 전체를 잠갔습니다.');
+    } catch (err: any) {
+      opts.onToast(err?.message || '볼트 잠금 실패', true);
+    }
+  });
+
+  body.querySelector('[data-v-unlock]')?.addEventListener('click', async () => {
+    if (!pwIn.value) {
+      opts.onToast('암호를 입력해 주세요.', true);
+      return;
+    }
+    try {
+      const res = await api.cryptoUnlockVault(opts.vault, pwIn.value);
+      close();
+      await opts.onCompleted();
+      opts.onToast(`볼트 잠금 해제 완료 (${res.result.unlocked_count}개 노트 해제)`);
+    } catch (err: any) {
+      opts.onToast(err?.message || '마스터 암호가 올바르지 않습니다.', true);
+    }
+  });
+
+  body.querySelector('[data-v-reencrypt]')?.addEventListener('click', async () => {
+    if (!pwIn.value) {
+      opts.onToast('마스터 암호를 입력해 주세요.', true);
+      return;
+    }
+    try {
+      const res = await api.cryptoEncryptVault(
+        opts.vault,
+        pwIn.value,
+        st.hint,
+        autoChk.checked
+      );
+      close();
+      await opts.onCompleted();
+      opts.onToast(`볼트 일괄 암호화 완료 (${res.result.encrypted_count}개 암호화됨)`);
+    } catch (err: any) {
+      opts.onToast(err?.message || '일괄 암호화 실패', true);
+    }
+  });
+
+  body.querySelector('[data-v-decrypt]')?.addEventListener('click', async () => {
+    if (!pwIn.value) {
+      opts.onToast('영구 복호화하려면 마스터 암호를 입력해 주세요.', true);
+      return;
+    }
+    try {
+      const res = await api.cryptoDecryptVault(opts.vault, pwIn.value);
+      close();
+      await opts.onCompleted();
+      opts.onToast(`전체 볼트 암호화를 영구 해제했습니다 (${res.result.decrypted_count}개 복호화).`);
+    } catch (err: any) {
+      opts.onToast(err?.message || '전체 복호화에 실패했습니다.', true);
+    }
+  });
+
+  setTimeout(() => pwIn.focus(), 10);
+}
+

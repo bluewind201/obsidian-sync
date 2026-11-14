@@ -171,6 +171,17 @@ mod imp {
             .pick_file()
     }
 
+    pub fn pick_any_file() -> Option<PathBuf> {
+        rfd::FileDialog::new().pick_file()
+    }
+
+    pub fn save_pdf_dialog(default_filename: &str) -> Option<PathBuf> {
+        rfd::FileDialog::new()
+            .set_file_name(default_filename)
+            .add_filter("PDF 문서 (*.pdf)", &["pdf"])
+            .save_file()
+    }
+
     pub type Tray = TrayIcon;
 }
 
@@ -212,6 +223,14 @@ mod imp {
     }
 
     pub fn pick_image_file() -> Option<PathBuf> {
+        None
+    }
+
+    pub fn pick_any_file() -> Option<PathBuf> {
+        None
+    }
+
+    pub fn save_pdf_dialog(_default_filename: &str) -> Option<PathBuf> {
         None
     }
 }
