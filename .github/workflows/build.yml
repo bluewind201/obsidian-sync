@@ -36,15 +36,17 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          New-Item -ItemType Directory dist
+          New-Item -ItemType Directory -Force dist | Out-Null
+          New-Item -ItemType Directory -Force release-win | Out-Null
           Copy-Item target/release/ObsidianSync.exe dist/
           Copy-Item README.md dist/
           Copy-Item docs/SETUP.md dist/
-          Compress-Archive -Path dist/* -DestinationPath ObsidianSync-windows-x64.zip
+          Compress-Archive -Path dist/* -DestinationPath release-win/ObsidianSync-windows-x64.zip -Force
+          Copy-Item target/release/ObsidianSync.exe release-win/ObsidianSync.exe -Force
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x64
-          path: ObsidianSync-windows-x64.zip
+          path: release-win/*
 
   android:
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
@@ -136,7 +138,7 @@ jobs:
         with:
           path: artifacts
           name: windows-x64
-      - run: cd artifacts && sha256sum * > SHA256SUMS.txt
+      - run: cd artifacts && sha256sum ObsidianSync* > SHA256SUMS.txt
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -148,7 +150,7 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then TAG="$GITHUB_REF_NAME"; else TAG="v${VERSION}-b${GITHUB_RUN_NUMBER}"; fi
           cat > notes.md <<NOTES
           ## 받는 법
-          - **Windows**: \`ObsidianSync-windows-x64.zip\` 압축을 풀고 \`ObsidianSync.exe\` 실행
+          - **Windows**: \`ObsidianSync-windows-x64.zip\` 압축을 풀고 \`ObsidianSync.exe\` 실행 (또는 \`ObsidianSync.exe\` 단일 실행)
           - **Android**: \`ObsidianSync-android.apk\` 설치. 앱의 "앱 업데이트"에서 새 버전을 자동으로 받아 설치할 수 있습니다.
           ${SIGN_NOTE}
 
@@ -157,8 +159,13 @@ jobs:
           커밋: ${GITHUB_SHA::7}
           NOTES
           if gh release view "$TAG" >/dev/null 2>&1; then
+            EXISTING_BODY=$(gh release view "$TAG" --json body --jq '.body // ""')
             gh release upload "$TAG" artifacts/* --clobber
-            gh release edit "$TAG" --title "Obsidian Sync $TAG" --notes-file notes.md --latest
+            if [[ -z "$(printf '%s' "$EXISTING_BODY" | tr -d '[:space:]')" ]]; then
+              gh release edit "$TAG" --title "Obsidian Sync $TAG" --notes-file notes.md --latest
+            else
+              gh release edit "$TAG" --latest
+            fi
           else
             gh release create "$TAG" artifacts/* --target "$GITHUB_SHA" --title "Obsidian Sync $TAG" --notes-file notes.md --latest
           fi

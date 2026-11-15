@@ -57,6 +57,35 @@ final class Updater {
         try { return Long.parseLong(tag.substring(i + 2)); } catch (NumberFormatException e) { return -1; }
     }
 
+    /** "v0.6.0-b28" 또는 "0.5.0-dev" → [major, minor, patch]. 파싱 실패 시 null. */
+    static int[] parseSemver(String s) {
+        if (s == null) return null;
+        String clean = s.trim();
+        if (clean.startsWith("v") || clean.startsWith("V")) clean = clean.substring(1);
+        int dash = clean.indexOf('-');
+        if (dash >= 0) clean = clean.substring(0, dash);
+        String[] parts = clean.split("\\.");
+        if (parts.length < 2 || parts.length > 3) return null;
+        try {
+            int major = Integer.parseInt(parts[0]);
+            int minor = Integer.parseInt(parts[1]);
+            int patch = parts.length == 3 ? Integer.parseInt(parts[2]) : 0;
+            return new int[]{major, minor, patch};
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    static boolean isNewerSemver(String remoteTag, String localVersionName) {
+        int[] r = parseSemver(remoteTag);
+        int[] l = parseSemver(localVersionName);
+        if (r == null || l == null) return false;
+        for (int i = 0; i < 3; i++) {
+            if (r[i] != l[i]) return r[i] > l[i];
+        }
+        return false;
+    }
+
     static long currentBuild(Context c) {
         try {
             PackageInfo i = c.getPackageManager().getPackageInfo(c.getPackageName(), 0);
@@ -119,7 +148,9 @@ final class Updater {
     /** 이 기기보다 새 버전이 있으면 그 릴리즈, 없으면 null. */
     static Release check(Context c) throws Exception {
         Release r = latest();
-        return r != null && r.build > currentBuild(c) ? r : null;
+        if (r == null) return null;
+        if (r.build > 0) return r.build > currentBuild(c) ? r : null;
+        return isNewerSemver(r.tag, currentName(c)) ? r : null;
     }
 
     static File download(Context c, Release r) throws Exception {

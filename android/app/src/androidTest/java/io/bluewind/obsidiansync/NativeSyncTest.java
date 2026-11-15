@@ -97,6 +97,9 @@ public final class NativeSyncTest {
     @Test public void updaterReadsReleaseTags() throws Exception {
         assertEquals(12, Updater.buildOf("v0.4.0-b12"));
         assertEquals(-1, Updater.buildOf("v0.4.0"));
+        assertTrue(Updater.isNewerSemver("v0.6.0", "0.5.0-b28"));
+        assertFalse(Updater.isNewerSemver("v0.6.0", "0.6.0-b30"));
+        assertFalse(Updater.isNewerSemver("v0.5.0", "0.6.0-b30"));
         JSONObject rel = new JSONObject().put("tag_name", "v0.4.1-b20").put("assets", new org.json.JSONArray()
                 .put(new JSONObject().put("name", "SHA256SUMS.txt").put("browser_download_url", "https://x/sums"))
                 .put(new JSONObject().put("name", "ObsidianSync-android.apk").put("browser_download_url", "https://x/app.apk").put("size", 123)));
