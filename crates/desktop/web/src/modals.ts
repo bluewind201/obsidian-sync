@@ -92,8 +92,13 @@ function escapeHtml(s: string): string {
 }
 
 let activeContextMenuEl: HTMLElement | null = null;
+let activeContextMenuCleanup: (() => void) | null = null;
 
 export function closeContextMenu(): void {
+  if (activeContextMenuCleanup) {
+    activeContextMenuCleanup();
+    activeContextMenuCleanup = null;
+  }
   if (activeContextMenuEl) {
     activeContextMenuEl.remove();
     activeContextMenuEl = null;
@@ -135,10 +140,26 @@ export function showContextMenu(x: number, y: number, entries: ContextMenuEntry[
   const dismiss = (e: MouseEvent) => {
     if (activeContextMenuEl && !activeContextMenuEl.contains(e.target as Node)) {
       closeContextMenu();
-      window.removeEventListener('mousedown', dismiss);
     }
   };
-  setTimeout(() => window.addEventListener('mousedown', dismiss), 0);
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      closeContextMenu();
+    }
+  };
+  const onResize = () => closeContextMenu();
+  activeContextMenuCleanup = () => {
+    window.removeEventListener('mousedown', dismiss, true);
+    window.removeEventListener('keydown', onKey, true);
+    window.removeEventListener('resize', onResize);
+  };
+  setTimeout(() => {
+    if (activeContextMenuEl === menu) {
+      window.addEventListener('mousedown', dismiss, true);
+      window.addEventListener('keydown', onKey, true);
+      window.addEventListener('resize', onResize);
+    }
+  }, 0);
 }
 
 function createModalBase(widthPx = 560): {

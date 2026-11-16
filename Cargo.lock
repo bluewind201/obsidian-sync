@@ -2087,7 +2087,7 @@ dependencies = [
 
 [[package]]
 name = "obsidian-sync-android"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "jni",
@@ -2100,7 +2100,7 @@ dependencies = [
 
 [[package]]
 name = "obsidian-sync-core"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -2122,7 +2122,7 @@ dependencies = [
 
 [[package]]
 name = "obsidian-sync-desktop"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "base64",

@@ -732,6 +732,11 @@ export class StudioEditorController {
   private hostEl: HTMLElement;
   private findBarEl: HTMLElement | null = null;
   private editorMountEl: HTMLElement | null = null;
+  private toolbarDockEl: HTMLElement | null = null;
+  private toolbarEl: HTMLElement | null = null;
+  private popupClampObserver: MutationObserver | null = null;
+  private docToolbarResizeBound: (() => void) | null = null;
+  private clampingOverlays = false;
   private callbacks: StudioEditorCallbacks;
   private suppressChange = false;
   private bracketTriggeredFromTyping = false;
@@ -780,9 +785,11 @@ export class StudioEditorController {
     initialMarkdown: string;
     mode: EditorType;
     theme: 'light' | 'dark';
+    toolbarDockEl?: HTMLElement | null;
   }): void {
     this.destroy();
     this.hostEl.innerHTML = '';
+    this.toolbarDockEl = params.toolbarDockEl ?? null;
 
     this.findBarEl = document.createElement('div');
     this.findBarEl.className = 'editor-find-bar';
@@ -790,7 +797,14 @@ export class StudioEditorController {
     this.buildFindBarDom(this.findBarEl);
 
     this.editorMountEl = document.createElement('div');
-    this.hostEl.append(this.findBarEl, this.editorMountEl);
+    if (this.toolbarDockEl) {
+      this.toolbarDockEl.innerHTML = '';
+      this.toolbarDockEl.classList.toggle('toastui-editor-dark', params.theme === 'dark');
+      this.toolbarDockEl.style.display = '';
+      this.hostEl.append(this.editorMountEl);
+    } else {
+      this.hostEl.append(this.findBarEl, this.editorMountEl);
+    }
     this.attachEditorContextMenu();
 
     const vault = this.callbacks.getActiveVault();
@@ -1441,7 +1455,73 @@ export class StudioEditorController {
       },
     });
 
+    this.attachToolbarToDock(params.theme);
     this.hostEl.addEventListener('click', this.handleHostClick);
+  }
+
+  /**
+   * Moves TOAST UI's `.toastui-editor-toolbar` (plus its nested dropdown/popups)
+   * and the inline find bar out of `#a4-paper-sheet` (`transform: scale(...)`)
+   * and `#app-editor-pane` (`overflow-y: auto`) into `#app-editor-toolbar-dock`.
+   */
+  private attachToolbarToDock(theme: 'light' | 'dark'): void {
+    if (!this.toolbarDockEl) return;
+    const uiEl = this.hostEl.querySelector('.toastui-editor-defaultUI');
+    const toolbarEl = uiEl?.querySelector('.toastui-editor-toolbar') as HTMLElement | null;
+    if (!toolbarEl) return;
+
+    this.toolbarDockEl.innerHTML = '';
+    this.toolbarDockEl.classList.toggle('toastui-editor-dark', theme === 'dark');
+    this.toolbarDockEl.style.display = '';
+    this.toolbarDockEl.append(toolbarEl);
+    if (this.findBarEl) {
+      this.toolbarDockEl.append(this.findBarEl);
+    }
+    this.toolbarEl = toolbarEl;
+
+    this.popupClampObserver = new MutationObserver(() => {
+      this.clampVisibleToolbarOverlays();
+    });
+    this.popupClampObserver.observe(toolbarEl, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['style', 'class'],
+    });
+    this.docToolbarResizeBound = () => this.clampVisibleToolbarOverlays();
+    window.addEventListener('resize', this.docToolbarResizeBound);
+  }
+
+  /** Keeps visible `.toastui-editor-popup` dialogs within viewport and dock bounds. */
+  private clampVisibleToolbarOverlays(): void {
+    if (this.clampingOverlays || !this.toolbarDockEl || !this.toolbarEl) return;
+    this.clampingOverlays = true;
+    try {
+      const dockRect = this.toolbarDockEl.getBoundingClientRect();
+      const pad = 8;
+      const minLeft = Math.max(pad, dockRect.left + 4);
+      const maxRight = Math.min(window.innerWidth - pad, dockRect.right - 4);
+      this.toolbarEl
+        .querySelectorAll<HTMLElement>('.toastui-editor-popup')
+        .forEach((popup) => {
+          if (popup.style.display === 'none' || popup.offsetParent === null) return;
+          const rect = popup.getBoundingClientRect();
+          if (rect.width <= 0) return;
+          let dx = 0;
+          if (rect.right > maxRight) {
+            dx -= rect.right - maxRight;
+          }
+          if (rect.left + dx < minLeft) {
+            dx += minLeft - (rect.left + dx);
+          }
+          if (Math.abs(dx) >= 1) {
+            const curLeft = parseFloat(popup.style.left || '0') || 0;
+            popup.style.left = `${Math.round(curLeft + dx)}px`;
+          }
+        });
+    } finally {
+      this.clampingOverlays = false;
+    }
   }
 
   private buildFindBarDom(bar: HTMLElement): void {
@@ -1955,7 +2035,6 @@ export class StudioEditorController {
     }
     if (this.ctxDocClickBound) {
       document.removeEventListener('mousedown', this.ctxDocClickBound, true);
-      window.removeEventListener('scroll', this.ctxDocClickBound, true);
       window.removeEventListener('resize', this.ctxDocClickBound);
       this.ctxDocClickBound = null;
     }
@@ -2135,7 +2214,6 @@ export class StudioEditorController {
     setTimeout(() => {
       if (this.ctxDocClickBound) {
         document.addEventListener('mousedown', this.ctxDocClickBound, true);
-        window.addEventListener('scroll', this.ctxDocClickBound, true);
         window.addEventListener('resize', this.ctxDocClickBound);
       }
       if (this.ctxDocKeyBound) {
@@ -2176,11 +2254,11 @@ export class StudioEditorController {
 
   public setTheme(theme: 'light' | 'dark'): void {
     const uiEl = this.hostEl.querySelector('.toastui-editor-defaultUI');
-    if (!uiEl) return;
-    if (theme === 'dark') {
-      uiEl.classList.add('toastui-editor-dark');
-    } else {
-      uiEl.classList.remove('toastui-editor-dark');
+    if (uiEl) {
+      uiEl.classList.toggle('toastui-editor-dark', theme === 'dark');
+    }
+    if (this.toolbarDockEl) {
+      this.toolbarDockEl.classList.toggle('toastui-editor-dark', theme === 'dark');
     }
   }
 
@@ -2200,6 +2278,14 @@ export class StudioEditorController {
 
   public destroy(): void {
     this.closeEditorContextMenu();
+    if (this.popupClampObserver) {
+      this.popupClampObserver.disconnect();
+      this.popupClampObserver = null;
+    }
+    if (this.docToolbarResizeBound) {
+      window.removeEventListener('resize', this.docToolbarResizeBound);
+      this.docToolbarResizeBound = null;
+    }
     this.hostEl.removeEventListener('click', this.handleHostClick);
     this.findBarEl = null;
     this.editorMountEl = null;
@@ -2213,6 +2299,12 @@ export class StudioEditorController {
         // ignore
       }
       this.editor = null;
+    }
+    this.toolbarEl = null;
+    if (this.toolbarDockEl) {
+      this.toolbarDockEl.innerHTML = '';
+      this.toolbarDockEl.classList.remove('toastui-editor-dark');
+      this.toolbarDockEl = null;
     }
   }
 }

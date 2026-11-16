@@ -1,4 +1,4 @@
-# Onyx Studio (v0.8.0) — Obsidian 볼트 호환 Notion 마크다운 스튜디오 & 실시간 동기화 (Windows · Android 통합)
+# Onyx Studio (v0.8.1) — Obsidian 볼트 호환 Notion 마크다운 스튜디오 & 실시간 동기화 (Windows · Android 통합)
 
 **Obsidian 볼트 호환 지식 베이스 + 네이버(NHN) TOAST UI Editor 확장 스튜디오(우클릭 컨텍스트 도구 포함) + A4 1.5cm 여백/경계선/PDF 출력 + AES-256-GCM 암호화 + 6종 클라우드/NAS 실시간 동기화**를 **Windows(`OnyxStudio.exe`)와 Android(`OnyxStudio-android.apk`) 모두**에서 하나의 통합 앱으로 제공합니다.
 
@@ -7,7 +7,7 @@
 노트를 편집하고 저장하면 몇 초 안에 내 저장소(Synology NAS, OneDrive, Google Drive, 네이버 클라우드 등)로 올라가고, 다른 기기에서 바꾼 내용은 자동으로 내려받습니다.
 Obsidian 공식 제품이 아닌 개인 오픈소스 프로젝트입니다.
 
-## 주요 기능 (v0.8.0)
+## 주요 기능 (v0.8.1)
 
 ### 1. Windows · Android 동일 스튜디오 경험 (편집 + 동기화 올인원)
 - **Android 앱 전면 통합**: 기존 동기화 설정 전용 UI에서 벗어나, Android에서도 Windows와 동일한 **Notion 스타일 워크스페이스 · 50% 슬림 확장 TOAST UI 에디터(위지윅/마크다운 분할) · 그래프 뷰(터치/핀치 줌) · 암호화 · PDF 인쇄 출력 · 실시간 동기화 센터**를 그대로 사용할 수 있습니다.

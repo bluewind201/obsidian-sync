@@ -247,7 +247,7 @@ public final class NativeSyncTest {
             for (int i = 0; i < 75; i++) {
                 editorState = evalJs(s,
                         "(() => {"
-                        + "const ed = document.querySelector('.toastui-editor-defaultUI');"
+                        + "const ed = document.querySelector('#toast-editor-host .toastui-editor-defaultUI') || document.querySelector('.toastui-editor-defaultUI');"
                         + "const title = document.querySelector('.notion-title-input');"
                         + "if (!ed || !title) return 'waiting';"
                         + "const r = ed.getBoundingClientRect();"

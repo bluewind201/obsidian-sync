@@ -113,6 +113,7 @@ class ObsidianSyncStudioApp {
   private tabsStripEl!: HTMLElement;
   private topbarEl!: HTMLElement;
   private editorViewWrapEl!: HTMLElement;
+  private editorToolbarDockEl!: HTMLElement;
   private editorPaneEl!: HTMLElement;
   private splitPaneEl!: HTMLElement;
   private inspectorEl!: HTMLElement;
@@ -299,9 +300,12 @@ class ObsidianSyncStudioApp {
           <div class="tabs-strip" id="app-tabs-strip"></div>
           <div class="topbar" id="app-topbar"></div>
           <div class="workspace-body" id="view-editor">
-            <div class="panes-container">
-              <div class="editor-pane" id="app-editor-pane"></div>
-              <div class="split-pane" id="app-split-pane" style="display:none;"></div>
+            <div class="editor-column">
+              <div class="editor-mount-wrap editor-toolbar-dock" id="app-editor-toolbar-dock" style="display:none;"></div>
+              <div class="panes-container">
+                <div class="editor-pane" id="app-editor-pane"></div>
+                <div class="split-pane" id="app-split-pane" style="display:none;"></div>
+              </div>
             </div>
             <aside class="inspector collapsed" id="app-inspector"></aside>
           </div>
@@ -320,12 +324,31 @@ class ObsidianSyncStudioApp {
     this.tabsStripEl = this.root.querySelector('#app-tabs-strip')!;
     this.topbarEl = this.root.querySelector('#app-topbar')!;
     this.editorViewWrapEl = this.root.querySelector('#view-editor')!;
+    this.editorToolbarDockEl = this.root.querySelector('#app-editor-toolbar-dock')!;
     this.editorPaneEl = this.root.querySelector('#app-editor-pane')!;
     this.splitPaneEl = this.root.querySelector('#app-split-pane')!;
     this.inspectorEl = this.root.querySelector('#app-inspector')!;
     this.graphViewWrapEl = this.root.querySelector('#view-graph')!;
     this.syncViewWrapEl = this.root.querySelector('#view-sync')!;
     this.toastStackEl = this.root.querySelector('#app-toasts')!;
+
+    // Convert vertical mouse wheel over overflowing top bars into horizontal scroll
+    const bindHorizontalWheel = (host: HTMLElement, selector: string) => {
+      host.addEventListener(
+        'wheel',
+        (ev: WheelEvent) => {
+          const scroller = (ev.target as HTMLElement | null)?.closest(selector) as HTMLElement | null;
+          if (!scroller || scroller.scrollWidth <= scroller.clientWidth + 1) return;
+          if (Math.abs(ev.deltaY) > Math.abs(ev.deltaX) && ev.deltaY !== 0) {
+            scroller.scrollLeft += ev.deltaY;
+            ev.preventDefault();
+          }
+        },
+        { passive: false }
+      );
+    };
+    bindHorizontalWheel(this.tabsStripEl, '.tabs-scroll');
+    bindHorizontalWheel(this.topbarEl, '.topbar-right');
   }
 
   private expandInitialFolders(): void {
@@ -499,6 +522,11 @@ class ObsidianSyncStudioApp {
     }
 
     rootStyle.setProperty('--a4-scale', finalScale.toFixed(4));
+
+    if (sheetEl) {
+      // Avoid a scale(1) transform layer at 100% zoom so hit-testing & text stay pixel-sharp.
+      sheetEl.style.transform = Math.abs(finalScale - 1) < 0.002 ? 'none' : '';
+    }
 
     if (sheetEl && scaleOuter) {
       const naturalW = sheetEl.offsetWidth;
@@ -2352,12 +2380,21 @@ class ObsidianSyncStudioApp {
     }
   }
 
+  private hideEditorToolbarDock(): void {
+    if (this.editorToolbarDockEl) {
+      this.editorToolbarDockEl.style.display = 'none';
+      this.editorToolbarDockEl.innerHTML = '';
+      this.editorToolbarDockEl.classList.remove('toastui-editor-dark');
+    }
+  }
+
   // ───────────────────────── Notion Page Header + Editor Rendering ─────────────────────────
   private renderEditorMainArea(remountEditor: boolean): void {
     if (!this.workspace.active_vault) {
       this.editorCtrl?.destroy();
       this.editorCtrl = null;
       this.mountedNotePath = null;
+      this.hideEditorToolbarDock();
       const isAndroid = isAndroidApp();
       const needsFilesPerm = isAndroid && this.androidInfo && !this.androidInfo.all_files_granted;
       this.editorPaneEl.innerHTML = `
@@ -2402,6 +2439,7 @@ class ObsidianSyncStudioApp {
       this.editorCtrl?.destroy();
       this.editorCtrl = null;
       this.mountedNotePath = null;
+      this.hideEditorToolbarDock();
       this.editorPaneEl.innerHTML = `
         <div class="empty-vault-hero">
           <div style="font-size:42px;margin-bottom:8px;">✍️</div>
@@ -2428,6 +2466,7 @@ class ObsidianSyncStudioApp {
       this.editorCtrl?.destroy();
       this.editorCtrl = null;
       this.mountedNotePath = null;
+      this.hideEditorToolbarDock();
       const hint = this.currentDoc.encryption_hint;
       this.editorPaneEl.innerHTML = `
         <div class="locked-note-card">
@@ -2613,6 +2652,7 @@ class ObsidianSyncStudioApp {
         initialMarkdown: this.draftBody,
         mode: this.workspace.editor_mode,
         theme: this.workspace.theme,
+        toolbarDockEl: this.editorToolbarDockEl,
       });
       this.mountedNotePath = this.currentDoc.path;
 

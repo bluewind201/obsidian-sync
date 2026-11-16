@@ -480,6 +480,9 @@ textarea {
 }
 
 .tabs-strip {
+  position: relative;
+  z-index: 95;
+  flex-shrink: 0;
   height: 38px;
   background: var(--bg-sidebar);
   border-bottom: 1px solid var(--border-subtle);
@@ -497,6 +500,7 @@ textarea {
   align-items: flex-end;
   height: 100%;
   overflow-x: auto;
+  scrollbar-width: none;
   gap: 2px;
 }
 .tabs-scroll::-webkit-scrollbar {
@@ -560,6 +564,9 @@ textarea {
 }
 
 .topbar {
+  position: relative;
+  z-index: 92;
+  flex-shrink: 0;
   height: 44px;
   min-height: 44px;
   padding: 0 14px;
@@ -598,6 +605,18 @@ textarea {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.topbar-right::-webkit-scrollbar {
+  display: none;
+}
+
+.topbar-right > * {
   flex-shrink: 0;
 }
 
@@ -661,11 +680,72 @@ textarea {
   overflow: hidden;
 }
 
+.editor-column {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.editor-mount-wrap.editor-toolbar-dock {
+  flex: none;
+  flex-shrink: 0;
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 4px 12px;
+  border: none;
+  border-bottom: 1px solid var(--border-subtle);
+  border-radius: 0;
+  box-shadow: none;
+  background: var(--bg-main);
+  position: relative;
+  z-index: 88;
+  overflow: visible;
+}
+
+.editor-mount-wrap.editor-toolbar-dock .toastui-editor-toolbar {
+  position: relative;
+  top: auto;
+  z-index: 89;
+  height: auto !important;
+  background: transparent;
+  padding: 0;
+}
+
+.editor-mount-wrap.editor-toolbar-dock .toastui-editor-popup {
+  z-index: 90;
+  max-width: calc(100vw - 16px);
+}
+
+.editor-mount-wrap.editor-toolbar-dock .toastui-editor-dropdown-toolbar {
+  z-index: 90;
+  max-width: calc(100vw - 16px);
+}
+
+.editor-mount-wrap.editor-toolbar-dock .editor-find-bar {
+  margin-top: 6px;
+  margin-bottom: 0;
+}
+
+@media (max-width: 860px) {
+  .editor-mount-wrap.editor-toolbar-dock {
+    padding: 4px 8px;
+  }
+}
+
 .panes-container {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   display: flex;
   overflow: hidden;
+  position: relative;
+  z-index: 1;
 }
 
 .editor-pane {
@@ -675,6 +755,7 @@ textarea {
   overflow-y: auto;
   background: var(--bg-main);
   position: relative;
+  z-index: 1;
 }
 
 .split-pane {
@@ -1878,6 +1959,9 @@ html[data-theme='dark'] .editor-mount-wrap .toastui-editor-contents table th,
   position: fixed;
   z-index: 1200;
   min-width: 210px;
+  max-height: min(76vh, 520px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 5px;
   border-radius: 8px;
   background: var(--bg-elevated);
@@ -2913,6 +2997,7 @@ details.notion-toggle[open] > summary::before {
   width: 248px;
   max-height: min(76vh, 520px);
   overflow-y: auto;
+  overscroll-behavior: contain;
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
   border-radius: 10px;
