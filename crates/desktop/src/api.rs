@@ -150,6 +150,7 @@ struct DailyNoteReq {
 }
 
 #[derive(Deserialize)]
+#[cfg_attr(not(windows), allow(dead_code))]
 struct ExportPdfReq {
     #[serde(default)]
     default_filename: Option<String>,

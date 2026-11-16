@@ -4114,7 +4114,10 @@ mod tests {
         assert!((ws.margin_bottom_cm - 0.0).abs() < 1e-6);
         assert!((ws.margin_left_cm - 3.5).abs() < 1e-6);
         assert_eq!(ws.editor_zoom, 150);
+        #[cfg(windows)]
         assert_eq!(ws.resolve_daily_folder("c:\\VaultA"), "일일업무/2026");
+        #[cfg(not(windows))]
+        assert_eq!(ws.resolve_daily_folder("C:\\VaultA"), "일일업무/2026");
         assert_eq!(ws.resolve_daily_folder("C:/VaultRoot"), "");
         assert_eq!(ws.resolve_daily_folder("C:/OtherVault"), "Daily");
 

@@ -68,6 +68,7 @@ public final class MainActivity extends Activity {
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ConcurrentHashMap<String, String> pendingResponses = new ConcurrentHashMap<>();
 
+    static volatile boolean visible;
     private WebView webView;
     private Updater.Release availableUpdate;
 
@@ -162,7 +163,22 @@ public final class MainActivity extends Activity {
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        visible = true;
+        if (webView != null) webView.onResume();
+    }
+
+    @Override
+    protected void onPause() {
+        visible = false;
+        if (webView != null) webView.onPause();
+        super.onPause();
+    }
+
+    @Override
     protected void onDestroy() {
+        visible = false;
         bg.shutdown();
         if (webView != null) {
             webView.removeJavascriptInterface("__OBSIDIAN_ANDROID__");

@@ -1,6 +1,7 @@
 // 릴리즈 빌드에서는 콘솔 창을 띄우지 않음
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+#[cfg(windows)]
 use obsidian_sync_desktop::{api, get_web_asset, platform, AppUserEvent};
 
 #[cfg(windows)]
