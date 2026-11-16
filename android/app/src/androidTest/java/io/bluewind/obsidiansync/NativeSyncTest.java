@@ -216,7 +216,7 @@ public final class NativeSyncTest {
                         + "const insp = document.getElementById('app-inspector');"
                         + "if (window.innerWidth <= 960 && insp && getComputedStyle(insp).display !== 'none') return 'inspector-visible';"
                         + "const hero = document.querySelector('[data-hero-sample]');"
-                        + "const title = document.querySelector('.notion-title-input');"
+                        + "const title = document.querySelector('.mobile-reader-title, .notion-title-input');"
                         + "const target = hero || title;"
                         + "if (!top || !target) return 'waiting';"
                         + "const r = target.getBoundingClientRect();"
@@ -243,39 +243,32 @@ public final class NativeSyncTest {
 
             evalJs(s, "(() => { const b = document.querySelector('[data-hero-sample]'); if (b) { b.click(); return 'clicked'; } return 'already-open'; })()");
 
-            String editorState = "waiting";
+            String readerState = "waiting";
             for (int i = 0; i < 75; i++) {
-                editorState = evalJs(s,
+                readerState = evalJs(s,
                         "(() => {"
-                        + "const ed = document.querySelector('#toast-editor-host .toastui-editor-defaultUI') || document.querySelector('.toastui-editor-defaultUI');"
-                        + "const title = document.querySelector('.notion-title-input');"
-                        + "if (!ed || !title) return 'waiting';"
-                        + "const r = ed.getBoundingClientRect();"
-                        + "if (r.height <= 120) return 'sizing';"
+                        + "const reader = document.querySelector('#note-reader-host .toastui-editor-contents');"
+                        + "const title = document.querySelector('.mobile-reader-title');"
+                        + "const dock = document.getElementById('app-editor-toolbar-dock');"
+                        + "if (!reader || !title || !dock) return 'waiting-reader';"
+                        + "if (getComputedStyle(dock).display !== 'none') return 'dock-should-be-hidden';"
+                        + "const r = reader.getBoundingClientRect();"
+                        + "if (r.height <= 120) return 'sizing-reader';"
                         + "const hit = document.elementFromPoint(r.left + r.width / 2, Math.min(window.innerHeight - 8, r.top + Math.min(r.height / 2, 120)));"
-                        + "if (!hit || (hit !== ed && !ed.contains(hit))) return 'editor-obscured-by-' + (hit ? hit.tagName + '#' + hit.id + '.' + hit.className : 'null');"
-                        + "return 'mounted';"
+                        + "if (!hit || (hit !== reader && !reader.contains(hit))) return 'reader-obscured-by-' + (hit ? hit.tagName + '#' + hit.id + '.' + hit.className : 'null');"
+                        + "return 'reader-ok';"
                         + "})()");
-                if (editorState != null && editorState.contains("mounted")) {
+                if (readerState != null && readerState.contains("reader-ok")) {
                     break;
                 }
                 Thread.sleep(200);
             }
             s.onActivity(act -> errRef.set(act.getWebErrorsForTest()));
-            assertTrue("TOAST UI editor did not mount (state=" + editorState
+            assertTrue("Mobile MD Reader did not render (state=" + readerState
                     + ", errors=" + errRef.get() + ")",
-                    editorState != null && editorState.contains("mounted"));
-            assertTrue("Unexpected WebView errors after mounting editor: " + errRef.get(),
+                    readerState != null && readerState.contains("reader-ok"));
+            assertTrue("Unexpected WebView errors in Mobile Reader: " + errRef.get(),
                     errRef.get() == null || errRef.get().isEmpty());
-
-            evalJs(s,
-                    "(() => {"
-                    + "if (!document.querySelector('.onyx-flow-card svg.onyx-flow-svg')) {"
-                    + "  const row = document.querySelector('.tree-row[data-node-path=\"환영합니다.md\"]');"
-                    + "  if (row) { row.click(); return 'clicked-welcome'; }"
-                    + "}"
-                    + "return 'already-checking';"
-                    + "})()");
 
             String flowState = "waiting-flow";
             for (int i = 0; i < 40; i++) {
@@ -297,7 +290,33 @@ public final class NativeSyncTest {
             assertTrue("Flowchart SVG did not render (state=" + flowState
                     + ", errors=" + errRef.get() + ")",
                     flowState != null && flowState.contains("flow-ok"));
-            assertTrue("Unexpected WebView errors after rendering flowchart: " + errRef.get(),
+
+            // Switch from Mobile Reader -> Mobile Simple Write Mode and verify compact 1-line bar
+            evalJs(s, "(() => { const b = document.querySelector('[data-mobile-mode-btn]'); if (b) { b.click(); return 'clicked-edit'; } return 'missing-btn'; })()");
+            String editorState = "waiting-edit";
+            for (int i = 0; i < 60; i++) {
+                editorState = evalJs(s,
+                        "(() => {"
+                        + "const ed = document.querySelector('#toast-editor-host .toastui-editor-defaultUI');"
+                        + "const title = document.querySelector('.notion-title-input');"
+                        + "const qbar = document.querySelector('.mobile-quick-toolbar');"
+                        + "const fullTb = document.querySelector('.editor-toolbar-dock .toastui-editor-toolbar');"
+                        + "if (!ed || !title || !qbar || !fullTb) return 'waiting-write';"
+                        + "if (ed.getBoundingClientRect().height <= 120) return 'sizing-ed';"
+                        + "if (qbar.getBoundingClientRect().height < 24) return 'qbar-hidden';"
+                        + "if (window.innerWidth <= 860 && getComputedStyle(fullTb).display !== 'none') return 'full-toolbar-not-collapsed';"
+                        + "return 'mounted';"
+                        + "})()");
+                if (editorState != null && editorState.contains("mounted")) {
+                    break;
+                }
+                Thread.sleep(200);
+            }
+            s.onActivity(act -> errRef.set(act.getWebErrorsForTest()));
+            assertTrue("Simple Mobile Write editor did not mount (state=" + editorState
+                    + ", errors=" + errRef.get() + ")",
+                    editorState != null && editorState.contains("mounted"));
+            assertTrue("Unexpected WebView errors after switching to write mode: " + errRef.get(),
                     errRef.get() == null || errRef.get().isEmpty());
         }
     }

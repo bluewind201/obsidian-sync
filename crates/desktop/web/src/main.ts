@@ -1,6 +1,11 @@
 import './styles/notion.css';
 import { api, hydrateMarkdownMediaUrls, isAndroidApp } from './api';
-import { renderPrintableHtml, renderSplitViewer, StudioEditorController } from './editor';
+import {
+  renderNoteReaderView,
+  renderPrintableHtml,
+  renderSplitViewer,
+  StudioEditorController,
+} from './editor';
 import { ForceGraphCanvas } from './graph';
 import {
   closeContextMenu,
@@ -80,8 +85,10 @@ class ObsidianSyncStudioApp {
   private dragAutoExpandTimer: number | null = null;
   private lastHoverFolderPath: string | null = null;
 
-  // Active note editing state
+  // Active note editing & reader state
   private currentDoc: NoteDocumentDto | null = null;
+  private noteInteractionMode: 'read' | 'write' = 'write';
+  private mobilePropsExpanded = false;
   private draftBody = '';
   private draftIcon: string | null = null;
   private draftCover: string | null = null;
@@ -90,7 +97,10 @@ class ObsidianSyncStudioApp {
   private autoSaveTimer: number | null = null;
   private savingPromise: Promise<void> | null = null;
 
-  // Split pane state
+  // Reader & split pane state
+  private readerCleanup: (() => void) | null = null;
+  private readerHeadingScrollers: Array<{ level: number; text: string; scrollTo: () => void }> = [];
+  private lastMobileViewport = false;
   private splitDoc: NoteDocumentDto | null = null;
   private splitViewerCleanup: (() => void) | null = null;
 
@@ -133,6 +143,10 @@ class ObsidianSyncStudioApp {
 
   private isMobileViewport(): boolean {
     return window.innerWidth <= 860;
+  }
+
+  private isMobilePreferred(): boolean {
+    return isAndroidApp() || this.isMobileViewport();
   }
 
   private isCompactPhone(): boolean {
@@ -388,9 +402,25 @@ class ObsidianSyncStudioApp {
     this.editorCtrl?.setTheme(theme);
     this.localGraphCtrl?.setTheme(theme);
     this.globalGraphCtrl?.setTheme(theme);
+    if (this.noteInteractionMode === 'read' && this.currentDoc && !this.currentDoc.locked) {
+      this.renderEditorMainArea(true);
+    }
     if (this.splitDoc) {
       this.renderSplitPane();
     }
+  }
+
+  private async setNoteInteractionMode(mode: 'read' | 'write'): Promise<void> {
+    if (this.noteInteractionMode === mode) return;
+    if (mode === 'read') {
+      await this.flushSave(false);
+    } else {
+      this.mobilePropsExpanded = false;
+    }
+    this.noteInteractionMode = mode;
+    this.mountedNotePath = null;
+    this.renderTopbar();
+    this.renderEditorMainArea(true);
   }
 
   private async persistWorkspace(patch: Partial<WorkspaceState>): Promise<void> {
@@ -458,12 +488,21 @@ class ObsidianSyncStudioApp {
 
   private setupResizeObserver(): void {
     if (typeof ResizeObserver === 'undefined') return;
+    this.lastMobileViewport = this.isMobileViewport();
     this.resizeObserver?.disconnect();
     this.resizeObserver = new ResizeObserver(() => {
       if (this.layoutRafPending) return;
       this.layoutRafPending = true;
       window.requestAnimationFrame(() => {
         this.layoutRafPending = false;
+        const nowMobile = this.isMobileViewport();
+        if (nowMobile !== this.lastMobileViewport) {
+          this.lastMobileViewport = nowMobile;
+          this.renderTopbar();
+          if (this.noteInteractionMode === 'write' && this.currentDoc && !this.currentDoc.locked) {
+            this.renderNotionHeaderZone();
+          }
+        }
         this.applyPageLayoutVariables();
       });
     });
@@ -709,6 +748,7 @@ class ObsidianSyncStudioApp {
     await this.persistWorkspace({ show_tags: next });
     this.renderSidebar();
     this.renderPropertiesRows();
+    this.renderReaderPropPills();
     this.renderTopbar();
   }
 
@@ -1665,6 +1705,7 @@ class ObsidianSyncStudioApp {
     // Right controls
     const right = document.createElement('div');
     right.className = 'topbar-right';
+    const isMobile = this.isMobileViewport();
 
     if (this.mainView === 'editor' && this.currentDoc) {
       // Save status badge
@@ -1674,117 +1715,148 @@ class ObsidianSyncStudioApp {
       right.appendChild(saveBadge);
 
       if (!this.currentDoc.locked) {
-        // Prominent Editor Mode Switcher
-        const modeGroup = document.createElement('div');
-        modeGroup.className = 'mode-switcher';
-        const wwBtn = document.createElement('button');
-        wwBtn.type = 'button';
-        wwBtn.className = `mode-btn${this.workspace.editor_mode === 'wysiwyg' ? ' active' : ''}`;
-        wwBtn.textContent = '위지윅 모드';
-        wwBtn.title = 'Notion처럼 바로 편집';
-        wwBtn.addEventListener('click', () => void this.changeEditorMode('wysiwyg'));
+        if (isMobile) {
+          // Mobile: single crisp Reader <-> Simple Write toggle button
+          const toggleModeBtn = document.createElement('button');
+          toggleModeBtn.type = 'button';
+          toggleModeBtn.setAttribute('data-mobile-mode-btn', '1');
+          if (this.noteInteractionMode === 'read') {
+            toggleModeBtn.className = 'btn btn-sm btn-primary';
+            toggleModeBtn.textContent = '✏️ 편집';
+            toggleModeBtn.title = '간편 쓰기 모드로 전환';
+            toggleModeBtn.addEventListener('click', () => void this.setNoteInteractionMode('write'));
+          } else {
+            toggleModeBtn.className = 'btn btn-sm';
+            toggleModeBtn.textContent = '👁️ 뷰어';
+            toggleModeBtn.title = '저장 후 읽기 뷰어로 전환';
+            toggleModeBtn.addEventListener('click', () => void this.setNoteInteractionMode('read'));
+          }
+          right.appendChild(toggleModeBtn);
+        } else {
+          // Desktop: Full Mode Switcher (Reader / WYSIWYG / Markdown Split)
+          const modeGroup = document.createElement('div');
+          modeGroup.className = 'mode-switcher';
 
-        const mdBtn = document.createElement('button');
-        mdBtn.type = 'button';
-        mdBtn.className = `mode-btn${this.workspace.editor_mode === 'markdown' ? ' active' : ''}`;
-        mdBtn.textContent = '마크다운 분할';
-        mdBtn.title = '좌측 마크다운 + 우측 실시간 프리뷰';
-        mdBtn.addEventListener('click', () => void this.changeEditorMode('markdown'));
+          const readBtn = document.createElement('button');
+          readBtn.type = 'button';
+          readBtn.className = `mode-btn${this.noteInteractionMode === 'read' ? ' active' : ''}`;
+          readBtn.textContent = '👁️ 뷰어';
+          readBtn.title = '깔끔한 읽기 전용 MD 뷰어';
+          readBtn.addEventListener('click', () => void this.setNoteInteractionMode('read'));
 
-        modeGroup.append(wwBtn, mdBtn);
-        right.appendChild(modeGroup);
+          const wwBtn = document.createElement('button');
+          wwBtn.type = 'button';
+          wwBtn.className = `mode-btn${this.noteInteractionMode === 'write' && this.workspace.editor_mode === 'wysiwyg' ? ' active' : ''}`;
+          wwBtn.textContent = '위지윅 모드';
+          wwBtn.title = 'Notion처럼 바로 편집';
+          wwBtn.addEventListener('click', () => void this.changeEditorMode('wysiwyg'));
 
-        // Page Setup (A4 / Margins)
-        const pageSetupBtn = document.createElement('button');
-        pageSetupBtn.type = 'button';
-        pageSetupBtn.className = `icon-btn${this.workspace.page_layout !== 'full' ? ' active' : ''}`;
-        pageSetupBtn.title = 'A4 용지 및 인쇄/PDF 여백 설정';
-        pageSetupBtn.textContent = '📐';
-        pageSetupBtn.addEventListener('click', () => this.openPageSetupDialog());
-        right.appendChild(pageSetupBtn);
+          const mdBtn = document.createElement('button');
+          mdBtn.type = 'button';
+          mdBtn.className = `mode-btn${this.noteInteractionMode === 'write' && this.workspace.editor_mode === 'markdown' ? ' active' : ''}`;
+          mdBtn.textContent = '마크다운 분할';
+          mdBtn.title = '좌측 마크다운 + 우측 실시간 프리뷰';
+          mdBtn.addEventListener('click', () => void this.changeEditorMode('markdown'));
 
-        // Print & PDF
-        const printBtn = document.createElement('button');
-        printBtn.type = 'button';
-        printBtn.className = 'icon-btn';
-        printBtn.title = '인쇄 (Ctrl+P)';
-        printBtn.textContent = '🖨️';
-        printBtn.addEventListener('click', () => void this.handlePrintNote());
-        right.appendChild(printBtn);
+          modeGroup.append(readBtn, wwBtn, mdBtn);
+          right.appendChild(modeGroup);
 
-        const pdfBtn = document.createElement('button');
-        pdfBtn.type = 'button';
-        pdfBtn.className = 'icon-btn';
-        pdfBtn.title = 'PDF 문서로 내보내기';
-        pdfBtn.textContent = '📄PDF';
-        pdfBtn.style.fontSize = '11px';
-        pdfBtn.style.fontWeight = '700';
-        pdfBtn.addEventListener('click', () => void this.handleExportPdf());
-        right.appendChild(pdfBtn);
+          // Page Setup (A4 / Margins)
+          const pageSetupBtn = document.createElement('button');
+          pageSetupBtn.type = 'button';
+          pageSetupBtn.className = `icon-btn${this.workspace.page_layout !== 'full' ? ' active' : ''}`;
+          pageSetupBtn.title = 'A4 용지 및 인쇄/PDF 여백 설정';
+          pageSetupBtn.textContent = '📐';
+          pageSetupBtn.addEventListener('click', () => this.openPageSetupDialog());
+          right.appendChild(pageSetupBtn);
+
+          // Print & PDF
+          const printBtn = document.createElement('button');
+          printBtn.type = 'button';
+          printBtn.className = 'icon-btn';
+          printBtn.title = '인쇄 (Ctrl+P)';
+          printBtn.textContent = '🖨️';
+          printBtn.addEventListener('click', () => void this.handlePrintNote());
+          right.appendChild(printBtn);
+
+          const pdfBtn = document.createElement('button');
+          pdfBtn.type = 'button';
+          pdfBtn.className = 'icon-btn';
+          pdfBtn.title = 'PDF 문서로 내보내기';
+          pdfBtn.textContent = '📄PDF';
+          pdfBtn.style.fontSize = '11px';
+          pdfBtn.style.fontWeight = '700';
+          pdfBtn.addEventListener('click', () => void this.handleExportPdf());
+          right.appendChild(pdfBtn);
+        }
       }
 
-      // Note Crypto Lock / Encrypt button
-      const cryptoBtn = document.createElement('button');
-      cryptoBtn.type = 'button';
-      cryptoBtn.className = `icon-btn${this.currentDoc.encrypted ? ' active' : ''}`;
-      cryptoBtn.title = this.currentDoc.encrypted
-        ? this.currentDoc.locked
-          ? '노트 잠김 (클릭하여 잠금 해제/관리)'
-          : '노트 암호화됨 · 세션 해제 (클릭하여 잠그기/관리)'
-        : '현재 노트 암호화';
-      cryptoBtn.textContent = this.currentDoc.encrypted
-        ? this.currentDoc.locked
-          ? '🔒'
-          : '🔓'
-        : '🔐';
-      cryptoBtn.addEventListener('click', () => void this.openNoteCryptoDialog());
-      right.appendChild(cryptoBtn);
+      if (!isMobile) {
+        // Note Crypto Lock / Encrypt button
+        const cryptoBtn = document.createElement('button');
+        cryptoBtn.type = 'button';
+        cryptoBtn.className = `icon-btn${this.currentDoc.encrypted ? ' active' : ''}`;
+        cryptoBtn.title = this.currentDoc.encrypted
+          ? this.currentDoc.locked
+            ? '노트 잠김 (클릭하여 잠금 해제/관리)'
+            : '노트 암호화됨 · 세션 해제 (클릭하여 잠그기/관리)'
+          : '현재 노트 암호화';
+        cryptoBtn.textContent = this.currentDoc.encrypted
+          ? this.currentDoc.locked
+            ? '🔒'
+            : '🔓'
+          : '🔐';
+        cryptoBtn.addEventListener('click', () => void this.openNoteCryptoDialog());
+        right.appendChild(cryptoBtn);
 
-      // Split View toggle
-      const splitBtn = document.createElement('button');
-      splitBtn.type = 'button';
-      splitBtn.className = `icon-btn${this.workspace.split_tab ? ' active' : ''}`;
-      splitBtn.title = '우측 분할 보기 토글';
-      splitBtn.textContent = '◫';
-      splitBtn.addEventListener('click', () => {
-        if (this.workspace.split_tab) {
-          void this.closeSplitNote();
-        } else {
-          const fallback =
-            this.workspace.open_tabs.find((t) => t !== this.currentDoc?.path) ||
-            this.currentDoc?.path;
-          if (fallback) void this.openSplitNote(fallback);
-        }
+        // Split View toggle
+        const splitBtn = document.createElement('button');
+        splitBtn.type = 'button';
+        splitBtn.className = `icon-btn${this.workspace.split_tab ? ' active' : ''}`;
+        splitBtn.title = '우측 분할 보기 토글';
+        splitBtn.textContent = '◫';
+        splitBtn.addEventListener('click', () => {
+          if (this.workspace.split_tab) {
+            void this.closeSplitNote();
+          } else {
+            const fallback =
+              this.workspace.open_tabs.find((t) => t !== this.currentDoc?.path) ||
+              this.currentDoc?.path;
+            if (fallback) void this.openSplitNote(fallback);
+          }
+        });
+        right.appendChild(splitBtn);
+      }
+    }
+
+    if (!isMobile) {
+      // Tag visibility toggle
+      if (this.mainView === 'editor') {
+        const tagToggleBtn = document.createElement('button');
+        tagToggleBtn.type = 'button';
+        tagToggleBtn.className = `icon-btn${this.workspace.show_tags ? ' active' : ''}`;
+        tagToggleBtn.title = this.workspace.show_tags
+          ? '태그 숨기기'
+          : '태그 보기 (사이드바 및 문서 속성)';
+        tagToggleBtn.textContent = '🏷️';
+        tagToggleBtn.addEventListener('click', () => void this.toggleShowTags());
+        right.appendChild(tagToggleBtn);
+      }
+
+      // Theme Toggle
+      const themeBtn = document.createElement('button');
+      themeBtn.type = 'button';
+      themeBtn.className = 'icon-btn';
+      themeBtn.title = '라이트 / 다크 테마 전환';
+      themeBtn.textContent = this.workspace.theme === 'dark' ? '☀️' : '🌙';
+      themeBtn.addEventListener('click', async () => {
+        const next = this.workspace.theme === 'dark' ? 'light' : 'dark';
+        this.applyTheme(next);
+        await this.persistWorkspace({ theme: next });
+        this.renderTopbar();
       });
-      right.appendChild(splitBtn);
+      right.appendChild(themeBtn);
     }
-
-    // Tag visibility toggle
-    if (this.mainView === 'editor') {
-      const tagToggleBtn = document.createElement('button');
-      tagToggleBtn.type = 'button';
-      tagToggleBtn.className = `icon-btn${this.workspace.show_tags ? ' active' : ''}`;
-      tagToggleBtn.title = this.workspace.show_tags
-        ? '태그 숨기기'
-        : '태그 보기 (사이드바 및 문서 속성)';
-      tagToggleBtn.textContent = '🏷️';
-      tagToggleBtn.addEventListener('click', () => void this.toggleShowTags());
-      right.appendChild(tagToggleBtn);
-    }
-
-    // Theme Toggle
-    const themeBtn = document.createElement('button');
-    themeBtn.type = 'button';
-    themeBtn.className = 'icon-btn';
-    themeBtn.title = '라이트 / 다크 테마 전환';
-    themeBtn.textContent = this.workspace.theme === 'dark' ? '☀️' : '🌙';
-    themeBtn.addEventListener('click', async () => {
-      const next = this.workspace.theme === 'dark' ? 'light' : 'dark';
-      this.applyTheme(next);
-      await this.persistWorkspace({ theme: next });
-      this.renderTopbar();
-    });
-    right.appendChild(themeBtn);
 
     // Inspector Toggle
     if (this.mainView === 'editor') {
@@ -1802,7 +1874,139 @@ class ObsidianSyncStudioApp {
       right.appendChild(inspBtn);
     }
 
+    if (isMobile) {
+      const moreBtn = document.createElement('button');
+      moreBtn.type = 'button';
+      moreBtn.className = 'icon-btn';
+      moreBtn.setAttribute('data-mobile-more-btn', '1');
+      moreBtn.title = '더보기 도구 (인쇄 · PDF · 여백 · 암호화 · 그래프 · 동기화)';
+      moreBtn.textContent = '⋯';
+      moreBtn.addEventListener('click', () => this.openMobileMoreMenu(moreBtn));
+      right.appendChild(moreBtn);
+    }
+
     this.topbarEl.appendChild(right);
+  }
+
+  private openMobileMoreMenu(anchorEl: HTMLElement): void {
+    const entries: ContextMenuEntry[] = [];
+    const hasUnlockedDoc = Boolean(
+      this.mainView === 'editor' && this.currentDoc && !this.currentDoc.locked
+    );
+
+    if (hasUnlockedDoc) {
+      if (this.noteInteractionMode === 'write') {
+        entries.push({
+          icon: this.workspace.editor_mode === 'wysiwyg' ? '📝' : '✨',
+          label:
+            this.workspace.editor_mode === 'wysiwyg'
+              ? '마크다운 편집으로 전환'
+              : '위지윅 편집으로 전환',
+          onClick: () =>
+            void this.changeEditorMode(
+              this.workspace.editor_mode === 'wysiwyg' ? 'markdown' : 'wysiwyg'
+            ),
+        });
+        entries.push({
+          icon: '⚙️',
+          label: this.mobilePropsExpanded ? '아이콘·속성 패널 접기' : '아이콘·커버·속성 편집',
+          onClick: () => {
+            this.mobilePropsExpanded = !this.mobilePropsExpanded;
+            this.renderNotionHeaderZone();
+          },
+        });
+      }
+      entries.push({
+        icon: '🔍',
+        label: '본문 찾기 / 바꾸기',
+        onClick: async () => {
+          if (this.noteInteractionMode !== 'write') {
+            await this.setNoteInteractionMode('write');
+          }
+          setTimeout(() => this.editorCtrl?.openFindBar(false), 30);
+        },
+      });
+      entries.push({
+        icon: '🔀',
+        label: '시각적 플로우차트 빌더…',
+        onClick: async () => {
+          if (this.noteInteractionMode !== 'write') {
+            await this.setNoteInteractionMode('write');
+          }
+          setTimeout(() => this.editorCtrl?.openFlowchartBuilderModal(), 30);
+        },
+      });
+      entries.push({ separator: true });
+      entries.push({
+        icon: '📄',
+        label: 'PDF 문서로 내보내기',
+        onClick: () => void this.handleExportPdf(),
+      });
+      entries.push({
+        icon: '🖨️',
+        label: '인쇄하기',
+        onClick: () => void this.handlePrintNote(),
+      });
+      entries.push({
+        icon: '📐',
+        label: 'A4 용지 · 여백 설정',
+        onClick: () => this.openPageSetupDialog(),
+      });
+      entries.push({
+        icon: '◫',
+        label: this.workspace.split_tab ? '우측 분할 보기 닫기' : '우측 분할 보기로 비교',
+        onClick: () => {
+          if (this.workspace.split_tab) {
+            void this.closeSplitNote();
+          } else {
+            const fallback =
+              this.workspace.open_tabs.find((t) => t !== this.currentDoc?.path) ||
+              this.currentDoc?.path;
+            if (fallback) void this.openSplitNote(fallback);
+          }
+        },
+      });
+    }
+
+    if (this.mainView === 'editor' && this.currentDoc) {
+      entries.push({
+        icon: this.currentDoc.encrypted ? (this.currentDoc.locked ? '🔓' : '🔒') : '🔐',
+        label: '노트 암호화 / 잠금 관리',
+        onClick: () => void this.openNoteCryptoDialog(),
+      });
+    }
+
+    entries.push({ separator: true });
+    if (this.mainView === 'editor') {
+      entries.push({
+        icon: '🏷️',
+        label: this.workspace.show_tags ? '태그 숨기기' : '태그 보기',
+        onClick: () => void this.toggleShowTags(),
+      });
+    }
+    entries.push({
+      icon: '🕸️',
+      label: '전체 지식 그래프 뷰',
+      onClick: () => void this.switchMainView('graph'),
+    });
+    entries.push({
+      icon: '🔄',
+      label: '실시간 동기화 센터',
+      onClick: () => void this.switchMainView('sync'),
+    });
+    entries.push({
+      icon: this.workspace.theme === 'dark' ? '☀️' : '🌙',
+      label: this.workspace.theme === 'dark' ? '라이트 테마로 전환' : '다크 테마로 전환',
+      onClick: async () => {
+        const next = this.workspace.theme === 'dark' ? 'light' : 'dark';
+        this.applyTheme(next);
+        await this.persistWorkspace({ theme: next });
+        this.renderTopbar();
+      },
+    });
+
+    const rect = anchorEl.getBoundingClientRect();
+    showContextMenu(rect.right, rect.bottom + 6, entries);
   }
 
   private applySaveBadgeContent(el: HTMLElement): void {
@@ -1830,8 +2034,18 @@ class ObsidianSyncStudioApp {
   }
 
   private async changeEditorMode(mode: 'wysiwyg' | 'markdown'): Promise<void> {
-    if (this.workspace.editor_mode === mode) return;
-    await this.persistWorkspace({ editor_mode: mode });
+    const modeChanged = this.workspace.editor_mode !== mode;
+    if (modeChanged) {
+      await this.persistWorkspace({ editor_mode: mode });
+    }
+    if (this.noteInteractionMode === 'read') {
+      this.noteInteractionMode = 'write';
+      this.mountedNotePath = null;
+      this.renderTopbar();
+      this.renderEditorMainArea(true);
+      return;
+    }
+    if (!modeChanged) return;
     this.editorCtrl?.setMode(mode);
     const col = this.editorPaneEl.querySelector('.notion-page-column');
     const mountWrap = this.editorPaneEl.querySelector('.editor-mount-wrap');
@@ -1922,7 +2136,7 @@ class ObsidianSyncStudioApp {
     }
   }
 
-  public async openNote(relPath: string): Promise<void> {
+  public async openNote(relPath: string, opts?: { forceWrite?: boolean }): Promise<void> {
     if (!this.workspace.active_vault) return;
     if (this.isMobileViewport()) {
       this.setSidebarCollapsed(true);
@@ -1930,7 +2144,11 @@ class ObsidianSyncStudioApp {
     if (this.mainView !== 'editor') {
       await this.switchMainView('editor');
     }
-    if (this.currentDoc?.path === relPath && this.mountedNotePath === relPath) {
+    if (
+      this.currentDoc?.path === relPath &&
+      !opts?.forceWrite &&
+      (this.noteInteractionMode === 'read' || this.mountedNotePath === relPath)
+    ) {
       return;
     }
 
@@ -1944,6 +2162,13 @@ class ObsidianSyncStudioApp {
       this.draftCover = doc.cover;
       this.draftProperties = doc.properties.map((p) => ({ ...p }));
       this.saveStatus = 'saved';
+      this.mobilePropsExpanded = false;
+      this.noteInteractionMode = this.isMobilePreferred()
+        ? opts?.forceWrite || !doc.body.trim()
+          ? 'write'
+          : 'read'
+        : 'write';
+      this.mountedNotePath = null;
 
       this.expandAncestorsOf(relPath);
 
@@ -2149,7 +2374,7 @@ class ObsidianSyncStudioApp {
       this.scan = res.scan;
       this.vaultRevision = res.scan.revision;
       if (folder) this.expandedFolders.add(folder);
-      await this.openNote(res.path);
+      await this.openNote(res.path, { forceWrite: true });
     } catch (err: any) {
       this.showToast(err?.message || '노트 생성 실패', true);
     }
@@ -2392,9 +2617,143 @@ class ObsidianSyncStudioApp {
     }
   }
 
+  private clearReaderState(): void {
+    this.readerCleanup?.();
+    this.readerCleanup = null;
+    this.readerHeadingScrollers = [];
+  }
+
+  private renderReaderPropPills(): void {
+    const host = this.editorPaneEl.querySelector('#reader-props-zone') as HTMLElement | null;
+    if (!host) return;
+    host.innerHTML = '';
+
+    const showTags = Boolean(this.workspace.show_tags);
+    const pills: string[] = [];
+    let hiddenTagCount = 0;
+
+    for (const p of this.draftProperties) {
+      const val = p.value.trim();
+      const isTagProp = p.prop_type === 'tags' || p.key.toLowerCase() === 'tags';
+      if (isTagProp) {
+        const tags = val
+          .split(',')
+          .map((t) => t.trim().replace(/^#+/, ''))
+          .filter(Boolean);
+        if (!showTags) {
+          hiddenTagCount += tags.length;
+          continue;
+        }
+        for (const t of tags) {
+          pills.push(`<span class="reader-prop-chip tag">#${escapeHtml(t)}</span>`);
+        }
+        continue;
+      }
+      if (!val) continue;
+      if (p.prop_type === 'checkbox') {
+        pills.push(
+          `<span class="reader-prop-chip">${escapeHtml(p.key)}: ${val === 'true' ? '☑️ 예' : '☐ 아니오'}</span>`
+        );
+      } else {
+        pills.push(
+          `<span class="reader-prop-chip">${escapeHtml(p.key)}: ${escapeHtml(val)}</span>`
+        );
+      }
+    }
+
+    if (hiddenTagCount > 0) {
+      pills.push(
+        `<button type="button" class="reader-prop-chip tag-hidden-btn" data-reader-show-tags>🏷️ 태그 ${hiddenTagCount}개 보기</button>`
+      );
+    }
+
+    host.innerHTML = pills.join('');
+    host.querySelector('[data-reader-show-tags]')?.addEventListener('click', () => {
+      void this.toggleShowTags();
+    });
+  }
+
+  private renderNoteReaderMainArea(): void {
+    if (!this.currentDoc) return;
+    this.clearReaderState();
+
+    const coverHtml = this.draftCover
+      ? `<div class="notion-cover reader-cover" style="${
+          this.draftCover.startsWith('linear-gradient') ||
+          this.draftCover.startsWith('#') ||
+          this.draftCover.startsWith('rgb')
+            ? `background: ${this.draftCover};`
+            : `background-image: url('${escapeAttr(this.draftCover)}');`
+        }"></div>`
+      : '';
+
+    this.editorPaneEl.innerHTML = `
+      <div class="note-reader-stage">
+        ${coverHtml}
+        <div class="mobile-reader-header">
+          <h1 class="mobile-reader-title">${this.draftIcon ? `<span class="mobile-reader-icon">${escapeHtml(this.draftIcon)}</span>` : ''}${escapeHtml(this.currentDoc.title)}</h1>
+          <div class="reader-prop-pills" id="reader-props-zone"></div>
+        </div>
+        <div id="reader-toc-zone"></div>
+        <div class="note-reader-body" id="note-reader-host"></div>
+        <div class="page-status-footer" id="notion-page-footer"></div>
+        <button type="button" class="mobile-edit-fab" data-reader-fab-edit title="이 노트 편집하기">✏️ 편집</button>
+      </div>
+    `;
+
+    this.renderReaderPropPills();
+
+    const readerHost = this.editorPaneEl.querySelector('#note-reader-host') as HTMLElement;
+    const handle = renderNoteReaderView({
+      container: readerHost,
+      markdown: this.draftBody,
+      vault: this.workspace.active_vault,
+      theme: this.workspace.theme,
+      onOpenWikiLink: (title) => void this.openWikiLinkByTitle(title),
+      onToggleTaskMarkdown: (nextMd) => {
+        this.draftBody = nextMd;
+        this.scheduleAutoSave();
+      },
+      onToast: (m, err) => this.showToast(m, err),
+    });
+    this.readerCleanup = handle.destroy;
+    this.readerHeadingScrollers = handle.headings;
+
+    // Collapsible Table of Contents when note has 2+ headings
+    const tocZone = this.editorPaneEl.querySelector('#reader-toc-zone') as HTMLElement | null;
+    if (tocZone && handle.headings.length >= 2) {
+      tocZone.innerHTML = `
+        <details class="reader-toc-bar">
+          <summary>📑 목차 (${handle.headings.length})</summary>
+          <div class="reader-toc-list"></div>
+        </details>
+      `;
+      const list = tocZone.querySelector('.reader-toc-list')!;
+      for (const h of handle.headings) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'reader-toc-item';
+        b.style.paddingLeft = `${8 + Math.max(0, h.level - 1) * 12}px`;
+        b.textContent = h.text;
+        b.addEventListener('click', () => {
+          h.scrollTo();
+          const det = tocZone.querySelector('details');
+          if (det && this.isMobileViewport()) det.removeAttribute('open');
+        });
+        list.appendChild(b);
+      }
+    }
+
+    this.updatePageFooterStats();
+    this.editorPaneEl.querySelector('[data-reader-fab-edit]')?.addEventListener('click', () => {
+      void this.setNoteInteractionMode('write');
+    });
+  }
+
   // ───────────────────────── Notion Page Header + Editor Rendering ─────────────────────────
   private renderEditorMainArea(remountEditor: boolean): void {
     if (!this.workspace.active_vault) {
+      this.clearReaderState();
       this.editorCtrl?.destroy();
       this.editorCtrl = null;
       this.mountedNotePath = null;
@@ -2440,6 +2799,7 @@ class ObsidianSyncStudioApp {
     }
 
     if (!this.currentDoc) {
+      this.clearReaderState();
       this.editorCtrl?.destroy();
       this.editorCtrl = null;
       this.mountedNotePath = null;
@@ -2467,6 +2827,7 @@ class ObsidianSyncStudioApp {
     }
 
     if (this.currentDoc.locked) {
+      this.clearReaderState();
       this.editorCtrl?.destroy();
       this.editorCtrl = null;
       this.mountedNotePath = null;
@@ -2530,6 +2891,16 @@ class ObsidianSyncStudioApp {
       return;
     }
 
+    if (this.noteInteractionMode === 'read') {
+      this.editorCtrl?.destroy();
+      this.editorCtrl = null;
+      this.mountedNotePath = null;
+      this.hideEditorToolbarDock();
+      this.renderNoteReaderMainArea();
+      return;
+    }
+
+    this.clearReaderState();
     const isA4 = (this.workspace.page_layout || 'a4') !== 'full';
 
     if (remountEditor || this.mountedNotePath !== this.currentDoc.path) {
@@ -2742,6 +3113,8 @@ class ObsidianSyncStudioApp {
     if (!headerZone || !this.currentDoc) return;
 
     const isFav = this.workspace.favorites.includes(this.currentDoc.path);
+    const isMobile = this.isMobileViewport();
+    const showMetaControls = !isMobile || this.mobilePropsExpanded;
 
     headerZone.innerHTML = `
       ${
@@ -2751,7 +3124,16 @@ class ObsidianSyncStudioApp {
             </div>`
           : ''
       }
-      <div class="notion-hover-controls">
+      ${
+        isMobile
+          ? `<div class="mobile-write-meta-bar">
+              <button type="button" class="ghost-action-btn${this.mobilePropsExpanded ? ' active' : ''}" data-mobile-toggle-props>
+                ⚙️ 속성 · 커버 · 아이콘 ${this.draftProperties.length ? `(${this.draftProperties.length})` : ''} ${this.mobilePropsExpanded ? '▲' : '▼'}
+              </button>
+            </div>`
+          : ''
+      }
+      <div class="notion-hover-controls" style="${showMetaControls ? '' : 'display:none;'}">
         ${!this.draftIcon ? `<button type="button" class="ghost-action-btn" data-add-icon>😀 아이콘 추가</button>` : ''}
         ${!this.draftCover ? `<button type="button" class="ghost-action-btn" data-add-cover>🖼️ 커버 추가</button>` : ''}
         <button type="button" class="ghost-action-btn" data-apply-tpl>✨ 템플릿 적용</button>
@@ -2759,8 +3141,13 @@ class ObsidianSyncStudioApp {
         <button type="button" class="ghost-action-btn" data-hover-crypto>${this.currentDoc.encrypted ? '🔓 암호화 관리' : '🔐 암호화'}</button>
       </div>
       <input type="text" class="notion-title-input" data-note-title placeholder="제목 없음" value="${escapeAttr(this.currentDoc.title)}" />
-      <div class="notion-properties" id="notion-props-zone"></div>
+      <div class="notion-properties" id="notion-props-zone" style="${showMetaControls ? '' : 'display:none;'}"></div>
     `;
+
+    headerZone.querySelector('[data-mobile-toggle-props]')?.addEventListener('click', () => {
+      this.mobilePropsExpanded = !this.mobilePropsExpanded;
+      this.renderNotionHeaderZone();
+    });
 
     headerZone.querySelector('[data-pick-icon]')?.addEventListener('click', () => this.openIconPicker());
     headerZone.querySelector('[data-add-icon]')?.addEventListener('click', () => this.openIconPicker());
@@ -3303,7 +3690,14 @@ class ObsidianSyncStudioApp {
         if (h.level === 1) btn.style.fontWeight = '700';
         btn.textContent = h.text;
         btn.addEventListener('click', () => {
-          this.editorCtrl?.scrollToHeading(h.text);
+          if (this.noteInteractionMode === 'read') {
+            const hit = this.readerHeadingScrollers.find(
+              (x) => x.text.trim() === h.text.trim()
+            );
+            hit?.scrollTo();
+          } else {
+            this.editorCtrl?.scrollToHeading(h.text);
+          }
         });
         body.appendChild(btn);
       }

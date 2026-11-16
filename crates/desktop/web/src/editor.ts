@@ -1128,6 +1128,14 @@ export class StudioEditorController {
     item.addEventListener('click', () => {
       onClick();
       this.closeToolbarPopup();
+      if (this.toolbarDockEl?.classList.contains('mobile-all-tools-open')) {
+        this.toolbarDockEl.classList.remove('mobile-all-tools-open');
+        const moreBtn = this.toolbarDockEl.querySelector('[data-mobile-more-tools]');
+        if (moreBtn) {
+          moreBtn.classList.remove('active');
+          moreBtn.textContent = '🛠️ 도구 ▾';
+        }
+      }
       this.editor?.focus();
     });
     return item;
@@ -1813,6 +1821,7 @@ export class StudioEditorController {
    * Moves TOAST UI's `.toastui-editor-toolbar` (plus its nested dropdown/popups)
    * and the inline find bar out of `#a4-paper-sheet` (`transform: scale(...)`)
    * and `#app-editor-pane` (`overflow-y: auto`) into `#app-editor-toolbar-dock`.
+   * Also attaches a minimal 1-line `.mobile-quick-toolbar` above the full drawer.
    */
   private attachToolbarToDock(theme: 'light' | 'dark'): void {
     if (!this.toolbarDockEl) return;
@@ -1821,9 +1830,12 @@ export class StudioEditorController {
     if (!toolbarEl) return;
 
     this.toolbarDockEl.innerHTML = '';
+    this.toolbarDockEl.classList.remove('mobile-all-tools-open');
     this.toolbarDockEl.classList.toggle('toastui-editor-dark', theme === 'dark');
     this.toolbarDockEl.style.display = '';
-    this.toolbarDockEl.append(toolbarEl);
+
+    const quickBar = this.buildMobileQuickToolbar();
+    this.toolbarDockEl.append(quickBar, toolbarEl);
     if (this.findBarEl) {
       this.toolbarDockEl.append(this.findBarEl);
     }
@@ -1840,6 +1852,71 @@ export class StudioEditorController {
     });
     this.docToolbarResizeBound = () => this.clampVisibleToolbarOverlays();
     window.addEventListener('resize', this.docToolbarResizeBound);
+  }
+
+  private buildMobileQuickToolbar(): HTMLElement {
+    const bar = document.createElement('div');
+    bar.className = 'mobile-quick-toolbar';
+
+    let headingStep = 0;
+    const addQ = (
+      label: string,
+      title: string,
+      onClick: (btn: HTMLButtonElement) => void,
+      extraCls = '',
+      attr?: [string, string]
+    ) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `mobile-qbtn${extraCls ? ` ${extraCls}` : ''}`;
+      btn.textContent = label;
+      btn.title = title;
+      if (attr) btn.setAttribute(attr[0], attr[1]);
+      btn.addEventListener('click', () => onClick(btn));
+      bar.appendChild(btn);
+    };
+
+    addQ('↩', '실행 취소', () => this.execHistoryStep('undo'));
+    addQ('↪', '다시 실행', () => this.execHistoryStep('redo'));
+    addQ('H', '제목 크기 순환 (H1/H2/H3/본문)', () => {
+      const levels = [1, 2, 3, 0];
+      const level = levels[headingStep % levels.length];
+      headingStep++;
+      this.execEditorCommand('heading', { level });
+    });
+    addQ('B', '굵게', () => this.execEditorCommand('bold'));
+    addQ('I', '기울임', () => this.execEditorCommand('italic'));
+    addQ('☑️', '체크리스트', () => this.execEditorCommand('task'));
+    addQ('•', '글머리 목록', () => this.execEditorCommand('bulletList'));
+    addQ('[[ ]]', '노트 링크 연결', () => {
+      this.bracketTriggeredFromTyping = false;
+      this.callbacks.onRequestWikiLinkPicker(false);
+    });
+    addQ('🔀', '플로우차트 빌더', () => this.openFlowchartBuilderModal());
+    addQ('🔍', '본문 찾기 / 바꾸기', () => {
+      if (this.findBarEl && this.findBarEl.style.display !== 'none') {
+        this.closeFindBar();
+      } else {
+        this.openFindBar(false);
+      }
+    });
+    addQ(
+      '🛠️ 도구 ▾',
+      '전체 서식 도구 펼치기 / 접기',
+      (btn) => {
+        if (!this.toolbarDockEl) return;
+        const opened = this.toolbarDockEl.classList.toggle('mobile-all-tools-open');
+        btn.classList.toggle('active', opened);
+        btn.textContent = opened ? '▲ 도구접기' : '🛠️ 도구 ▾';
+        if (opened) {
+          requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
+        }
+      },
+      'mobile-qbtn-tools',
+      ['data-mobile-more-tools', '1']
+    );
+
+    return bar;
   }
 
   /** Keeps visible `.toastui-editor-popup` dialogs within viewport and dock bounds. */
@@ -2236,7 +2313,7 @@ export class StudioEditorController {
     }
   }
 
-  private openFlowchartBuilderModal(
+  public openFlowchartBuilderModal(
     existingCode?: string,
     applyExisting?: (nextCode: string) => void
   ): void {
@@ -2889,10 +2966,212 @@ export class StudioEditorController {
     this.toolbarEl = null;
     if (this.toolbarDockEl) {
       this.toolbarDockEl.innerHTML = '';
-      this.toolbarDockEl.classList.remove('toastui-editor-dark');
+      this.toolbarDockEl.classList.remove('toastui-editor-dark', 'mobile-all-tools-open');
       this.toolbarDockEl = null;
     }
   }
+}
+
+function toggleNthTaskInMarkdown(md: string, targetIdx: number): string | null {
+  const norm = md.replace(/\r\n?/g, '\n');
+  const lines = norm.split('\n');
+  let inFence = false;
+  let fenceChar = '`';
+  let fenceLen = 3;
+  let seen = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const t = line.trim();
+    if (!inFence) {
+      const openM = /^(`{3,}|~{3,})/.exec(t);
+      if (openM) {
+        inFence = true;
+        fenceChar = openM[1][0];
+        fenceLen = openM[1].length;
+        continue;
+      }
+      const taskM = /^(\s*(?:[-*+]|\d+[.)])\s+\[)([ xX])(\].*)$/.exec(line);
+      if (taskM) {
+        if (seen === targetIdx) {
+          const nextMark = taskM[2].trim().toLowerCase() === 'x' ? ' ' : 'x';
+          lines[i] = `${taskM[1]}${nextMark}${taskM[3]}`;
+          return lines.join('\n');
+        }
+        seen++;
+      }
+    } else {
+      const closeRe = new RegExp(`^\\${fenceChar}{${fenceLen},}\\s*$`);
+      if (closeRe.test(t)) {
+        inFence = false;
+      }
+    }
+  }
+  return null;
+}
+
+function handleViewerFlowAndWikiClick(
+  ev: MouseEvent,
+  onOpenWikiLink: (title: string) => void,
+  onToast?: (msg: string, isErr?: boolean) => void
+): boolean {
+  const target = ev.target as HTMLElement | null;
+  if (!target) return false;
+
+  const flowBtn = target.closest('[data-flow-action]') as HTMLElement | null;
+  if (flowBtn) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const cardEl = flowBtn.closest('.onyx-flow-card') as HTMLElement | null;
+    if (!cardEl) return true;
+    const action = flowBtn.getAttribute('data-flow-action');
+    if (action === 'zoom-in' || action === 'zoom-out' || action === 'zoom-reset') {
+      const curZoom = Number(cardEl.getAttribute('data-flow-zoom') || '100') || 100;
+      const nextZoom =
+        action === 'zoom-reset'
+          ? 100
+          : Math.max(50, Math.min(200, curZoom + (action === 'zoom-in' ? 15 : -15)));
+      cardEl.setAttribute('data-flow-zoom', String(nextZoom));
+      const lbl = cardEl.querySelector('.onyx-flow-zoom-label');
+      if (lbl) lbl.textContent = `${nextZoom}%`;
+      const stage = cardEl.querySelector('.onyx-flow-stage') as HTMLElement | null;
+      if (stage) {
+        (stage.style as any).zoom = nextZoom === 100 ? '' : (nextZoom / 100).toFixed(2);
+      }
+    } else if (action === 'copy-img') {
+      void copyDiagramAsPngOrSvg(cardEl, onToast || (() => {}));
+    }
+    return true;
+  }
+
+  const link = target.closest('.wikilink-inline') as HTMLElement | null;
+  if (link) {
+    ev.preventDefault();
+    const note = link.getAttribute('data-wikilink');
+    if (note) onOpenWikiLink(note);
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Mounts the mobile-first / distraction-free Markdown Reader view with:
+ * - Interactive task checkboxes (`- [ ]`) syncing directly back to markdown
+ * - Flowchart / Diagram SVG zoom & PNG/SVG export
+ * - 1-tap code block copy buttons
+ * - Collapsible Heading extraction for quick Reader TOC
+ */
+export function renderNoteReaderView(params: {
+  container: HTMLElement;
+  markdown: string;
+  vault: string | null;
+  theme: 'light' | 'dark';
+  onOpenWikiLink: (title: string) => void;
+  onToggleTaskMarkdown?: (updatedMarkdown: string) => void;
+  onToast?: (msg: string, isErr?: boolean) => void;
+}): {
+  destroy: () => void;
+  headings: Array<{ level: number; text: string; scrollTo: () => void }>;
+} {
+  params.container.innerHTML = '';
+  const hydrated = hydrateMarkdownMediaUrls(params.markdown, params.vault);
+
+  const viewer = Editor.factory({
+    el: params.container,
+    viewer: true,
+    initialValue: hydrated,
+    usageStatistics: false,
+    theme: params.theme === 'dark' ? 'dark' : 'default',
+    ...({ customHTMLSanitizer: safeHtmlSanitizer } as any),
+    plugins: [
+      [codeSyntaxHighlight, { highlighter: Prism }] as any,
+      tableMergedCell as any,
+      notionRichPlugin as any,
+    ],
+  });
+
+  const contentsEl = params.container.querySelector('.toastui-editor-contents') as HTMLElement | null;
+  let liveMarkdown = params.markdown;
+  const headings: Array<{ level: number; text: string; scrollTo: () => void }> = [];
+
+  if (contentsEl) {
+    contentsEl.innerHTML = enhanceRenderedHtml(contentsEl.innerHTML);
+
+    // Stamp sequential task indices so tapping checkboxes toggles the exact markdown line
+    const taskItems = Array.from(contentsEl.querySelectorAll('li.task-list-item'));
+    taskItems.forEach((li, idx) => {
+      li.setAttribute('data-task-idx', String(idx));
+    });
+
+    // Collect headings for quick mobile TOC jump pills
+    contentsEl.querySelectorAll<HTMLElement>('h1, h2, h3').forEach((h) => {
+      const txt = (h.textContent || '').trim();
+      if (!txt) return;
+      const lvl = parseInt(h.tagName.slice(1), 10) || 1;
+      headings.push({
+        level: lvl,
+        text: txt,
+        scrollTo: () => h.scrollIntoView({ behavior: 'smooth', block: 'start' }),
+      });
+    });
+
+    // Add 1-tap copy button on standard code blocks
+    contentsEl.querySelectorAll<HTMLElement>('pre').forEach((pre) => {
+      if (pre.closest('.onyx-flow-card')) return;
+      pre.style.position = 'relative';
+      const copyBtn = document.createElement('button');
+      copyBtn.type = 'button';
+      copyBtn.className = 'reader-code-copy-btn';
+      copyBtn.textContent = '📋 복사';
+      copyBtn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const codeTxt = (pre.querySelector('code')?.textContent ?? pre.textContent ?? '').trim();
+        void navigator.clipboard
+          ?.writeText(codeTxt)
+          .then(() => params.onToast?.('코드를 복사했습니다.'))
+          .catch(() => params.onToast?.('복사에 실패했습니다.', true));
+      });
+      pre.appendChild(copyBtn);
+    });
+  }
+
+  const onClick = (ev: MouseEvent) => {
+    if (handleViewerFlowAndWikiClick(ev, params.onOpenWikiLink, params.onToast)) {
+      return;
+    }
+
+    const target = ev.target as HTMLElement | null;
+    const taskLi = target?.closest('li.task-list-item') as HTMLElement | null;
+    if (taskLi && !target?.closest('a, button, code')) {
+      const rect = taskLi.getBoundingClientRect();
+      if (ev.clientX - rect.left <= 38) {
+        const idx = Number(taskLi.getAttribute('data-task-idx'));
+        if (!Number.isNaN(idx)) {
+          const nextMd = toggleNthTaskInMarkdown(liveMarkdown, idx);
+          if (nextMd !== null) {
+            liveMarkdown = nextMd;
+            taskLi.classList.toggle('checked');
+            params.onToggleTaskMarkdown?.(nextMd);
+          }
+        }
+      }
+    }
+  };
+  params.container.addEventListener('click', onClick);
+
+  return {
+    headings,
+    destroy: () => {
+      params.container.removeEventListener('click', onClick);
+      try {
+        viewer.destroy();
+      } catch {
+        // ignore
+      }
+    },
+  };
 }
 
 /**
@@ -2928,39 +3207,7 @@ export function renderSplitViewer(params: {
   }
 
   const onClick = (ev: MouseEvent) => {
-    const target = ev.target as HTMLElement | null;
-    const flowBtn = target?.closest('[data-flow-action]') as HTMLElement | null;
-    if (flowBtn) {
-      ev.preventDefault();
-      ev.stopPropagation();
-      const cardEl = flowBtn.closest('.onyx-flow-card') as HTMLElement | null;
-      if (!cardEl) return;
-      const action = flowBtn.getAttribute('data-flow-action');
-      if (action === 'zoom-in' || action === 'zoom-out' || action === 'zoom-reset') {
-        const curZoom = Number(cardEl.getAttribute('data-flow-zoom') || '100') || 100;
-        const nextZoom =
-          action === 'zoom-reset'
-            ? 100
-            : Math.max(50, Math.min(200, curZoom + (action === 'zoom-in' ? 15 : -15)));
-        cardEl.setAttribute('data-flow-zoom', String(nextZoom));
-        const lbl = cardEl.querySelector('.onyx-flow-zoom-label');
-        if (lbl) lbl.textContent = `${nextZoom}%`;
-        const stage = cardEl.querySelector('.onyx-flow-stage') as HTMLElement | null;
-        if (stage) {
-          (stage.style as any).zoom = nextZoom === 100 ? '' : (nextZoom / 100).toFixed(2);
-        }
-      } else if (action === 'copy-img') {
-        void copyDiagramAsPngOrSvg(cardEl, () => {});
-      }
-      return;
-    }
-
-    const link = target?.closest('.wikilink-inline') as HTMLElement | null;
-    if (link) {
-      ev.preventDefault();
-      const note = link.getAttribute('data-wikilink');
-      if (note) params.onOpenWikiLink(note);
-    }
+    void handleViewerFlowAndWikiClick(ev, params.onOpenWikiLink);
   };
   params.container.addEventListener('click', onClick);
 
