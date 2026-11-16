@@ -7,6 +7,10 @@ import androidx.test.platform.app.InstrumentationRegistry;
 import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import org.json.JSONObject;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -178,5 +182,81 @@ public final class NativeSyncTest {
         JSONObject encrypted = new JSONObject(Native.studioApi("/api/crypto/encrypt_note", encBody));
         assertTrue(encrypted.toString(), encrypted.getBoolean("ok"));
         assertTrue(encrypted.getJSONObject("data").getJSONObject("doc").getBoolean("encrypted"));
+    }
+
+    private static String evalJs(
+            androidx.test.core.app.ActivityScenario<MainActivity> scenario,
+            String script) throws Exception {
+        AtomicReference<String> ref = new AtomicReference<>();
+        CountDownLatch latch = new CountDownLatch(1);
+        scenario.onActivity(act -> {
+            android.webkit.WebView wv = act.getWebViewForTest();
+            if (wv == null) {
+                ref.set("null-webview");
+                latch.countDown();
+                return;
+            }
+            wv.evaluateJavascript(script, res -> {
+                ref.set(res);
+                latch.countDown();
+            });
+        });
+        assertTrue("evaluateJavascript timed out", latch.await(10, TimeUnit.SECONDS));
+        return ref.get();
+    }
+
+    @Test public void mainActivityRendersStudioAndMountsEditor() throws Exception {
+        try (androidx.test.core.app.ActivityScenario<MainActivity> s =
+                androidx.test.core.app.ActivityScenario.launch(MainActivity.class)) {
+            String readyState = "waiting";
+            for (int i = 0; i < 75; i++) {
+                readyState = evalJs(s,
+                        "(() => {"
+                        + "const top = document.getElementById('app-topbar');"
+                        + "const hero = document.querySelector('[data-hero-sample]');"
+                        + "const title = document.querySelector('.notion-title-input');"
+                        + "const target = hero || title;"
+                        + "if (!top || !target) return 'waiting';"
+                        + "return (top.getBoundingClientRect().height > 20 && target.getBoundingClientRect().height > 20) ? 'ready' : 'sizing';"
+                        + "})()");
+                if (readyState != null && readyState.contains("ready")) {
+                    break;
+                }
+                Thread.sleep(200);
+            }
+
+            AtomicReference<List<String>> errRef = new AtomicReference<>();
+            s.onActivity(act -> errRef.set(act.getWebErrorsForTest()));
+            String bodySnippet = evalJs(s,
+                    "(() => document.body ? document.body.innerHTML.slice(0, 400) : 'no-body')()");
+            assertTrue("Studio UI did not render (state=" + readyState
+                    + ", errors=" + errRef.get() + ", body=" + bodySnippet + ")",
+                    readyState != null && readyState.contains("ready"));
+            assertTrue("Unexpected WebView errors on launch: " + errRef.get(),
+                    errRef.get() == null || errRef.get().isEmpty());
+
+            evalJs(s, "(() => { const b = document.querySelector('[data-hero-sample]'); if (b) { b.click(); return 'clicked'; } return 'already-open'; })()");
+
+            String editorState = "waiting";
+            for (int i = 0; i < 75; i++) {
+                editorState = evalJs(s,
+                        "(() => {"
+                        + "const ed = document.querySelector('.toastui-editor-defaultUI');"
+                        + "const title = document.querySelector('.notion-title-input');"
+                        + "if (!ed || !title) return 'waiting';"
+                        + "return ed.getBoundingClientRect().height > 120 ? 'mounted' : 'sizing';"
+                        + "})()");
+                if (editorState != null && editorState.contains("mounted")) {
+                    break;
+                }
+                Thread.sleep(200);
+            }
+            s.onActivity(act -> errRef.set(act.getWebErrorsForTest()));
+            assertTrue("TOAST UI editor did not mount (state=" + editorState
+                    + ", errors=" + errRef.get() + ")",
+                    editorState != null && editorState.contains("mounted"));
+            assertTrue("Unexpected WebView errors after mounting editor: " + errRef.get(),
+                    errRef.get() == null || errRef.get().isEmpty());
+        }
     }
 }

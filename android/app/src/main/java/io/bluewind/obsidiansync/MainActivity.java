@@ -6,6 +6,8 @@ import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
+import android.graphics.Color;
+import android.graphics.Insets;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -21,14 +23,20 @@ import android.print.PrintManager;
 import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
 import android.provider.Settings;
+import android.util.Log;
+import android.view.ViewGroup;
+import android.view.WindowInsets;
+import android.webkit.ConsoleMessage;
 import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.FrameLayout;
 import android.widget.Toast;
 import androidx.work.Constraints;
 import androidx.work.ExistingPeriodicWorkPolicy;
@@ -43,10 +51,12 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -67,10 +77,19 @@ public final class MainActivity extends Activity {
     private final ExecutorService bg = Executors.newCachedThreadPool();
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ConcurrentHashMap<String, String> pendingResponses = new ConcurrentHashMap<>();
+    private final CopyOnWriteArrayList<String> webErrors = new CopyOnWriteArrayList<>();
 
     static volatile boolean visible;
     private WebView webView;
     private Updater.Release availableUpdate;
+
+    WebView getWebViewForTest() {
+        return webView;
+    }
+
+    List<String> getWebErrorsForTest() {
+        return webErrors;
+    }
 
     // Pending Android Intent picker state
     private String pendingFolderCallbackId;
@@ -113,6 +132,12 @@ public final class MainActivity extends Activity {
                 Uri uri = req.getUrl();
                 if (uri != null && "https".equals(uri.getScheme())
                         && "appassets.androidplatform.net".equals(uri.getHost())) {
+                    if ("OPTIONS".equalsIgnoreCase(req.getMethod())) {
+                        return new WebResourceResponse(
+                                "text/plain", "utf-8", 200, "OK",
+                                corsHeaders("no-store"),
+                                new ByteArrayInputStream(new byte[0]));
+                    }
                     String path = uri.getPath();
                     if (path == null || path.isEmpty()) path = "/index.html";
                     if ("/vault-media".equals(path)) {
@@ -122,6 +147,30 @@ public final class MainActivity extends Activity {
                     return toWebResourceResponse(Native.studioWebAsset(path));
                 }
                 return super.shouldInterceptRequest(view, req);
+            }
+
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest req, WebResourceError err) {
+                super.onReceivedError(view, req, err);
+                Uri uri = req == null ? null : req.getUrl();
+                if (uri != null && "appassets.androidplatform.net".equals(uri.getHost())
+                        && !"/favicon.ico".equals(uri.getPath())) {
+                    String msg = "WebResourceError " + err.getErrorCode() + " (" + err.getDescription() + ") for " + uri;
+                    Log.e("ObsidianSyncWeb", msg);
+                    webErrors.add(msg);
+                }
+            }
+
+            @Override
+            public void onReceivedHttpError(WebView view, WebResourceRequest req, WebResourceResponse errResp) {
+                super.onReceivedHttpError(view, req, errResp);
+                Uri uri = req == null ? null : req.getUrl();
+                if (uri != null && "appassets.androidplatform.net".equals(uri.getHost())
+                        && !"/favicon.ico".equals(uri.getPath())) {
+                    String msg = "WebHttpError " + errResp.getStatusCode() + " for " + uri;
+                    Log.e("ObsidianSyncWeb", msg);
+                    webErrors.add(msg);
+                }
             }
 
             @Override
@@ -142,6 +191,19 @@ public final class MainActivity extends Activity {
 
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
+            public boolean onConsoleMessage(ConsoleMessage cm) {
+                if (cm != null && cm.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
+                    String src = cm.sourceId() == null ? "" : cm.sourceId();
+                    if (!src.contains("cdn.jsdelivr.net")) {
+                        String msg = src + ":" + cm.lineNumber() + " " + cm.message();
+                        Log.e("ObsidianSyncWeb", msg);
+                        webErrors.add(msg);
+                    }
+                }
+                return super.onConsoleMessage(cm);
+            }
+
+            @Override
             public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> cb, FileChooserParams params) {
                 if (webFileChooserCallback != null) {
                     webFileChooserCallback.onReceiveValue(null);
@@ -158,7 +220,20 @@ public final class MainActivity extends Activity {
             }
         });
 
-        setContentView(webView);
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(Color.WHITE);
+        root.addView(webView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+        if (Build.VERSION.SDK_INT >= 30) {
+            root.setOnApplyWindowInsetsListener((v, windowInsets) -> {
+                Insets bars = windowInsets.getInsets(
+                        WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                v.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+                return WindowInsets.CONSUMED;
+            });
+        }
+        setContentView(root);
         webView.loadUrl(APP_ORIGIN + "/index.html");
     }
 
@@ -203,10 +278,19 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private static Map<String, String> corsHeaders(String cacheControl) {
+        Map<String, String> headers = new HashMap<>();
+        headers.put("Access-Control-Allow-Origin", "*");
+        headers.put("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+        headers.put("Access-Control-Allow-Headers", "*");
+        headers.put("Cache-Control", cacheControl);
+        return headers;
+    }
+
     private static WebResourceResponse toWebResourceResponse(byte[] packed) {
         if (packed == null) {
-            return new WebResourceResponse("text/plain", "utf-8", 404, "Not Found", null,
-                    new ByteArrayInputStream(new byte[0]));
+            return new WebResourceResponse("text/plain", "utf-8", 404, "Not Found",
+                    corsHeaders("no-store"), new ByteArrayInputStream(new byte[0]));
         }
         int nl = -1;
         int limit = Math.min(packed.length, 160);
@@ -217,8 +301,8 @@ public final class MainActivity extends Activity {
             }
         }
         if (nl < 0) {
-            return new WebResourceResponse("application/octet-stream", null,
-                    new ByteArrayInputStream(packed));
+            return new WebResourceResponse("application/octet-stream", null, 200, "OK",
+                    corsHeaders("no-store"), new ByteArrayInputStream(packed));
         }
         String fullMime = new String(packed, 0, nl, StandardCharsets.UTF_8);
         String mime = fullMime;
@@ -230,9 +314,13 @@ public final class MainActivity extends Activity {
             if (rest.contains("utf-8")) encoding = "utf-8";
         }
         byte[] body = Arrays.copyOfRange(packed, nl + 1, packed.length);
-        Map<String, String> headers = new HashMap<>();
-        headers.put("Cache-Control", mime.startsWith("image/") ? "private, max-age=60" : "no-store");
-        return new WebResourceResponse(mime, encoding, 200, "OK", headers, new ByteArrayInputStream(body));
+        return new WebResourceResponse(
+                mime,
+                encoding,
+                200,
+                "OK",
+                corsHeaders(mime.startsWith("image/") ? "private, max-age=60" : "no-store"),
+                new ByteArrayInputStream(body));
     }
 
     // ─────────────────────────── JS Bridge ───────────────────────────

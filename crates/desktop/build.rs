@@ -24,7 +24,7 @@ fn mime_for(path: &str) -> &'static str {
     if lower.ends_with(".html") {
         "text/html; charset=utf-8"
     } else if lower.ends_with(".js") || lower.ends_with(".mjs") {
-        "application/javascript; charset=utf-8"
+        "text/javascript; charset=utf-8"
     } else if lower.ends_with(".css") {
         "text/css; charset=utf-8"
     } else if lower.ends_with(".svg") {

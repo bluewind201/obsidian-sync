@@ -187,6 +187,16 @@ class ObsidianSyncStudioApp {
   public async init(): Promise<void> {
     this.printRootEl = document.getElementById('print-root');
     this.buildShellDom();
+    window.setTimeout(() => {
+      if (!document.getElementById('pretendard-webfont')) {
+        const link = document.createElement('link');
+        link.id = 'pretendard-webfont';
+        link.rel = 'stylesheet';
+        link.href =
+          'https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css';
+        document.head.appendChild(link);
+      }
+    }, 350);
     this.bindGlobalShortcuts();
     this.setupResizeObserver();
     window.addEventListener('afterprint', () => {
@@ -221,9 +231,7 @@ class ObsidianSyncStudioApp {
 
       if (this.isMobileViewport()) {
         this.inspectorOpen = false;
-        if (this.workspace.active_vault) {
-          this.setSidebarCollapsed(true);
-        }
+        this.setSidebarCollapsed(true);
       }
 
       if (isAndroidApp()) {
