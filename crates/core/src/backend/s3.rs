@@ -266,6 +266,66 @@ fn md5_fallback(data: &[u8]) -> u128 {
     u128::from_be_bytes(h[..16].try_into().unwrap())
 }
 
+/// S3 `ListAllMyBucketsResult` XML 응답에서 버킷 이름 목록을 추출합니다.
+pub fn parse_bucket_list_xml(xml_text: &str) -> Result<Vec<String>> {
+    let root =
+        xml::parse(xml_text).map_err(|e| anyhow::anyhow!("버킷 목록 XML 파싱 실패: {e:#}"))?;
+    let container = root.child("ListAllMyBucketsResult").unwrap_or(&root);
+    let mut out = Vec::new();
+    if let Some(buckets) = container.child("Buckets") {
+        for b in buckets.children_named("Bucket") {
+            if let Some(name) = b
+                .text_at(&["Name"])
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                out.push(name.to_string());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// S3 호환 스토리지(네이버 클라우드 등)의 버킷 목록을 조회합니다.
+pub fn list_buckets(
+    endpoint: &str,
+    region: &str,
+    access_key: &str,
+    secret_key: &str,
+) -> Result<Vec<String>> {
+    let b = S3Backend::new(endpoint, region, "", "", access_key, secret_key);
+    let resp = http::check(b.request("GET", "", &[], b"").call())?;
+    let body = resp.into_string()?;
+    parse_bucket_list_xml(&body)
+}
+
+/// S3 호환 스토리지에 새 버킷을 생성합니다 (이미 내 소유면 그대로 성공 처리).
+pub fn create_bucket(
+    endpoint: &str,
+    region: &str,
+    bucket: &str,
+    access_key: &str,
+    secret_key: &str,
+) -> Result<()> {
+    let bucket = bucket.trim().trim_matches('/');
+    if bucket.is_empty() {
+        anyhow::bail!("생성할 버킷 이름을 입력해 주세요");
+    }
+    let b = S3Backend::new(endpoint, region, "", "", access_key, secret_key);
+    match http::check(b.request("PUT", bucket, &[], b"").call()) {
+        Ok(_) => Ok(()),
+        Err(e) if status_of(&e) == Some(409) => {
+            let msg = format!("{e:#}");
+            if msg.contains("BucketAlreadyOwnedByYou") {
+                Ok(())
+            } else {
+                anyhow::bail!("이미 존재하거나 다른 계정이 사용 중인 버킷 이름입니다: {bucket}");
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,5 +374,18 @@ mod tests {
         let now = chrono::Utc::now();
         let (url, _) = b.sign("GET", &b.key("a b.md"), &[], b"", now);
         assert_eq!(url, "https://kr.object.ncloudstorage.com/bk/vault/a%20b.md");
+    }
+
+    #[test]
+    fn parse_s3_bucket_list_xml() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+        <ListAllMyBucketsResult>
+          <Buckets>
+            <Bucket><Name>onyx-notes</Name><CreationDate>2026-11-16T00:00:00Z</CreationDate></Bucket>
+            <Bucket><Name>vault-backup</Name></Bucket>
+          </Buckets>
+        </ListAllMyBucketsResult>"#;
+        let list = parse_bucket_list_xml(xml).unwrap();
+        assert_eq!(list, vec!["onyx-notes", "vault-backup"]);
     }
 }

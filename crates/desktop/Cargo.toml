@@ -3,14 +3,14 @@ name = "obsidian-sync-desktop"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Obsidian Sync & Notion-style Markdown Studio (TOAST UI Editor + Rust Sync Engine)"
+description = "Onyx Studio — Obsidian-compatible Notion Markdown Studio, A4 PDF Print, AES-256 Encryption & Multi-Cloud Sync"
 
 [lib]
 name = "obsidian_sync_desktop"
 path = "src/lib.rs"
 
 [[bin]]
-name = "ObsidianSync"
+name = "OnyxStudio"
 path = "src/main.rs"
 
 [dependencies]

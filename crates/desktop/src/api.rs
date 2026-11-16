@@ -287,6 +287,30 @@ struct NewProfileReq {
 }
 
 #[derive(Deserialize)]
+struct DisconnectProfileReq {
+    profile_id: String,
+    #[serde(default)]
+    remove_vault: bool,
+}
+
+#[derive(Deserialize)]
+struct PrepareFolderTargetReq {
+    base_folder: String,
+    #[serde(default)]
+    subfolder: String,
+}
+
+#[derive(Deserialize)]
+struct S3ListBucketsReq {
+    endpoint: String,
+    region: String,
+    access_key: String,
+    secret_key: String,
+    #[serde(default)]
+    create_bucket: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct BackendOnlyReq {
     backend: BackendConfig,
 }
@@ -942,9 +966,57 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
         "/api/sync/save_config" => {
             let req: SaveConfigReq = parse_body(body)?;
             let mut st = state.lock().unwrap();
+            let old_profiles = st.sync.cfg.profiles.clone();
             let saved_ok = st.sync.save_config(req.cfg, req.start_after_save);
             if saved_ok {
                 let cfg_clone = st.sync.cfg.clone();
+                // 기존 동기화 프로필의 볼트 폴더가 변경되었으면 구 경로를 워크스페이스에서 정리하고 새 경로 활성화
+                for old_p in &old_profiles {
+                    if old_p.kind != ProfileKind::Obsidian || old_p.local_path.trim().is_empty() {
+                        continue;
+                    }
+                    let old_norm = old_p.local_path.trim().replace('\\', "/");
+                    if let Some(new_p) = cfg_clone.profiles.iter().find(|p| p.id == old_p.id) {
+                        let new_norm = new_p.local_path.trim().replace('\\', "/");
+                        let changed = if cfg!(windows) {
+                            !old_norm.eq_ignore_ascii_case(&new_norm)
+                        } else {
+                            old_norm != new_norm
+                        };
+                        if changed {
+                            let still_used = cfg_clone.profiles.iter().any(|p| {
+                                let pn = p.local_path.trim().replace('\\', "/");
+                                if cfg!(windows) {
+                                    pn.eq_ignore_ascii_case(&old_norm)
+                                } else {
+                                    pn == old_norm
+                                }
+                            });
+                            if st
+                                .workspace
+                                .state
+                                .active_vault
+                                .as_deref()
+                                .map(|a| {
+                                    let an = a.trim().replace('\\', "/");
+                                    if cfg!(windows) {
+                                        an.eq_ignore_ascii_case(&old_norm)
+                                    } else {
+                                        an == old_norm
+                                    }
+                                })
+                                .unwrap_or(false)
+                                && !new_p.local_path.trim().is_empty()
+                            {
+                                st.workspace.state.active_vault =
+                                    Some(new_p.local_path.trim().to_string());
+                            }
+                            if !still_used {
+                                st.workspace.state.remove_vault(&old_p.local_path);
+                            }
+                        }
+                    }
+                }
                 st.workspace.state.sync_vaults_with_config(&cfg_clone);
                 let _ = st.workspace.save_and_refresh_watcher();
             }
@@ -1087,6 +1159,67 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
             let mut st = state.lock().unwrap();
             st.sync.clear_message();
             ok_json(st.sync.snapshot())
+        }
+
+        "/api/sync/disconnect_profile" => {
+            let req: DisconnectProfileReq = parse_body(body)?;
+            let mut st = state.lock().unwrap();
+            let removed_path = st.sync.disconnect_profile(&req.profile_id)?;
+            if req.remove_vault {
+                if let Some(ref lp) = removed_path {
+                    let still_used = st
+                        .sync
+                        .cfg
+                        .profiles
+                        .iter()
+                        .any(|p| p.local_path.eq_ignore_ascii_case(lp));
+                    if !still_used {
+                        st.workspace.state.remove_vault(lp);
+                    }
+                }
+            }
+            st.workspace.save_and_refresh_watcher()?;
+            Ok(json!({
+                "sync": st.sync.snapshot(),
+                "workspace": st.workspace.state,
+            }))
+        }
+
+        "/api/sync/detect_cloud_folders" => {
+            let folders = crate::sync_controller::detect_cloud_folders();
+            Ok(json!({ "folders": folders }))
+        }
+
+        "/api/sync/prepare_folder_target" => {
+            let req: PrepareFolderTargetReq = parse_body(body)?;
+            let path =
+                crate::sync_controller::prepare_folder_target(&req.base_folder, &req.subfolder)?;
+            Ok(json!({ "path": path }))
+        }
+
+        "/api/sync/s3_list_buckets" => {
+            let req: S3ListBucketsReq = parse_body(body)?;
+            let ep = req.endpoint.trim().to_string();
+            let reg = if req.region.trim().is_empty() {
+                "kr-standard".to_string()
+            } else {
+                req.region.trim().to_string()
+            };
+            let ak = req.access_key.trim().to_string();
+            let sk = req.secret_key.trim().to_string();
+            if ep.is_empty() || ak.is_empty() || sk.is_empty() {
+                bail!("Endpoint, Access Key, Secret Key를 모두 입력해 주세요");
+            }
+            if let Some(new_bucket) = req
+                .create_bucket
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                obsidian_sync_core::backend::s3::create_bucket(&ep, &reg, new_bucket, &ak, &sk)?;
+            }
+            let buckets = obsidian_sync_core::backend::s3::list_buckets(&ep, &reg, &ak, &sk)?;
+            Ok(json!({ "buckets": buckets }))
         }
 
         other => bail!("알 수 없는 API 경로입니다: {other}"),
@@ -1378,5 +1511,108 @@ mod tests {
         assert_eq!(dv_resp["ok"], true);
         assert_eq!(dv_resp["data"]["result"]["decrypted_count"], 1);
         assert_eq!(dv_resp["data"]["scan"]["vault_has_crypto_config"], false);
+    }
+
+    #[test]
+    fn api_router_sync_folder_change_and_disconnect_work_cleanly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let vault_a = tmp.path().join("VaultA");
+        let vault_b = tmp.path().join("VaultB");
+        let cloud_base = tmp.path().join("OneDriveMock");
+        std::fs::create_dir_all(&vault_a).unwrap();
+        std::fs::create_dir_all(&vault_b).unwrap();
+        std::fs::create_dir_all(&cloud_base).unwrap();
+
+        let trigger: SharedTrigger = Arc::new(Mutex::new(None));
+        let sync = App::new(data_dir.join("config.json"), data_dir.clone(), trigger);
+        let workspace = WorkspaceManager::new(data_dir, &sync.cfg);
+        let state = Arc::new(Mutex::new(BackendState {
+            sync,
+            workspace,
+            crypto: crate::crypto::VaultCryptoSession::new(),
+            event_proxy: None,
+        }));
+
+        // 1) prepare_folder_target 검증
+        let prep_req = serde_json::to_vec(&json!({
+            "base_folder": cloud_base.to_string_lossy(),
+            "subfolder": "OnyxVault/Personal"
+        }))
+        .unwrap();
+        let prep_resp: Value = serde_json::from_slice(&handle_api(
+            &state,
+            "/api/sync/prepare_folder_target",
+            &prep_req,
+        ))
+        .unwrap();
+        assert_eq!(prep_resp["ok"], true);
+        let remote_target = prep_resp["data"]["path"].as_str().unwrap().to_string();
+        assert!(PathBuf::from(&remote_target).is_dir());
+
+        // 2) VaultA 동기화 저장 -> VaultB로 변경 저장 시 active_vault도 VaultB로 갱신됨
+        let mut cfg = AppConfig::default();
+        cfg.profiles.push(Profile {
+            id: "p1".into(),
+            name: "Obsidian".into(),
+            kind: ProfileKind::Obsidian,
+            local_path: vault_a.to_string_lossy().into(),
+            backend: BackendConfig::LocalFolder {
+                path: remote_target.clone(),
+            },
+            ..Default::default()
+        });
+        let save_a = serde_json::to_vec(&json!({ "cfg": cfg, "start_after_save": false })).unwrap();
+        let r1: Value =
+            serde_json::from_slice(&handle_api(&state, "/api/sync/save_config", &save_a)).unwrap();
+        assert_eq!(r1["ok"], true);
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .workspace
+                .state
+                .active_vault
+                .as_deref(),
+            Some(vault_a.to_string_lossy().as_ref())
+        );
+
+        cfg.profiles[0].local_path = vault_b.to_string_lossy().into();
+        let save_b = serde_json::to_vec(&json!({ "cfg": cfg, "start_after_save": false })).unwrap();
+        let r2: Value =
+            serde_json::from_slice(&handle_api(&state, "/api/sync/save_config", &save_b)).unwrap();
+        assert_eq!(r2["ok"], true);
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .workspace
+                .state
+                .active_vault
+                .as_deref(),
+            Some(vault_b.to_string_lossy().as_ref())
+        );
+
+        // 3) disconnect_profile 시 동기화 프로필 제거 및 로컬 폴더 보존
+        let disc_req = serde_json::to_vec(&json!({
+            "profile_id": "p1",
+            "remove_vault": false
+        }))
+        .unwrap();
+        let d_resp: Value = serde_json::from_slice(&handle_api(
+            &state,
+            "/api/sync/disconnect_profile",
+            &disc_req,
+        ))
+        .unwrap();
+        assert_eq!(d_resp["ok"], true);
+        assert_eq!(
+            d_resp["data"]["sync"]["cfg"]["profiles"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert!(vault_b.is_dir());
     }
 }

@@ -1,11 +1,13 @@
-# Obsidian Sync (v0.7.0) — Notion 스타일 마크다운 스튜디오 & 실시간 동기화 (Windows · Android 통합)
+# Onyx Studio (v0.8.0) — Obsidian 볼트 호환 Notion 마크다운 스튜디오 & 실시간 동기화 (Windows · Android 통합)
 
-**Obsidian 볼트 호환 지식 베이스 + 네이버(NHN) TOAST UI Editor 확장 스튜디오 + A4 인쇄/PDF + AES-256-GCM 암호화 + 6종 클라우드/NAS 실시간 동기화**를 **Windows(`ObsidianSync.exe`)와 Android(`ObsidianSync-android.apk`) 모두**에서 하나의 통합 앱으로 제공합니다.
+**Obsidian 볼트 호환 지식 베이스 + 네이버(NHN) TOAST UI Editor 확장 스튜디오(우클릭 컨텍스트 도구 포함) + A4 1.5cm 여백/경계선/PDF 출력 + AES-256-GCM 암호화 + 6종 클라우드/NAS 실시간 동기화**를 **Windows(`OnyxStudio.exe`)와 Android(`OnyxStudio-android.apk`) 모두**에서 하나의 통합 앱으로 제공합니다.
+
+> 기존 `Obsidian Sync` (`v0.7.0` 이하)에서 **`Onyx Studio` (`v0.8.0`)** 로 이름이 새롭게 변경되었습니다. 기존 설정과 동기화 상태는 첫 실행 시 자동으로 `OnyxStudio` 폴더로 마이그레이션되며, Android 앱(`io.bluewind.obsidiansync`)도 앱 내 업데이트로 바로 이어집니다.
 
 노트를 편집하고 저장하면 몇 초 안에 내 저장소(Synology NAS, OneDrive, Google Drive, 네이버 클라우드 등)로 올라가고, 다른 기기에서 바꾼 내용은 자동으로 내려받습니다.
 Obsidian 공식 제품이 아닌 개인 오픈소스 프로젝트입니다.
 
-## 주요 기능 (v0.7.0)
+## 주요 기능 (v0.8.0)
 
 ### 1. Windows · Android 동일 스튜디오 경험 (편집 + 동기화 올인원)
 - **Android 앱 전면 통합**: 기존 동기화 설정 전용 UI에서 벗어나, Android에서도 Windows와 동일한 **Notion 스타일 워크스페이스 · 50% 슬림 확장 TOAST UI 에디터(위지윅/마크다운 분할) · 그래프 뷰(터치/핀치 줌) · 암호화 · PDF 인쇄 출력 · 실시간 동기화 센터**를 그대로 사용할 수 있습니다.
@@ -54,8 +56,8 @@ Obsidian 공식 제품이 아닌 개인 오픈소스 프로젝트입니다.
 
 | 기기 | 파일 | 설치 |
 | --- | --- | --- |
-| Windows 10/11 | `ObsidianSync-windows-x64.zip` / `ObsidianSync.exe` | 압축 해제 후 `ObsidianSync.exe` 단일 파일 실행 (설치 불필요, WebView2 내장 활용) |
-| Android 11+ | `ObsidianSync-android.apk` | 파일을 열어 설치. Notion/TOAST UI 편집 스튜디오 + 상주 실시간 동기화 모두 포함, 앱 내 자동 업데이트 지원 |
+| Windows 10/11 | `OnyxStudio-windows-x64.zip` / `OnyxStudio.exe` | 압축 해제 후 `OnyxStudio.exe` 단일 파일 실행 (설치 불필요, WebView2 내장 활용) |
+| Android 11+ | `OnyxStudio-android.apk` | 파일을 열어 설치. Notion/TOAST UI 편집 스튜디오 + 상주 실시간 동기화 모두 포함, 앱 내 자동 업데이트 지원 |
 
 ## 안전장치
 - **양쪽에서 같은 노트를 고친 경우**: 기본적으로 둘 다 남깁니다 (`노트 (충돌 기기이름 날짜).md`).

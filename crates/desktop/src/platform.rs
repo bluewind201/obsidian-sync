@@ -50,7 +50,7 @@ mod imp {
     };
 
     const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-    const APP_NAME: &str = "ObsidianSync";
+    const APP_NAME: &str = "OnyxStudio";
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -80,11 +80,11 @@ mod imp {
 
     /// 이미 실행 중이면 기존 창을 앞으로 가져오고 `false` 반환
     pub fn single_instance() -> bool {
-        let name = wide("Local\\ObsidianSyncSingleInstance");
+        let name = wide("Local\\OnyxStudioSingleInstance");
         unsafe {
             let h = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
             if h.is_null() || GetLastError() == ERROR_ALREADY_EXISTS {
-                let title = wide("Obsidian Sync");
+                let title = wide("Onyx Studio");
                 let existing = FindWindowW(std::ptr::null(), title.as_ptr());
                 if !existing.is_null() {
                     show_window(existing as isize);
@@ -130,7 +130,7 @@ mod imp {
         let icon = Icon::from_rgba(super::icon_rgba(32), 32, 32).ok()?;
         TrayIconBuilder::new()
             .with_menu(Box::new(menu))
-            .with_tooltip("Obsidian Sync")
+            .with_tooltip("Onyx Studio")
             .with_icon(icon)
             .with_menu_on_left_click(false)
             .build()

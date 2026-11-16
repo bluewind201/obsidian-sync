@@ -63,10 +63,10 @@ pub fn default_margin_bottom_cm() -> f64 {
     1.0
 }
 pub fn default_margin_left_cm() -> f64 {
-    3.0
+    1.5
 }
 pub fn default_margin_right_cm() -> f64 {
-    3.0
+    1.5
 }
 pub fn default_true() -> bool {
     true
@@ -142,6 +142,8 @@ pub struct WorkspaceState {
     pub editor_zoom: u32,
     #[serde(default)]
     pub daily_folders_by_vault: HashMap<String, String>,
+    #[serde(default)]
+    pub margin_v08_migrated: bool,
 }
 
 impl Default for WorkspaceState {
@@ -171,6 +173,7 @@ impl Default for WorkspaceState {
             print_include_properties: false,
             editor_zoom: default_editor_zoom(),
             daily_folders_by_vault: HashMap::new(),
+            margin_v08_migrated: true,
         }
     }
 }
@@ -200,7 +203,16 @@ impl WorkspaceState {
     pub fn load(data_dir: &Path) -> Self {
         let p = data_dir.join("workspace_ui.json");
         if let Ok(text) = fs::read_to_string(&p) {
-            if let Ok(st) = serde_json::from_str::<Self>(&text) {
+            if let Ok(mut st) = serde_json::from_str::<Self>(&text) {
+                if !st.margin_v08_migrated {
+                    if (st.margin_left_cm - 3.0).abs() < 0.01
+                        && (st.margin_right_cm - 3.0).abs() < 0.01
+                    {
+                        st.margin_left_cm = 1.5;
+                        st.margin_right_cm = 1.5;
+                    }
+                    st.margin_v08_migrated = true;
+                }
                 return st;
             }
         }
@@ -682,6 +694,18 @@ pub struct GraphNodeDto {
     pub kind: String,
     pub group: String,
     pub degree: usize,
+    #[serde(default)]
+    pub folder: String,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub inbound_count: usize,
+    #[serde(default)]
+    pub outbound_count: usize,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub excerpt: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -2838,6 +2862,44 @@ pub fn search_vault(vault_root: &Path, query: &str) -> Result<Vec<SearchHitDto>>
 
 // ───────────────────────────── 지식 그래프 빌더 ─────────────────────────────
 
+fn make_note_excerpt(body: &str, locked: bool) -> String {
+    if locked {
+        return "🔒 암호화된 노트".into();
+    }
+    let mut cleaned = String::new();
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed == "---"
+            || trimmed.starts_with("```")
+            || trimmed.starts_with("![[")
+        {
+            continue;
+        }
+        let no_hdr = trimmed.trim_start_matches('#').trim();
+        let no_quote = no_hdr.trim_start_matches('>').trim();
+        if no_quote.is_empty() {
+            continue;
+        }
+        if !cleaned.is_empty() {
+            cleaned.push(' ');
+        }
+        cleaned.push_str(no_quote);
+        if cleaned.chars().count() >= 110 {
+            break;
+        }
+    }
+    let single_space = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let chars: Vec<char> = single_space.chars().collect();
+    if chars.len() > 110 {
+        let mut s: String = chars.into_iter().take(108).collect();
+        s.push('…');
+        s
+    } else {
+        single_space
+    }
+}
+
 pub fn build_graph_with_session(
     vault_root: &Path,
     center_path: Option<&str>,
@@ -2853,6 +2915,11 @@ pub fn build_graph_with_session(
 
     for n in &indexed {
         let id = n.rel_path.clone();
+        let folder = n
+            .rel_path
+            .rsplit_once('/')
+            .map(|(dir, _)| dir.to_string())
+            .unwrap_or_default();
         let group = n
             .rel_path
             .split_once('/')
@@ -2871,6 +2938,12 @@ pub fn build_graph_with_session(
                 kind: "note".into(),
                 group,
                 degree: 0,
+                folder,
+                icon: n.icon.clone(),
+                inbound_count: 0,
+                outbound_count: 0,
+                tags: n.tags.clone(),
+                excerpt: make_note_excerpt(&n.body, n.locked),
             },
         );
     }
@@ -2911,6 +2984,12 @@ pub fn build_graph_with_session(
                         kind: "ghost".into(),
                         group: "ghost".into(),
                         degree: 0,
+                        folder: String::new(),
+                        icon: Some("👻".into()),
+                        inbound_count: 0,
+                        outbound_count: 0,
+                        tags: Vec::new(),
+                        excerpt: "아직 생성되지 않은 연결 노트".into(),
                     });
                     ghost_id
                 }
@@ -2934,6 +3013,12 @@ pub fn build_graph_with_session(
                     kind: "tag".into(),
                     group: "tag".into(),
                     degree: 0,
+                    folder: String::new(),
+                    icon: Some("🏷️".into()),
+                    inbound_count: 0,
+                    outbound_count: 0,
+                    tags: vec![t.clone()],
+                    excerpt: String::new(),
                 });
                 if edge_set.insert((src_id.clone(), tag_id.clone())) {
                     edges.push(GraphEdgeDto {
@@ -2986,9 +3071,11 @@ pub fn build_graph_with_session(
     for e in &edges {
         if let Some(n) = nodes_map.get_mut(&e.source) {
             n.degree += 1;
+            n.outbound_count += 1;
         }
         if let Some(n) = nodes_map.get_mut(&e.target) {
             n.degree += 1;
+            n.inbound_count += 1;
         }
     }
 
@@ -3840,7 +3927,7 @@ pub fn create_sample_vault(base_dir: &Path) -> Result<PathBuf> {
         }
     };
 
-    let vault_dir = preferred_parent.join("ObsidianSyncVault");
+    let vault_dir = preferred_parent.join("OnyxVault");
     let target = if fs::create_dir_all(&vault_dir).is_ok() {
         vault_dir
     } else {
@@ -3860,7 +3947,7 @@ pub fn create_sample_vault(base_dir: &Path) -> Result<PathBuf> {
     let welcome_path = target.join("환영합니다.md");
     if !welcome_path.exists() {
         let welcome = format!(
-            "---\nicon: \"✨\"\ntags: [welcome, guide, obsidian-sync]\ndate: {today}\nstatus: 완료\n---\n# Obsidian Sync 스튜디오에 오신 것을 환영합니다!\n\n이 공간은 **Notion의 직관적인 문서 편집 경험(TOAST UI Editor WYSIWYG)**과 **Obsidian의 로컬 마크다운 & 지식 그래프**, 그리고 **Synology NAS · 클라우드 양방향 동기화**를 하나로 결합한 워크스페이스입니다.\n\n> 💡 **바로 체험해 보세요**\n> - 상단 툴바에서 **WYSIWYG / 마크다운 분할 모드**를 자유롭게 전환할 수 있습니다.\n> - 상단 속성 패널에서 **아이콘, 커버 이미지, 태그, 체크박스, 날짜 속성**을 추가해 보세요.\n> - `[[빠른 시작 가이드]]` 또는 `[[Projects/동기화 아키텍처]]` 위키링크를 클릭해 연결된 노트로 이동하고 우측 **백링크 & 그래프 뷰**를 확인해 보세요!\n\n## 핵심 기능 한눈에 보기\n\n| 기능 영역 | 지원 내용 | 호환성 |\n| --- | --- | --- |\n| 블록 & 표 편집 | TOAST UI WYSIWYG, 표(Table), 체크리스트, 코드 하이라이팅 | 순수 `.md` 100% 호환 |\n| 지식 연결 | `[[위키링크]]`, 자동 백링크, 미연결 멘션 감지, 그래프 뷰 | Obsidian 볼트 그대로 사용 |\n| 원격 동기화 | Synology NAS, 로컬/SMB 공유폴더, OneDrive, Google Drive, S3 | Windows ↔ Android 양방향 |\n\n## 오늘부터 시작하기\n- [x] 샘플 볼트 생성하기\n- [ ] 좌측 상단에서 기존 Obsidian 볼트 폴더 열기\n- [ ] 우측 상단 **동기화 설정**에서 NAS 또는 클라우드 연결하기\n"
+            "---\nicon: \"✨\"\ntags: [welcome, guide, obsidian-sync]\ndate: {today}\nstatus: 완료\n---\n# Onyx Studio에 오신 것을 환영합니다!\n\n이 공간은 **Notion의 직관적인 문서 편집 경험(TOAST UI Editor WYSIWYG)**과 **Obsidian의 로컬 마크다운 & 지식 그래프**, 그리고 **Synology NAS · 클라우드 양방향 동기화**를 하나로 결합한 워크스페이스입니다.\n\n> 💡 **바로 체험해 보세요**\n> - 상단 툴바에서 **WYSIWYG / 마크다운 분할 모드**를 자유롭게 전환할 수 있습니다.\n> - 상단 속성 패널에서 **아이콘, 커버 이미지, 태그, 체크박스, 날짜 속성**을 추가해 보세요.\n> - `[[빠른 시작 가이드]]` 또는 `[[Projects/동기화 아키텍처]]` 위키링크를 클릭해 연결된 노트로 이동하고 우측 **백링크 & 그래프 뷰**를 확인해 보세요!\n\n## 핵심 기능 한눈에 보기\n\n| 기능 영역 | 지원 내용 | 호환성 |\n| --- | --- | --- |\n| 블록 & 표 편집 | TOAST UI WYSIWYG, 표(Table), 체크리스트, 코드 하이라이팅 | 순수 `.md` 100% 호환 |\n| 지식 연결 | `[[위키링크]]`, 자동 백링크, 미연결 멘션 감지, 그래프 뷰 | Obsidian 볼트 그대로 사용 |\n| 원격 동기화 | Synology NAS, 로컬/SMB 공유폴더, OneDrive, Google Drive, S3 | Windows ↔ Android 양방향 |\n\n## 오늘부터 시작하기\n- [x] 샘플 볼트 생성하기\n- [ ] 좌측 상단에서 기존 Obsidian 볼트 폴더 열기\n- [ ] 우측 상단 **동기화 설정**에서 NAS 또는 클라우드 연결하기\n"
         );
         fs::write(&welcome_path, welcome)?;
     }
@@ -4061,6 +4148,11 @@ mod tests {
             .iter()
             .any(|n| n.kind == "tag" && n.label == "#roadmap"));
         assert_eq!(graph.edges.len(), 3);
+        let roadmap_node = graph.nodes.iter().find(|n| n.label == "로드맵").unwrap();
+        assert_eq!(roadmap_node.folder, "Docs");
+        assert_eq!(roadmap_node.icon.as_deref(), Some("🗺️"));
+        assert_eq!(roadmap_node.outbound_count, 3);
+        assert!(roadmap_node.excerpt.contains("동기화 엔진 개선"));
 
         // 휴지통 이동 -> 목록 -> 복원 -> 비우기
         delete_to_trash(vault, "Docs/로드맵.md").unwrap();
@@ -4094,8 +4186,9 @@ mod tests {
         assert_eq!(def.page_orientation, "portrait");
         assert!((def.margin_top_cm - 2.0).abs() < 1e-6);
         assert!((def.margin_bottom_cm - 1.0).abs() < 1e-6);
-        assert!((def.margin_left_cm - 3.0).abs() < 1e-6);
-        assert!((def.margin_right_cm - 3.0).abs() < 1e-6);
+        assert!((def.margin_left_cm - 1.5).abs() < 1e-6);
+        assert!((def.margin_right_cm - 1.5).abs() < 1e-6);
+        assert!(def.margin_v08_migrated);
 
         let mut ws = WorkspaceState::default();
         ws.merge_json(&serde_json::json!({
@@ -4343,5 +4436,29 @@ mod tests {
         assert!(res_img.picked);
         assert!(res_img.is_image);
         assert!(vault.join(res_img.rel_path.unwrap()).is_file());
+    }
+
+    #[test]
+    fn workspace_state_migrates_legacy_3cm_margins_to_1_5cm_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        fs::write(
+            data_dir.join("workspace_ui.json"),
+            r#"{"margin_left_cm": 3.0, "margin_right_cm": 3.0}"#,
+        )
+        .unwrap();
+        let migrated = WorkspaceState::load(data_dir);
+        assert!((migrated.margin_left_cm - 1.5).abs() < 1e-6);
+        assert!((migrated.margin_right_cm - 1.5).abs() < 1e-6);
+        assert!(migrated.margin_v08_migrated);
+        migrated.save(data_dir).unwrap();
+
+        // 사용자가 다시 커스텀 여백으로 바꾸고 저장하면 v0.8 마이그레이션이 덮어쓰지 않음
+        let mut custom = WorkspaceState::load(data_dir);
+        custom.margin_left_cm = 3.0;
+        custom.margin_right_cm = 3.0;
+        custom.save(data_dir).unwrap();
+        let reloaded = WorkspaceState::load(data_dir);
+        assert!((reloaded.margin_left_cm - 3.0).abs() < 1e-6);
     }
 }

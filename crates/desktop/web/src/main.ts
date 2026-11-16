@@ -76,6 +76,9 @@ class ObsidianSyncStudioApp {
   private localGraphDepth = 2;
   private showRawYaml = false;
   private expandedFolders = new Set<string>();
+  private suppressTreeClickOnce = false;
+  private dragAutoExpandTimer: number | null = null;
+  private lastHoverFolderPath: string | null = null;
 
   // Active note editing state
   private currentDoc: NoteDocumentDto | null = null;
@@ -99,6 +102,9 @@ class ObsidianSyncStudioApp {
   private globalGraphIncludeTags = true;
   private globalGraphLocalOnly = false;
   private globalGraphSearch = '';
+  private globalGraphLayoutMode: 'cluster' | 'radial' | 'hierarchy' = 'cluster';
+  private globalGraphHideOrphans = false;
+  private globalGraphFolderFilter = '';
   private syncCtrl: SyncCenterController | null = null;
 
   // Persistent DOM containers
@@ -452,10 +458,10 @@ class ObsidianSyncStudioApp {
     const mBottom = Number.isFinite(this.workspace.margin_bottom_cm)
       ? this.workspace.margin_bottom_cm
       : 1.0;
-    const mLeft = Number.isFinite(this.workspace.margin_left_cm) ? this.workspace.margin_left_cm : 3.0;
+    const mLeft = Number.isFinite(this.workspace.margin_left_cm) ? this.workspace.margin_left_cm : 1.5;
     const mRight = Number.isFinite(this.workspace.margin_right_cm)
       ? this.workspace.margin_right_cm
-      : 3.0;
+      : 1.5;
 
     const rootStyle = document.documentElement.style;
     rootStyle.setProperty('--page-width', `${pageWidthMm}mm`);
@@ -512,8 +518,8 @@ class ObsidianSyncStudioApp {
       page_orientation: this.workspace.page_orientation || 'portrait',
       margin_top_cm: this.workspace.margin_top_cm ?? 2.0,
       margin_bottom_cm: this.workspace.margin_bottom_cm ?? 1.0,
-      margin_left_cm: this.workspace.margin_left_cm ?? 3.0,
-      margin_right_cm: this.workspace.margin_right_cm ?? 3.0,
+      margin_left_cm: this.workspace.margin_left_cm ?? 1.5,
+      margin_right_cm: this.workspace.margin_right_cm ?? 1.5,
       auto_fit_a4: this.workspace.auto_fit_a4 ?? true,
       show_page_guides: this.workspace.show_page_guides ?? true,
       editor_zoom: this.workspace.editor_zoom ?? 100,
@@ -689,6 +695,26 @@ class ObsidianSyncStudioApp {
     await this.flushSave(false);
     this.applyPageLayoutVariables();
 
+    // @page 규칙은 CSS var()를 지원하지 않으므로 실제 cm / A4 용지 크기를 <style>로 직접 주입
+    const mTop = Number.isFinite(this.workspace.margin_top_cm) ? this.workspace.margin_top_cm : 2.0;
+    const mBot = Number.isFinite(this.workspace.margin_bottom_cm)
+      ? this.workspace.margin_bottom_cm
+      : 1.0;
+    const mLeft = Number.isFinite(this.workspace.margin_left_cm)
+      ? this.workspace.margin_left_cm
+      : 1.5;
+    const mRight = Number.isFinite(this.workspace.margin_right_cm)
+      ? this.workspace.margin_right_cm
+      : 1.5;
+    const isLand = this.workspace.page_orientation === 'landscape';
+    let pageStyleEl = document.getElementById('onyx-dynamic-page-style') as HTMLStyleElement | null;
+    if (!pageStyleEl) {
+      pageStyleEl = document.createElement('style');
+      pageStyleEl.id = 'onyx-dynamic-page-style';
+      document.head.appendChild(pageStyleEl);
+    }
+    pageStyleEl.textContent = `@page { size: ${isLand ? '297mm 210mm' : '210mm 297mm'}; margin: ${mTop}cm ${mRight}cm ${mBot}cm ${mLeft}cm; }`;
+
     const printRoot = this.printRootEl || document.getElementById('print-root');
     if (!printRoot) return false;
     this.printRootEl = printRoot;
@@ -722,6 +748,27 @@ class ObsidianSyncStudioApp {
     }
 
     printRoot.innerHTML = `${headerHtml}${bodyHtml}`;
+
+    const imgs = Array.from(printRoot.querySelectorAll('img'));
+    if (imgs.length > 0) {
+      await Promise.all(
+        imgs.map((img) => {
+          if (img.complete) return Promise.resolve();
+          return new Promise<void>((resolve) => {
+            const timer = window.setTimeout(resolve, 1500);
+            const done = () => {
+              window.clearTimeout(timer);
+              resolve();
+            };
+            img.addEventListener('load', done, { once: true });
+            img.addEventListener('error', done, { once: true });
+          });
+        })
+      );
+    }
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    );
     return true;
   }
 
@@ -732,9 +779,7 @@ class ObsidianSyncStudioApp {
     }
     const ok = await this.preparePrintDom();
     if (!ok) return;
-    requestAnimationFrame(() => {
-      window.print();
-    });
+    window.print();
   }
 
   private async handleExportPdf(): Promise<void> {
@@ -748,8 +793,8 @@ class ObsidianSyncStudioApp {
         landscape: this.workspace.page_orientation === 'landscape',
         margin_top_cm: this.workspace.margin_top_cm ?? 2.0,
         margin_bottom_cm: this.workspace.margin_bottom_cm ?? 1.0,
-        margin_left_cm: this.workspace.margin_left_cm ?? 3.0,
-        margin_right_cm: this.workspace.margin_right_cm ?? 3.0,
+        margin_left_cm: this.workspace.margin_left_cm ?? 1.5,
+        margin_right_cm: this.workspace.margin_right_cm ?? 1.5,
       });
       delegatedToSystemPrint = Boolean(res.delegated_to_system_print);
       if (res.exported && res.path) {
@@ -980,6 +1025,10 @@ class ObsidianSyncStudioApp {
         }
       );
       if (activeVaultPath) {
+        const normActive = activeVaultPath.trim().replace(/\\/g, '/').toLowerCase();
+        const linkedProf = this.syncSnap?.cfg.profiles.find(
+          (p) => p.local_path.trim().replace(/\\/g, '/').toLowerCase() === normActive
+        );
         entries.push(
           { separator: true } as any,
           {
@@ -989,6 +1038,28 @@ class ObsidianSyncStudioApp {
               void api.syncOpenPath(activeVaultPath);
             },
           },
+          ...(linkedProf
+            ? [
+                {
+                  icon: '🔌',
+                  label: '이 볼트 동기화 연결 해제',
+                  danger: true,
+                  onClick: async () => {
+                    try {
+                      const res = await api.syncDisconnectProfile(linkedProf.id, false);
+                      this.syncSnap = res.sync;
+                      this.syncCtrl?.receiveSnapshot(res.sync, true);
+                      this.updateSidebarSyncIndicators();
+                      this.showToast(
+                        '동기화 연결을 해제했습니다 (로컬 볼트 파일은 그대로 유지됩니다).'
+                      );
+                    } catch (err: any) {
+                      this.showToast(err?.message || '동기화 연결 해제 실패', true);
+                    }
+                  },
+                },
+              ]
+            : []),
           {
             icon: '✕',
             label: '목록에서 현재 볼트 닫기',
@@ -1176,6 +1247,8 @@ class ObsidianSyncStudioApp {
     const row = document.createElement('div');
     row.className = `tree-row${isActive ? ' active' : ''}`;
     row.style.paddingLeft = `${6 + depth * 14}px`;
+    row.dataset.nodePath = node.path;
+    row.dataset.nodeKind = node.kind;
 
     const displayLabel = isFolder ? node.name : stripMdExt(node.name);
     const lockPrefix = !isFolder && node.encrypted ? (node.locked ? '🔒 ' : '🔓 ') : '';
@@ -1192,6 +1265,10 @@ class ObsidianSyncStudioApp {
     `;
 
     row.addEventListener('click', () => {
+      if (this.suppressTreeClickOnce) {
+        this.suppressTreeClickOnce = false;
+        return;
+      }
       if (isFolder) {
         if (this.expandedFolders.has(node.path)) {
           this.expandedFolders.delete(node.path);
@@ -1202,6 +1279,154 @@ class ObsidianSyncStudioApp {
       } else {
         void this.openNote(node.path);
       }
+    });
+
+    row.addEventListener('pointerdown', (ev: PointerEvent) => {
+      if (ev.button !== 0 || ev.pointerType !== 'mouse') return;
+      if ((ev.target as HTMLElement | null)?.closest('button')) return;
+
+      const startX = ev.clientX;
+      const startY = ev.clientY;
+      let started = false;
+      let ghostEl: HTMLElement | null = null;
+      let activeDropEl: HTMLElement | null = null;
+      let dropTargetFolder: string | null = null;
+
+      const clearDropHighlights = () => {
+        if (activeDropEl) {
+          activeDropEl.classList.remove('drop-target-folder', 'drop-target-root');
+          activeDropEl = null;
+        }
+      };
+
+      const clearExpandTimer = () => {
+        if (this.dragAutoExpandTimer !== null) {
+          window.clearTimeout(this.dragAutoExpandTimer);
+          this.dragAutoExpandTimer = null;
+        }
+        this.lastHoverFolderPath = null;
+      };
+
+      const isInvalidTarget = (targetFolder: string): boolean => {
+        if (targetFolder === parentFolderOf(node.path)) return true;
+        if (isFolder && (targetFolder === node.path || targetFolder.startsWith(`${node.path}/`))) {
+          return true;
+        }
+        return false;
+      };
+
+      const onMove = (me: PointerEvent) => {
+        const dx = me.clientX - startX;
+        const dy = me.clientY - startY;
+        if (!started) {
+          if (Math.hypot(dx, dy) < 6) return;
+          started = true;
+          this.suppressTreeClickOnce = true;
+          row.classList.add('dragging');
+          ghostEl = document.createElement('div');
+          ghostEl.className = 'tree-drag-ghost';
+          ghostEl.textContent = `${isFolder ? '📁' : '📄'} ${displayLabel}`;
+          document.body.appendChild(ghostEl);
+        }
+
+        if (ghostEl) {
+          ghostEl.style.left = `${me.clientX + 12}px`;
+          ghostEl.style.top = `${me.clientY + 12}px`;
+        }
+
+        const hit = document.elementFromPoint(me.clientX, me.clientY) as HTMLElement | null;
+        const hitRow = hit?.closest('.tree-row[data-node-path]') as HTMLElement | null;
+        const hitTreeRoot = hit?.closest('[data-tree-root]') as HTMLElement | null;
+
+        let nextTarget: string | null = null;
+        let nextDropEl: HTMLElement | null = null;
+
+        if (hitRow) {
+          const hitPath = hitRow.dataset.nodePath || '';
+          const hitKind = hitRow.dataset.nodeKind || '';
+          if (hitKind === 'folder') {
+            nextTarget = hitPath;
+            nextDropEl = hitRow;
+            if (!this.expandedFolders.has(hitPath) && hitPath !== this.lastHoverFolderPath) {
+              clearExpandTimer();
+              this.lastHoverFolderPath = hitPath;
+              this.dragAutoExpandTimer = window.setTimeout(() => {
+                this.dragAutoExpandTimer = null;
+                this.expandedFolders.add(hitPath);
+                this.renderSidebar();
+                const draggedEl = this.sidebarEl.querySelector(
+                  `.tree-row[data-node-path="${CSS.escape(node.path)}"]`
+                );
+                draggedEl?.classList.add('dragging');
+              }, 550);
+            }
+          } else if (hitPath) {
+            clearExpandTimer();
+            nextTarget = parentFolderOf(hitPath);
+            if (nextTarget) {
+              nextDropEl = this.sidebarEl.querySelector(
+                `.tree-row[data-node-kind="folder"][data-node-path="${CSS.escape(nextTarget)}"]`
+              );
+            } else if (hitTreeRoot) {
+              nextDropEl = hitTreeRoot;
+            }
+          }
+        } else if (hitTreeRoot) {
+          clearExpandTimer();
+          nextTarget = '';
+          nextDropEl = hitTreeRoot;
+        } else {
+          clearExpandTimer();
+        }
+
+        if (nextTarget !== null && isInvalidTarget(nextTarget)) {
+          nextTarget = null;
+          nextDropEl = null;
+        }
+
+        dropTargetFolder = nextTarget;
+        if (activeDropEl !== nextDropEl) {
+          clearDropHighlights();
+          if (nextDropEl) {
+            nextDropEl.classList.add(
+              nextDropEl.hasAttribute('data-tree-root') ? 'drop-target-root' : 'drop-target-folder'
+            );
+            activeDropEl = nextDropEl;
+          }
+        }
+        if (ghostEl) {
+          ghostEl.textContent =
+            dropTargetFolder !== null
+              ? `${isFolder ? '📁' : '📄'} ${displayLabel} → ${dropTargetFolder || '루트'}`
+              : `${isFolder ? '📁' : '📄'} ${displayLabel}`;
+        }
+      };
+
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove, true);
+        window.removeEventListener('pointerup', onUp, true);
+        window.removeEventListener('pointercancel', onUp, true);
+        clearExpandTimer();
+        clearDropHighlights();
+        this.sidebarEl
+          .querySelectorAll('.tree-row.dragging')
+          .forEach((el) => el.classList.remove('dragging'));
+        ghostEl?.remove();
+        ghostEl = null;
+
+        if (started) {
+          window.setTimeout(() => {
+            this.suppressTreeClickOnce = false;
+          }, 80);
+          if (dropTargetFolder !== null) {
+            void this.executeMoveVaultItem(node.path, dropTargetFolder);
+          }
+        }
+      };
+
+      window.addEventListener('pointermove', onMove, true);
+      window.addEventListener('pointerup', onUp, true);
+      window.addEventListener('pointercancel', onUp, true);
     });
 
     row.addEventListener('contextmenu', (ev) => {
@@ -2006,22 +2231,55 @@ class ObsidianSyncStudioApp {
       currentFolder: parentFolderOf(path),
     });
     if (target === null || target === parentFolderOf(path)) return;
+    await this.executeMoveVaultItem(path, target);
+  }
+
+  private async executeMoveVaultItem(path: string, targetFolder: string): Promise<void> {
+    if (!this.workspace.active_vault || !this.scan) return;
+    if (targetFolder === parentFolderOf(path)) return;
+    if (targetFolder === path || targetFolder.startsWith(`${path}/`)) return;
 
     await this.flushSave(false);
     try {
-      const res = await api.moveItem(this.workspace.active_vault, path, target);
+      const res = await api.moveItem(this.workspace.active_vault, path, targetFolder);
       this.scan = res.scan;
       this.vaultRevision = res.scan.revision;
-      if (target) this.expandedFolders.add(target);
+      if (targetFolder) this.expandedFolders.add(targetFolder);
 
-      const openTabs = this.workspace.open_tabs.map((t) => (t === path ? res.new_path : t));
-      const activeTab =
-        this.workspace.active_tab === path ? res.new_path : this.workspace.active_tab;
-      await this.persistWorkspace({ open_tabs: openTabs, active_tab: activeTab });
+      const remap = (p: string): string => {
+        if (p === path) return res.new_path;
+        if (p.startsWith(`${path}/`)) return `${res.new_path}${p.slice(path.length)}`;
+        return p;
+      };
 
-      if (this.currentDoc?.path === path) {
-        this.currentDoc.path = res.new_path;
-        this.mountedNotePath = res.new_path;
+      const nextExpanded = new Set<string>();
+      for (const f of this.expandedFolders) {
+        nextExpanded.add(remap(f));
+      }
+      this.expandedFolders = nextExpanded;
+
+      const openTabs = this.workspace.open_tabs.map(remap);
+      const activeTab = this.workspace.active_tab ? remap(this.workspace.active_tab) : null;
+      const splitTab = this.workspace.split_tab ? remap(this.workspace.split_tab) : null;
+      const favorites = this.workspace.favorites.map(remap);
+      const recentNotes = this.workspace.recent_notes.map(remap);
+
+      await this.persistWorkspace({
+        open_tabs: openTabs,
+        active_tab: activeTab,
+        split_tab: splitTab,
+        favorites,
+        recent_notes: recentNotes,
+      });
+
+      if (this.currentDoc) {
+        this.currentDoc.path = remap(this.currentDoc.path);
+      }
+      if (this.mountedNotePath) {
+        this.mountedNotePath = remap(this.mountedNotePath);
+      }
+      if (this.splitDoc) {
+        this.splitDoc.path = remap(this.splitDoc.path);
       }
       this.renderChrome();
       this.showToast(`이동 완료: ${res.new_path}`);
@@ -2036,10 +2294,45 @@ class ObsidianSyncStudioApp {
       const res = await api.deleteItem(this.workspace.active_vault, path);
       this.scan = res.scan;
       this.vaultRevision = res.scan.revision;
-      if (this.workspace.open_tabs.includes(path)) {
-        await this.closeTab(path);
+
+      const matches = (p: string) => p === path || p.startsWith(`${path}/`);
+      const nextTabs = this.workspace.open_tabs.filter((t) => !matches(t));
+      const nextFavs = this.workspace.favorites.filter((f) => !matches(f));
+      const nextRecents = this.workspace.recent_notes.filter((r) => !matches(r));
+      const nextSplit =
+        this.workspace.split_tab && matches(this.workspace.split_tab)
+          ? null
+          : this.workspace.split_tab;
+
+      if (this.currentDoc && matches(this.currentDoc.path)) {
+        const nextActive = nextTabs[0] || null;
+        await this.persistWorkspace({
+          open_tabs: nextTabs,
+          active_tab: nextActive,
+          favorites: nextFavs,
+          recent_notes: nextRecents,
+          split_tab: nextSplit,
+        });
+        if (nextActive) {
+          await this.openNote(nextActive);
+        } else {
+          this.currentDoc = null;
+          this.mountedNotePath = null;
+          this.editorCtrl?.destroy();
+          this.editorCtrl = null;
+          this.renderChrome();
+          this.renderEditorMainArea(true);
+          this.renderInspector();
+        }
       } else {
+        await this.persistWorkspace({
+          open_tabs: nextTabs,
+          favorites: nextFavs,
+          recent_notes: nextRecents,
+          split_tab: nextSplit,
+        });
         this.renderSidebar();
+        this.renderTabsStrip();
       }
       this.showToast(`휴지통(.trash)으로 이동했습니다: ${path}`);
     } catch (err: any) {
@@ -2070,7 +2363,7 @@ class ObsidianSyncStudioApp {
       this.editorPaneEl.innerHTML = `
         <div class="empty-vault-hero">
           <div style="font-size:48px;margin-bottom:10px;">📓</div>
-          <h2 style="margin:0 0 8px;font-size:22px;">Obsidian Sync Studio에 오신 것을 환영합니다</h2>
+          <h2 style="margin:0 0 8px;font-size:22px;">Onyx Studio에 오신 것을 환영합니다</h2>
           <p style="color:var(--text-secondary);font-size:14px;margin:0 0 22px;line-height:1.6;">
             노션처럼 직관적인 위지윅 편집기, 마크다운 실시간 분할 프리뷰, 위키링크 &amp; 그래프 뷰,
             그리고 6종 클라우드/NAS 실시간 동기화를 한 곳에서 사용하세요.
@@ -2201,8 +2494,8 @@ class ObsidianSyncStudioApp {
       const orientText = this.workspace.page_orientation === 'landscape' ? 'A4 가로' : 'A4 세로';
       const mTop = this.workspace.margin_top_cm ?? 2.0;
       const mBot = this.workspace.margin_bottom_cm ?? 1.0;
-      const mLeft = this.workspace.margin_left_cm ?? 3.0;
-      const mRight = this.workspace.margin_right_cm ?? 3.0;
+      const mLeft = this.workspace.margin_left_cm ?? 1.5;
+      const mRight = this.workspace.margin_right_cm ?? 1.5;
       const zoom = this.workspace.editor_zoom ?? 100;
 
       const innerDocHtml = `
@@ -2236,7 +2529,9 @@ class ObsidianSyncStudioApp {
               <button type="button" class="mini-icon-btn" data-ruler-toggle-a4 style="width:auto;padding:0 6px;font-size:11px;">📄 A4 용지 보기</button>
             </div>
           </div>
-          ${innerDocHtml}
+          <div class="notion-full-stage${this.workspace.show_page_guides !== false ? ' show-page-guides' : ''}">
+            ${innerDocHtml}
+          </div>
         `;
       }
 
@@ -3038,14 +3333,36 @@ class ObsidianSyncStudioApp {
       return;
     }
 
+    const folders = this.scan ? collectFoldersFromTree(this.scan.tree) : [];
+    const folderOptionsHtml = [
+      `<option value="">전체 폴더</option>`,
+      `<option value="__root__" ${this.globalGraphFolderFilter === '__root__' ? 'selected' : ''}>📄 루트 노트만</option>`,
+      ...folders.map(
+        (f) =>
+          `<option value="${escapeAttr(f)}" ${this.globalGraphFolderFilter === f ? 'selected' : ''}>📁 ${escapeHtml(f)}</option>`
+      ),
+    ].join('');
+
     this.graphViewWrapEl.innerHTML = `
       <div style="width:100%;height:100%;" id="global-graph-canvas-wrap"></div>
       <div class="graph-controls-panel">
-        <div style="display:flex;align-items:center;justify-content:space-between;">
-          <span style="font-weight:700;font-size:14px;">🕸️ 지식 그래프 필터</span>
-          <button type="button" class="btn btn-sm" data-graph-reset>초기화</button>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+          <span style="font-weight:700;font-size:14px;">🕸️ 지식 그래프 탐색</span>
+          <button type="button" class="btn btn-sm" data-graph-reset>⊡ 화면 맞춤</button>
+        </div>
+        <div class="graph-mode-tabs">
+          <button type="button" class="graph-mode-tab${this.globalGraphLayoutMode === 'cluster' ? ' active' : ''}" data-graph-mode="cluster">🫧 클러스터</button>
+          <button type="button" class="graph-mode-tab${this.globalGraphLayoutMode === 'radial' ? ' active' : ''}" data-graph-mode="radial">🎯 방사형</button>
+          <button type="button" class="graph-mode-tab${this.globalGraphLayoutMode === 'hierarchy' ? ' active' : ''}" data-graph-mode="hierarchy">🌿 계층도</button>
         </div>
         <input type="text" class="text-input" data-graph-search placeholder="노드 이름 검색 하이라이트…" value="${escapeAttr(this.globalGraphSearch)}" />
+        <select class="text-input" data-graph-folder style="padding:5px 8px;font-size:12.5px;">
+          ${folderOptionsHtml}
+        </select>
+        <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;cursor:pointer;">
+          <input type="checkbox" data-graph-orphans ${this.globalGraphHideOrphans ? 'checked' : ''} />
+          고립 노트(연결 0) 숨기기
+        </label>
         <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;cursor:pointer;">
           <input type="checkbox" data-graph-tags ${this.globalGraphIncludeTags ? 'checked' : ''} />
           #태그 노드 함께 표시
@@ -3056,15 +3373,122 @@ class ObsidianSyncStudioApp {
         </label>
         <button type="button" class="btn btn-primary btn-sm" data-back-editor>← 노트 편집기로 돌아가기</button>
       </div>
+      <div class="graph-detail-card" id="graph-detail-card" style="display:none;"></div>
       <div class="graph-legend">
-        <span><span class="status-dot" style="background:#2383e2;"></span> 노트</span>
+        <span><span class="status-dot" style="background:#2383e2;"></span> 노트(폴더별)</span>
         <span><span class="status-dot" style="background:#e03e3e;"></span> 현재 노트</span>
+        <span><span class="status-dot" style="background:#3b82f6;"></span> 나가는 링크</span>
+        <span><span class="status-dot" style="background:#10b981;"></span> 들어오는 백링크</span>
         <span><span class="status-dot" style="background:#0f7b6c;"></span> 태그</span>
-        <span><span class="status-dot" style="background:#9b9a97;"></span> 미생성 링크</span>
+        <span><span class="status-dot" style="background:#9b9a97;"></span> 미생성</span>
       </div>
     `;
 
     const canvasHost = this.graphViewWrapEl.querySelector('#global-graph-canvas-wrap') as HTMLElement;
+    const detailCardEl = this.graphViewWrapEl.querySelector('#graph-detail-card') as HTMLElement;
+
+    const renderDetailCard = (
+      node: import('./types').GraphNodeDto | null,
+      connections: {
+        inbound: import('./types').GraphNodeDto[];
+        outbound: import('./types').GraphNodeDto[];
+      }
+    ) => {
+      if (!node) {
+        detailCardEl.style.display = 'none';
+        detailCardEl.innerHTML = '';
+        return;
+      }
+      detailCardEl.style.display = 'flex';
+      const badge =
+        node.kind === 'note'
+          ? `📁 ${escapeHtml(node.folder || '루트 노트')}`
+          : node.kind === 'tag'
+            ? '🏷️ 태그'
+            : '👻 미생성 링크';
+      const actionLabel =
+        node.kind === 'note'
+          ? '📄 이 노트 열기'
+          : node.kind === 'ghost'
+            ? '✨ 새 노트로 생성'
+            : '🔍 이 태그 검색';
+
+      const makeChips = (list: import('./types').GraphNodeDto[], arrow: string) =>
+        list.length === 0
+          ? '<span style="color:var(--text-muted);font-size:11.5px;">없음</span>'
+          : list
+              .slice(0, 12)
+              .map(
+                (c) =>
+                  `<button type="button" class="graph-conn-chip" data-focus-node="${escapeAttr(c.id)}">${arrow} ${escapeHtml(c.label)}</button>`
+              )
+              .join('');
+
+      detailCardEl.innerHTML = `
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;">
+          <div>
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:2px;">${badge}</div>
+            <div style="font-weight:700;font-size:14.5px;line-height:1.3;">${
+              node.icon ? `${escapeHtml(node.icon)} ` : ''
+            }${escapeHtml(node.label)}</div>
+          </div>
+          <button type="button" class="mini-icon-btn" data-detail-close title="닫기">✕</button>
+        </div>
+        ${
+          node.excerpt
+            ? `<div style="font-size:12px;color:var(--text-secondary);line-height:1.45;background:var(--bg-inset);padding:7px 9px;border-radius:7px;">${escapeHtml(node.excerpt)}</div>`
+            : ''
+        }
+        ${
+          node.tags && node.tags.length > 0
+            ? `<div style="display:flex;flex-wrap:wrap;gap:4px;">${node.tags
+                .map((t) => `<span class="pill-badge">#${escapeHtml(t)}</span>`)
+                .join('')}</div>`
+            : ''
+        }
+        <div style="font-size:11.5px;color:var(--text-muted);">
+          들어오는 백링크 <strong>${connections.inbound.length}</strong> · 나가는 링크 <strong>${connections.outbound.length}</strong> (더블클릭으로 열기)
+        </div>
+        <div>
+          <div style="font-size:11px;font-weight:700;color:#3b82f6;margin-bottom:4px;">나가는 연결 (→)</div>
+          <div style="display:flex;flex-wrap:wrap;gap:4px;">${makeChips(connections.outbound, '→')}</div>
+        </div>
+        <div>
+          <div style="font-size:11px;font-weight:700;color:#10b981;margin-bottom:4px;">들어오는 백링크 (←)</div>
+          <div style="display:flex;flex-wrap:wrap;gap:4px;">${makeChips(connections.inbound, '←')}</div>
+        </div>
+        <button type="button" class="btn btn-primary btn-sm" data-open-selected style="margin-top:4px;">${actionLabel}</button>
+      `;
+
+      detailCardEl.querySelector('[data-detail-close]')?.addEventListener('click', () => {
+        this.globalGraphCtrl?.selectNodeById(null);
+      });
+      detailCardEl.querySelectorAll('[data-focus-node]').forEach((el) => {
+        el.addEventListener('click', () => {
+          const id = el.getAttribute('data-focus-node');
+          if (id) this.globalGraphCtrl?.selectNodeById(id);
+        });
+      });
+      detailCardEl.querySelector('[data-open-selected]')?.addEventListener('click', () => {
+        if (node.kind === 'note' && node.path) {
+          void this.openNote(node.path);
+        } else if (node.kind === 'tag') {
+          this.openCommandPalette(`tag:${node.label}`);
+        } else if (node.kind === 'ghost') {
+          void this.openWikiLinkByTitle(node.label);
+        }
+      });
+    };
+
+    const openGraphNode = (node: import('./types').GraphNodeDto) => {
+      if (node.kind === 'note' && node.path) {
+        void this.openNote(node.path);
+      } else if (node.kind === 'tag') {
+        this.openCommandPalette(`tag:${node.label}`);
+      } else if (node.kind === 'ghost') {
+        void this.openWikiLinkByTitle(node.label);
+      }
+    };
 
     const loadGraph = async () => {
       if (!this.workspace.active_vault) return;
@@ -3081,20 +3505,40 @@ class ObsidianSyncStudioApp {
           centerPath: this.currentDoc?.path,
           theme: this.workspace.theme,
           searchQuery: this.globalGraphSearch,
-          onNodeClick: (node) => {
-            if (node.kind === 'note' && node.path) {
-              void this.openNote(node.path);
-            } else if (node.kind === 'tag') {
-              this.openCommandPalette(`tag:${node.label}`);
-            } else if (node.kind === 'ghost') {
-              void this.openWikiLinkByTitle(node.label);
-            }
-          },
+          layoutMode: this.globalGraphLayoutMode,
+          hideOrphans: this.globalGraphHideOrphans,
+          folderFilter: this.globalGraphFolderFilter,
+          onNodeSelect: renderDetailCard,
+          onNodeOpen: openGraphNode,
         });
       }
     };
 
     await loadGraph();
+
+    this.graphViewWrapEl.querySelectorAll('[data-graph-mode]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const m = btn.getAttribute('data-graph-mode') as 'cluster' | 'radial' | 'hierarchy';
+        if (!m) return;
+        this.globalGraphLayoutMode = m;
+        this.graphViewWrapEl
+          .querySelectorAll('[data-graph-mode]')
+          .forEach((b) => b.classList.toggle('active', b === btn));
+        this.globalGraphCtrl?.setLayoutMode(m);
+      });
+    });
+
+    const folderSel = this.graphViewWrapEl.querySelector('[data-graph-folder]') as HTMLSelectElement;
+    folderSel?.addEventListener('change', () => {
+      this.globalGraphFolderFilter = folderSel.value;
+      this.globalGraphCtrl?.setFolderFilter(this.globalGraphFolderFilter);
+    });
+
+    const orphanChk = this.graphViewWrapEl.querySelector('[data-graph-orphans]') as HTMLInputElement;
+    orphanChk?.addEventListener('change', () => {
+      this.globalGraphHideOrphans = orphanChk.checked;
+      this.globalGraphCtrl?.setHideOrphans(this.globalGraphHideOrphans);
+    });
 
     const searchIn = this.graphViewWrapEl.querySelector('[data-graph-search]') as HTMLInputElement;
     searchIn.addEventListener('input', () => {
@@ -3133,6 +3577,7 @@ class ObsidianSyncStudioApp {
         onOpenVaultInEditor: async (vaultPath) => {
           await this.selectVaultPath(vaultPath);
         },
+        onGetActiveVault: () => this.workspace?.active_vault || null,
         onToast: (msg, err) => this.showToast(msg, err),
       });
     } else {

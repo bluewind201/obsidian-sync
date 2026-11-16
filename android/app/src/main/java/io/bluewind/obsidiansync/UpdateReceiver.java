@@ -22,7 +22,7 @@ public final class UpdateReceiver extends BroadcastReceiver {
                     try { c.startActivity(confirm); return; } catch (RuntimeException ignored) { }
                 }
                 PendingIntent tap = PendingIntent.getActivity(c, 0, confirm, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-                Updater.notify(c, "Obsidian Sync 새 버전", "눌러서 업데이트를 설치하세요", tap);
+                Updater.notify(c, "Onyx Studio 새 버전", "눌러서 업데이트를 설치하세요", tap);
                 return;
             }
             case PackageInstaller.STATUS_SUCCESS:
@@ -35,7 +35,7 @@ public final class UpdateReceiver extends BroadcastReceiver {
             case PackageInstaller.STATUS_FAILURE_INCOMPATIBLE: {
                 String m = "새 버전의 서명이 지금 앱과 달라 업데이트할 수 없습니다. 앱을 한 번 지우고 새 버전을 설치해 주세요.";
                 Updater.setMessage(c, m);
-                Updater.notify(c, "Obsidian Sync 업데이트 실패", m, null);
+                Updater.notify(c, "Onyx Studio 업데이트 실패", m, null);
                 return;
             }
             default: {

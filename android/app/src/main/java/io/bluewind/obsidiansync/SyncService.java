@@ -58,7 +58,7 @@ public final class SyncService extends Service {
                 this, 1, new Intent(this, SyncService.class).setAction(STOP), PendingIntent.FLAG_IMMUTABLE);
         return new Notification.Builder(this, "sync")
                 .setSmallIcon(R.drawable.ic_stat_sync)
-                .setContentTitle("Obsidian 실시간 동기화")
+                .setContentTitle("Onyx Studio 실시간 동기화")
                 .setContentText(text)
                 .setContentIntent(open)
                 .setOngoing(true)

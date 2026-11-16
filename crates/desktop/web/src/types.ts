@@ -161,6 +161,19 @@ export interface GraphNodeDto {
   kind: 'note' | 'ghost' | 'tag';
   group: string;
   degree: number;
+  folder?: string;
+  icon?: string | null;
+  inbound_count?: number;
+  outbound_count?: number;
+  tags?: string[];
+  excerpt?: string;
+}
+
+export interface DetectedCloudFolderDto {
+  provider: string;
+  label: string;
+  path: string;
+  has_onyx_vault: boolean;
 }
 
 export interface GraphEdgeDto {

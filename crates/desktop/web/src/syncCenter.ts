@@ -3,6 +3,7 @@ import type {
   AndroidAppInfoDto,
   AppConfig,
   BackendConfig,
+  DetectedCloudFolderDto,
   BackendKind,
   ConflictPolicy,
   Profile,
@@ -78,14 +79,14 @@ function createDefaultBackend(kind: BackendKind): BackendConfig {
         type: 'one_drive',
         client_id: '',
         tenant: 'common',
-        folder: 'ObsidianSync',
+        folder: 'OnyxVault',
       };
     case 'google_drive':
       return {
         type: 'google_drive',
         client_id: '',
         client_secret: '',
-        folder: 'ObsidianSync',
+        folder: 'OnyxVault',
       };
     case 'local_folder':
       return {
@@ -201,6 +202,7 @@ function deepClone<T>(obj: T): T {
 export interface SyncCenterCallbacks {
   onSnapshotUpdated: (snap: SyncSnapshotDto) => void;
   onOpenVaultInEditor: (vaultPath: string) => void;
+  onGetActiveVault?: () => string | null;
   onToast: (msg: string, isError?: boolean) => void;
 }
 
@@ -216,7 +218,13 @@ export class SyncCenterController {
   private selectedIdx = 0;
   private showSecret = false;
   private confirmDeleteProfile = false;
+  private confirmDisconnectHomeId: string | null = null;
   private advancedOpen = false;
+  private pickerBusy = false;
+  private detectedClouds: DetectedCloudFolderDto[] = [];
+  private cloudsLoaded = false;
+  private oauthApiExpanded = false;
+  private s3BucketsCache = new Map<string, string[]>();
   private otpInputValue = '';
   private nasNewFolderName = '';
   private nasOtpValue = '';
@@ -272,7 +280,8 @@ export class SyncCenterController {
     this.snapshot = snap;
     this.callbacks.onSnapshotUpdated(snap);
 
-    if (forceSyncDraft || !wasDirty) {
+    // 설정 화면에서 사용자가 폴더를 고르거나 편집 중일 때는 백그라운드 폴링이 draftCfg를 덮어쓰지 못하게 보호
+    if (forceSyncDraft || (!wasDirty && !this.pickerBusy && this.subTab !== 'settings')) {
       this.draftCfg = deepClone(snap.cfg);
       this.ignoreTexts.clear();
       this.syncIgnoreMapFromDraft();
@@ -290,7 +299,7 @@ export class SyncCenterController {
       autostart: snap.autostart,
     });
 
-    if (this.subTab === 'home' || this.subTab === 'logs' || forceSyncDraft) {
+    if (forceSyncDraft || ((this.subTab === 'home' || this.subTab === 'logs') && !this.pickerBusy)) {
       this.lastLiveSignature = sig;
       this.renderFull();
     } else if (sig !== this.lastLiveSignature) {
@@ -316,11 +325,11 @@ export class SyncCenterController {
     header.innerHTML = `
       <div>
         <div style="display:flex;align-items:center;gap:10px;">
-          <span style="font-size:22px;font-weight:800;">🔄 실시간 동기화 센터</span>
-          <span class="pill-badge">v${escapeHtml(this.snapshot.version || '0.5.0')}</span>
+          <span style="font-size:22px;font-weight:800;">🔄 Onyx 동기화 센터</span>
+          <span class="pill-badge">v${escapeHtml(this.snapshot.version || '0.8.0')}</span>
         </div>
         <div style="font-size:13px;color:var(--text-secondary);margin-top:2px;">
-          Obsidian 볼트 및 일반 폴더를 Synology NAS, OneDrive, Google Drive, 네이버 클라우드/GCS, 공유 폴더와 실시간 동기화합니다.
+          내 Obsidian 볼트를 Synology NAS, 클라우드 드라이브(OneDrive · Google Drive · 네이버 MYBOX/클라우드), 공유 폴더와 실시간 동기화합니다.
         </div>
       </div>
       <div style="display:flex;gap:6px;">
@@ -534,10 +543,9 @@ export class SyncCenterController {
     profCard.className = 'sync-card';
     profCard.innerHTML = `
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
-        <span style="font-weight:700;font-size:15px;">동기화 폴더 (${this.draftCfg.profiles.length})</span>
+        <span style="font-weight:700;font-size:15px;">연결된 Obsidian 볼트 (${this.draftCfg.profiles.length})</span>
         <div style="display:flex;gap:6px;">
-          <button type="button" class="btn btn-sm" data-add-obs>＋ Obsidian 볼트</button>
-          <button type="button" class="btn btn-sm" data-add-folder>＋ 일반 폴더</button>
+          <button type="button" class="btn btn-sm" data-add-obs>＋ Obsidian 볼트 추가</button>
         </div>
       </div>
       <div data-prof-list></div>
@@ -546,9 +554,6 @@ export class SyncCenterController {
 
     profCard.querySelector('[data-add-obs]')?.addEventListener('click', () => {
       void this.handleCreateProfile('obsidian');
-    });
-    profCard.querySelector('[data-add-folder]')?.addEventListener('click', () => {
-      void this.handleCreateProfile('folder');
     });
 
     const listEl = profCard.querySelector('[data-prof-list]')!;
@@ -585,7 +590,7 @@ export class SyncCenterController {
               <span class="status-dot ${dotClass}"></span>
               <span style="font-weight:700;font-size:14px;">${escapeHtml(profileDisplayName(p))}</span>
               <span style="font-size:12px;color:var(--text-muted);">
-                ${p.kind === 'obsidian' ? 'Obsidian' : '폴더'} · ${syncModeLabel(p.mode)}
+                ${'Obsidian'} · ${syncModeLabel(p.mode)}
               </span>
             </div>
             <div style="display:flex;gap:6px;" data-row-btns></div>
@@ -624,7 +629,7 @@ export class SyncCenterController {
         const cfgBtn = document.createElement('button');
         cfgBtn.type = 'button';
         cfgBtn.className = 'btn btn-sm';
-        cfgBtn.textContent = '설정';
+        cfgBtn.textContent = '변경 / 설정';
         cfgBtn.addEventListener('click', () => {
           this.selectedIdx = idx;
           this.confirmDeleteProfile = false;
@@ -632,6 +637,55 @@ export class SyncCenterController {
           this.renderFull();
         });
         btns.appendChild(cfgBtn);
+
+        const discBtn = document.createElement('button');
+        discBtn.type = 'button';
+        discBtn.className = 'btn btn-sm btn-danger';
+        discBtn.textContent = '연결 해제';
+        discBtn.addEventListener('click', () => {
+          this.confirmDisconnectHomeId = this.confirmDisconnectHomeId === p.id ? null : p.id;
+          this.renderFull();
+        });
+        btns.appendChild(discBtn);
+
+        if (this.confirmDisconnectHomeId === p.id) {
+          const confirmBar = document.createElement('div');
+          confirmBar.style.cssText =
+            'margin-top:8px;padding:8px 10px;border-radius:7px;background:var(--danger-bg);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;';
+          confirmBar.innerHTML = `
+            <span style="font-size:12px;color:var(--danger);font-weight:600;">동기화 연결만 해제합니다 (로컬 .md 파일은 그대로 유지됩니다).</span>
+            <div style="display:flex;gap:6px;">
+              <button type="button" class="btn btn-sm btn-danger" data-home-disc-keep>연결만 해제</button>
+              <button type="button" class="btn btn-sm btn-danger" data-home-disc-close>연결 해제 + 볼트 닫기</button>
+              <button type="button" class="btn btn-sm" data-home-disc-cancel>취소</button>
+            </div>
+          `;
+          confirmBar.querySelector('[data-home-disc-keep]')?.addEventListener('click', async () => {
+            try {
+              const res = await api.syncDisconnectProfile(p.id, false);
+              this.confirmDisconnectHomeId = null;
+              this.receiveSnapshot(res.sync, true);
+              this.callbacks.onToast('동기화 연결을 해제했습니다.');
+            } catch (err: any) {
+              this.callbacks.onToast(err?.message || '연결 해제 실패', true);
+            }
+          });
+          confirmBar.querySelector('[data-home-disc-close]')?.addEventListener('click', async () => {
+            try {
+              const res = await api.syncDisconnectProfile(p.id, true);
+              this.confirmDisconnectHomeId = null;
+              this.receiveSnapshot(res.sync, true);
+              this.callbacks.onToast('동기화 연결을 해제하고 볼트 목록에서도 닫았습니다.');
+            } catch (err: any) {
+              this.callbacks.onToast(err?.message || '연결 해제 실패', true);
+            }
+          });
+          confirmBar.querySelector('[data-home-disc-cancel]')?.addEventListener('click', () => {
+            this.confirmDisconnectHomeId = null;
+            this.renderFull();
+          });
+          item.appendChild(confirmBar);
+        }
 
         listEl.appendChild(item);
       });
@@ -708,9 +762,9 @@ export class SyncCenterController {
     const selectorCard = document.createElement('div');
     selectorCard.className = 'sync-card';
     selectorCard.innerHTML = `
-      <div style="font-weight:700;font-size:15px;">동기화 프로필</div>
+      <div style="font-weight:700;font-size:15px;">Obsidian 볼트 동기화 프로필</div>
       <div style="font-size:12.5px;color:var(--text-secondary);margin-top:2px;">
-        프로필 하나가 '내 PC 폴더 ↔ 저장소 폴더' 1:1 연결입니다. Obsidian 볼트, 사진 폴더 등을 따로 만들 수 있습니다.
+        프로필 하나가 '내 Obsidian 볼트 폴더 ↔ 저장소 폴더' 1:1 연결입니다. 폴더 변경 또는 연결 해제를 자유롭게 수행할 수 있습니다.
       </div>
       <div class="profile-pills-bar" data-pills></div>
     `;
@@ -732,19 +786,32 @@ export class SyncCenterController {
       pillsBar.appendChild(btn);
     });
 
+    const refreshClouds = () => {
+      if (this.cloudsLoaded) return;
+      this.cloudsLoaded = true;
+      void api
+        .syncDetectCloudFolders()
+        .then((res) => {
+          this.detectedClouds = res.folders || [];
+          if (this.subTab === 'settings' && !this.pickerBusy) {
+            const fieldsZone = this.container.querySelector('[data-backend-fields]') as HTMLElement | null;
+            const prof = this.draftCfg.profiles[this.selectedIdx];
+            if (fieldsZone && prof) {
+              this.populateBackendFields(fieldsZone, prof);
+            }
+          }
+        })
+        .catch(() => {});
+    };
+    refreshClouds();
+
     const addObsBtn = document.createElement('button');
     addObsBtn.type = 'button';
     addObsBtn.className = 'btn btn-sm';
-    addObsBtn.textContent = '＋ Obsidian 볼트';
+    addObsBtn.textContent = '＋ Obsidian 볼트 추가';
     addObsBtn.addEventListener('click', () => void this.handleCreateProfile('obsidian'));
 
-    const addFolBtn = document.createElement('button');
-    addFolBtn.type = 'button';
-    addFolBtn.className = 'btn btn-sm';
-    addFolBtn.textContent = '＋ 일반 폴더 (사진 등)';
-    addFolBtn.addEventListener('click', () => void this.handleCreateProfile('folder'));
-
-    pillsBar.append(addObsBtn, addFolBtn);
+    pillsBar.append(addObsBtn);
     host.appendChild(selectorCard);
 
     if (this.draftCfg.profiles.length === 0) {
@@ -789,36 +856,30 @@ export class SyncCenterController {
       (x) => x.id === p.id
     );
 
-    // ① 이름과 종류
+    p.kind = 'obsidian';
+    // ① 이름
     const step1 = document.createElement('div');
     step1.className = 'sync-card';
     const step1Done = Boolean(p.name.trim());
     step1.innerHTML = `
       <div class="step-header">
         <span class="step-num ${step1Done ? 'done' : ''}">${step1Done ? '✓' : '1'}</span>
-        <span style="font-weight:700;font-size:15px;">이름과 종류</span>
+        <span style="font-weight:700;font-size:15px;">Obsidian 볼트 프로필</span>
       </div>
       <div class="form-grid">
-        <div class="form-label">프로필 이름</div>
+        <div class="form-label">볼트 이름</div>
         <div>
-          <input type="text" class="text-input" data-p-name placeholder="예: Obsidian, 사진" value="${escapeAttr(p.name)}" />
+          <input type="text" class="text-input" data-p-name placeholder="예: 내 업무 볼트, 개인 노트" value="${escapeAttr(p.name)}" />
         </div>
-        <div class="form-label">종류</div>
-        <div style="display:flex;gap:16px;flex-wrap:wrap;">
-          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-            <input type="radio" name="p_kind_${escapeAttr(p.id)}" value="obsidian" ${p.kind === 'obsidian' ? 'checked' : ''} />
-            Obsidian 볼트
-          </label>
-          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-            <input type="radio" name="p_kind_${escapeAttr(p.id)}" value="folder" ${p.kind === 'folder' ? 'checked' : ''} />
-            일반 폴더 (사진·문서 등)
-          </label>
+        <div class="form-label">동기화 대상</div>
+        <div style="font-size:12.5px;color:var(--text-secondary);">
+          <span class="pill-badge">Obsidian 볼트 (.md · .obsidian)</span>
         </div>
         <div class="form-label">활성화</div>
         <div>
           <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;">
             <input type="checkbox" data-p-enabled ${p.enabled ? 'checked' : ''} />
-            이 프로필 동기화하기
+            이 볼트 실시간 동기화 사용
           </label>
         </div>
       </div>
@@ -828,12 +889,6 @@ export class SyncCenterController {
       p.name = nameInput.value;
       this.refreshSaveBarOnly();
     });
-    step1.querySelectorAll(`input[name="p_kind_${p.id}"]`).forEach((radio) => {
-      radio.addEventListener('change', (ev) => {
-        p.kind = (ev.target as HTMLInputElement).value as ProfileKind;
-        this.renderFull();
-      });
-    });
     const enabledChk = step1.querySelector('[data-p-enabled]') as HTMLInputElement;
     enabledChk.addEventListener('change', () => {
       p.enabled = enabledChk.checked;
@@ -841,46 +896,84 @@ export class SyncCenterController {
     });
     host.appendChild(step1);
 
-    // ② 내 PC 폴더
+    // ② 내 PC / 기기 볼트 폴더
     const step2 = document.createElement('div');
     step2.className = 'sync-card';
     const step2Done = Boolean(p.local_path.trim());
+    const savedProf = this.snapshot.saved.profiles.find((sp) => sp.id === p.id);
+    const activeVault = this.callbacks.onGetActiveVault?.() || null;
+    const folderChanged = Boolean(
+      savedProf &&
+        savedProf.local_path.trim() &&
+        savedProf.local_path.trim() !== p.local_path.trim()
+    );
     step2.innerHTML = `
       <div class="step-header">
         <span class="step-num ${step2Done ? 'done' : ''}">${step2Done ? '✓' : '2'}</span>
-        <span style="font-weight:700;font-size:15px;">내 PC 폴더</span>
+        <span style="font-weight:700;font-size:15px;">내 PC 볼트 폴더</span>
       </div>
       <div style="font-size:12.5px;color:var(--text-secondary);margin-bottom:8px;">
+        동기화할 Obsidian 볼트 폴더를 고르세요. <code>.obsidian</code> 폴더가 들어 있거나 새 기기라면 빈 폴더를 선택해도 됩니다.
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <input type="text" class="text-input" style="flex:1;min-width:220px;" data-local-path placeholder="C:\\Users\\나\\Documents\\OnyxVault" value="${escapeAttr(p.local_path)}" />
+        <button type="button" class="btn" data-pick-local>📂 볼트 폴더 변경…</button>
         ${
-          p.kind === 'obsidian'
-            ? 'Obsidian 볼트(보관함) 폴더를 고르세요. .obsidian 폴더가 들어 있는 폴더입니다. (새 기기라면 빈 폴더여도 괜찮습니다.)'
-            : '동기화할 폴더를 고르세요 (예: 사진, 문서 폴더).'
+          activeVault && activeVault.trim() !== p.local_path.trim()
+            ? `<button type="button" class="btn btn-sm" data-use-active-vault>📌 현재 열린 볼트 지정</button>`
+            : ''
         }
       </div>
-      <div style="display:flex;gap:8px;">
-        <input type="text" class="text-input" data-local-path placeholder="${
-          p.kind === 'obsidian' ? 'C:\\Users\\나\\Documents\\MyVault' : 'C:\\Users\\나\\Pictures'
-        }" value="${escapeAttr(p.local_path)}" />
-        <button type="button" class="btn" data-pick-local>폴더 선택…</button>
-      </div>
+      ${
+        folderChanged
+          ? `<div style="margin-top:8px;padding:8px 10px;border-radius:7px;background:rgba(35,131,226,0.08);border:1px solid var(--accent);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;font-size:12px;">
+              <span>🔁 폴더가 변경되었습니다 (이전: <code>${escapeHtml(savedProf!.local_path)}</code>)</span>
+              <button type="button" class="btn btn-sm btn-primary" data-apply-folder-now>💾 폴더 변경 지금 적용</button>
+            </div>`
+          : ''
+      }
     `;
     const localInput = step2.querySelector('[data-local-path]') as HTMLInputElement;
     localInput.addEventListener('input', () => {
       p.local_path = localInput.value;
       this.refreshSaveBarOnly();
     });
+    const profId = p.id;
     step2.querySelector('[data-pick-local]')?.addEventListener('click', async () => {
+      this.pickerBusy = true;
       try {
         const res = await api.syncPickFolder();
         if (res.path) {
-          p.local_path = res.path;
-          if (!p.name.trim() || p.name === '새 폴더') {
-            p.name = res.path.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || p.name;
+          const target = this.draftCfg.profiles.find((x) => x.id === profId);
+          if (target) {
+            target.local_path = res.path;
+            if (!target.name.trim() || target.name === '새 폴더' || target.name === 'Obsidian') {
+              target.name = res.path.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || target.name;
+            }
+            this.renderFull();
           }
-          this.renderFull();
         }
       } catch (err: any) {
         this.callbacks.onToast(err?.message || '폴더 선택 실패', true);
+      } finally {
+        this.pickerBusy = false;
+      }
+    });
+    step2.querySelector('[data-use-active-vault]')?.addEventListener('click', () => {
+      if (!activeVault) return;
+      p.local_path = activeVault;
+      if (!p.name.trim() || p.name === '새 폴더') {
+        p.name = activeVault.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || p.name;
+      }
+      this.renderFull();
+    });
+    step2.querySelector('[data-apply-folder-now]')?.addEventListener('click', async () => {
+      try {
+        const snap = await api.syncSaveConfig(this.draftCfg, true);
+        this.receiveSnapshot(snap, true);
+        this.callbacks.onToast('새 동기화 폴더로 변경·적용했습니다.');
+      } catch (err: any) {
+        this.callbacks.onToast(err?.message || '폴더 변경 저장 실패', true);
       }
     });
     host.appendChild(step2);
@@ -1104,7 +1197,7 @@ export class SyncCenterController {
       const delBtn = document.createElement('button');
       delBtn.type = 'button';
       delBtn.className = 'btn btn-sm btn-danger';
-      delBtn.textContent = '프로필 삭제';
+      delBtn.textContent = '🔌 이 볼트 연결 해제';
       delBtn.addEventListener('click', () => {
         this.confirmDeleteProfile = true;
         this.renderFull();
@@ -1112,17 +1205,50 @@ export class SyncCenterController {
       delZone.appendChild(delBtn);
     } else {
       delZone.innerHTML = `
-        <span style="font-size:12.5px;color:var(--danger);">프로필을 지울까요? (실제 파일은 지워지지 않습니다)</span>
-        <button type="button" class="btn btn-sm btn-danger" data-confirm-del>삭제</button>
+        <span style="font-size:12.5px;color:var(--danger);">동기화 연결을 즉시 해제할까요? (로컬 .md 파일은 삭제되지 않습니다)</span>
+        <button type="button" class="btn btn-sm btn-danger" data-confirm-disc-keep>연결만 해제 (볼트 유지)</button>
+        <button type="button" class="btn btn-sm btn-danger" data-confirm-disc-close>해제 + 볼트 목록 닫기</button>
         <button type="button" class="btn btn-sm" data-cancel-del>취소</button>
       `;
-      delZone.querySelector('[data-confirm-del]')?.addEventListener('click', () => {
-        this.draftCfg.profiles.splice(this.selectedIdx, 1);
-        this.ignoreTexts.delete(p.id);
-        this.confirmDeleteProfile = false;
-        this.selectedIdx = Math.max(0, this.selectedIdx - 1);
-        this.callbacks.onToast("프로필을 목록에서 지웠습니다. '저장'을 눌러야 반영됩니다.");
-        this.renderFull();
+      delZone.querySelector('[data-confirm-disc-keep]')?.addEventListener('click', async () => {
+        try {
+          const isSaved = this.snapshot.saved.profiles.some((sp) => sp.id === p.id);
+          if (isSaved) {
+            const res = await api.syncDisconnectProfile(p.id, false);
+            this.confirmDeleteProfile = false;
+            this.selectedIdx = Math.max(0, this.selectedIdx - 1);
+            this.receiveSnapshot(res.sync, true);
+          } else {
+            this.draftCfg.profiles.splice(this.selectedIdx, 1);
+            this.ignoreTexts.delete(p.id);
+            this.confirmDeleteProfile = false;
+            this.selectedIdx = Math.max(0, this.selectedIdx - 1);
+            this.renderFull();
+          }
+          this.callbacks.onToast('동기화 연결을 해제했습니다.');
+        } catch (err: any) {
+          this.callbacks.onToast(err?.message || '연결 해제 실패', true);
+        }
+      });
+      delZone.querySelector('[data-confirm-disc-close]')?.addEventListener('click', async () => {
+        try {
+          const isSaved = this.snapshot.saved.profiles.some((sp) => sp.id === p.id);
+          if (isSaved) {
+            const res = await api.syncDisconnectProfile(p.id, true);
+            this.confirmDeleteProfile = false;
+            this.selectedIdx = Math.max(0, this.selectedIdx - 1);
+            this.receiveSnapshot(res.sync, true);
+          } else {
+            this.draftCfg.profiles.splice(this.selectedIdx, 1);
+            this.ignoreTexts.delete(p.id);
+            this.confirmDeleteProfile = false;
+            this.selectedIdx = Math.max(0, this.selectedIdx - 1);
+            this.renderFull();
+          }
+          this.callbacks.onToast('동기화 연결을 해제하고 볼트 목록에서도 닫았습니다.');
+        } catch (err: any) {
+          this.callbacks.onToast(err?.message || '연결 해제 실패', true);
+        }
       });
       delZone.querySelector('[data-cancel-del]')?.addEventListener('click', () => {
         this.confirmDeleteProfile = false;
@@ -1196,49 +1322,146 @@ export class SyncCenterController {
         }
       });
     } else if (b.type === 'local_folder') {
+      const vaultSubName =
+        (profileDisplayName(p) || 'MyVault').replace(/[\\/:*?"<>|]/g, '-').trim() || 'MyVault';
+      const cloudChipsHtml =
+        this.detectedClouds.length > 0
+          ? `<div class="cloud-quick-card" style="margin-bottom:10px;">
+              <div style="font-weight:700;font-size:12.5px;">⚡ 감지된 PC 클라우드 / 드라이브 폴더 (API 키 없이 1클릭 연결)</div>
+              <div style="display:flex;flex-wrap:wrap;gap:6px;">
+                ${this.detectedClouds
+                  .map(
+                    (c, i) =>
+                      `<button type="button" class="btn btn-sm" data-cloud-quick-idx="${i}">☁️ ${escapeHtml(c.label)}</button>`
+                  )
+                  .join('')}
+              </div>
+              <div style="font-size:11.5px;color:var(--text-muted);">
+                클라우드를 클릭하면 해당 드라이브 안에 <code>OnyxVault/${escapeHtml(vaultSubName)}</code> 폴더를 자동 준비하여 즉시 연결합니다.
+              </div>
+            </div>`
+          : '';
       container.innerHTML = `
+        ${cloudChipsHtml}
         <div class="form-grid">
           <div class="form-label">저장 위치</div>
           <div style="display:flex;gap:8px;">
-            <input type="text" class="text-input" data-lf-path placeholder="\\\\NAS\\home\\Obsidian 또는 Z:\\Obsidian" value="${escapeAttr(b.path)}" />
+            <input type="text" class="text-input" data-lf-path placeholder="\\\\NAS\\home\\Obsidian 또는 OneDrive\\OnyxVault" value="${escapeAttr(b.path)}" />
             <button type="button" class="btn" data-lf-pick>폴더 선택…</button>
           </div>
         </div>
       `;
+      container.querySelectorAll('[data-cloud-quick-idx]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const idx = Number(btn.getAttribute('data-cloud-quick-idx'));
+          const cloud = this.detectedClouds[idx];
+          if (!cloud) return;
+          try {
+            const prep = await api.syncPrepareFolderTarget(
+              cloud.path,
+              `OnyxVault/${vaultSubName}`
+            );
+            b.path = prep.path;
+            this.callbacks.onToast(`${cloud.label} 동기화 폴더를 준비했습니다: ${prep.path}`);
+            this.renderFull();
+          } catch (err: any) {
+            this.callbacks.onToast(err?.message || '클라우드 폴더 생성 실패', true);
+          }
+        });
+      });
       const pathIn = container.querySelector('[data-lf-path]') as HTMLInputElement;
       pathIn.addEventListener('input', () => {
         b.path = pathIn.value;
         this.refreshSaveBarOnly();
       });
+      const profId = p.id;
       container.querySelector('[data-lf-pick]')?.addEventListener('click', async () => {
-        const res = await api.syncPickFolder();
-        if (res.path) {
-          b.path = res.path;
-          this.renderFull();
+        this.pickerBusy = true;
+        try {
+          const res = await api.syncPickFolder();
+          if (res.path) {
+            const prof = this.draftCfg.profiles.find((x) => x.id === profId);
+            if (prof && prof.backend.type === 'local_folder') {
+              prof.backend.path = res.path;
+              this.renderFull();
+            }
+          }
+        } finally {
+          this.pickerBusy = false;
         }
       });
     } else if (b.type === 's3') {
+      const vaultSubName =
+        (profileDisplayName(p) || 'MyVault').replace(/[\\/:*?"<>|]/g, '-').trim() || 'MyVault';
+      const mybox = this.detectedClouds.find((c) => c.provider === 'naver_mybox');
+      const cacheKey = `${b.endpoint}|${b.region}|${b.access_key}`;
+      const cachedBuckets = this.s3BucketsCache.get(cacheKey) || [];
       container.innerHTML = `
-        <div style="display:flex;gap:6px;margin-bottom:10px;align-items:center;">
+        ${
+          mybox
+            ? `<div class="cloud-quick-card" style="margin-bottom:10px;border-color:#03c75a;background:rgba(3,199,90,0.08);">
+                <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+                  <div>
+                    <div style="font-weight:700;font-size:12.5px;">🟢 네이버 MYBOX PC 폴더 발견 (${escapeHtml(mybox.label)})</div>
+                    <div style="font-size:11.5px;color:var(--text-secondary);">복잡한 S3 API 키 없이 MYBOX 폴더로 1클릭 자동 동기화할 수 있습니다.</div>
+                  </div>
+                  <button type="button" class="btn btn-sm btn-primary" data-mybox-quick>⚡ MYBOX 간편 연결</button>
+                </div>
+              </div>`
+            : ''
+        }
+        <div style="display:flex;gap:6px;margin-bottom:10px;align-items:center;flex-wrap:wrap;">
           <span style="font-size:12px;color:var(--text-muted);">빠른 프리셋:</span>
-          <button type="button" class="btn btn-sm" data-preset-ncp>네이버 클라우드</button>
+          <button type="button" class="btn btn-sm" data-preset-ncp>네이버 클라우드 Object Storage</button>
           <button type="button" class="btn btn-sm" data-preset-gcs>Google Cloud Storage</button>
         </div>
         <div class="form-grid">
+          <div class="form-label">Access Key</div>
+          <input type="text" class="text-input" data-s3-ak placeholder="네이버 클라우드 인증키 관리에서 발급한 Access Key" value="${escapeAttr(b.access_key)}" />
+          <div class="form-label">Secret Key</div>
+          <input type="${pwType}" class="text-input" data-s3-sk placeholder="Secret Key" value="${escapeAttr(b.secret_key)}" />
+          <div class="form-label">버킷 선택 / 생성</div>
+          <div style="display:flex;flex-direction:column;gap:6px;">
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">
+              <input type="text" class="text-input" style="flex:1;min-width:140px;" data-s3-bucket placeholder="my-obsidian-vault" value="${escapeAttr(b.bucket)}" />
+              <button type="button" class="btn btn-sm" data-s3-load-buckets>🔄 내 버킷 불러오기</button>
+              <button type="button" class="btn btn-sm" data-s3-create-bucket>＋ 새 버킷 생성</button>
+            </div>
+            ${
+              cachedBuckets.length > 0
+                ? `<select class="text-input" data-s3-bucket-select>
+                    <option value="">-- 조회된 버킷에서 고르기 (${cachedBuckets.length}개) --</option>
+                    ${cachedBuckets
+                      .map(
+                        (bk) =>
+                          `<option value="${escapeAttr(bk)}" ${bk === b.bucket ? 'selected' : ''}>🪣 ${escapeHtml(bk)}</option>`
+                      )
+                      .join('')}
+                  </select>`
+                : ''
+            }
+          </div>
           <div class="form-label">엔드포인트</div>
           <input type="text" class="text-input" data-s3-ep placeholder="https://kr.object.ncloudstorage.com" value="${escapeAttr(b.endpoint)}" />
           <div class="form-label">리전</div>
           <input type="text" class="text-input" data-s3-reg placeholder="kr-standard" value="${escapeAttr(b.region)}" />
-          <div class="form-label">버킷 이름</div>
-          <input type="text" class="text-input" data-s3-bucket placeholder="my-obsidian" value="${escapeAttr(b.bucket)}" />
           <div class="form-label">저장 폴더(Prefix)</div>
           <input type="text" class="text-input" data-s3-prefix placeholder="obsidian" value="${escapeAttr(b.prefix)}" />
-          <div class="form-label">Access Key</div>
-          <input type="text" class="text-input" data-s3-ak value="${escapeAttr(b.access_key)}" />
-          <div class="form-label">Secret Key</div>
-          <input type="${pwType}" class="text-input" data-s3-sk value="${escapeAttr(b.secret_key)}" />
         </div>
       `;
+      container.querySelector('[data-mybox-quick]')?.addEventListener('click', async () => {
+        if (!mybox) return;
+        try {
+          const prep = await api.syncPrepareFolderTarget(mybox.path, `OnyxVault/${vaultSubName}`);
+          const nextBackend: BackendConfig = { type: 'local_folder', path: prep.path };
+          p.backend = nextBackend;
+          this.backendCache.set(`${p.id}:local_folder`, nextBackend);
+          this.callbacks.onToast(`네이버 MYBOX 폴더로 연결했습니다: ${prep.path}`);
+          this.renderFull();
+        } catch (err: any) {
+          this.callbacks.onToast(err?.message || 'MYBOX 연결 실패', true);
+        }
+      });
       container.querySelector('[data-preset-ncp]')?.addEventListener('click', () => {
         b.endpoint = 'https://kr.object.ncloudstorage.com';
         b.region = 'kr-standard';
@@ -1248,6 +1471,53 @@ export class SyncCenterController {
         b.endpoint = 'https://storage.googleapis.com';
         b.region = 'auto';
         this.renderFull();
+      });
+      container.querySelector('[data-s3-load-buckets]')?.addEventListener('click', async () => {
+        try {
+          const res = await api.syncS3ListBuckets({
+            endpoint: b.endpoint,
+            region: b.region,
+            access_key: b.access_key,
+            secret_key: b.secret_key,
+          });
+          this.s3BucketsCache.set(`${b.endpoint}|${b.region}|${b.access_key}`, res.buckets || []);
+          if (!b.bucket && res.buckets.length > 0) {
+            b.bucket = res.buckets[0];
+          }
+          this.callbacks.onToast(`버킷 ${res.buckets.length}개를 불러왔습니다.`);
+          this.renderFull();
+        } catch (err: any) {
+          this.callbacks.onToast(err?.message || '버킷 목록 조회 실패 (키/엔드포인트 확인)', true);
+        }
+      });
+      container.querySelector('[data-s3-create-bucket]')?.addEventListener('click', async () => {
+        const wanted =
+          b.bucket.trim() ||
+          `onyx-vault-${Math.floor(1000 + Math.random() * 9000)}`;
+        try {
+          const res = await api.syncS3ListBuckets({
+            endpoint: b.endpoint,
+            region: b.region,
+            access_key: b.access_key,
+            secret_key: b.secret_key,
+            create_bucket: wanted,
+          });
+          b.bucket = wanted;
+          this.s3BucketsCache.set(`${b.endpoint}|${b.region}|${b.access_key}`, res.buckets || []);
+          this.callbacks.onToast(`새 버킷 '${wanted}' 생성 및 선택 완료`);
+          this.renderFull();
+        } catch (err: any) {
+          this.callbacks.onToast(err?.message || '새 버킷 생성 실패', true);
+        }
+      });
+      const bkSel = container.querySelector('[data-s3-bucket-select]') as HTMLSelectElement | null;
+      bkSel?.addEventListener('change', () => {
+        if (bkSel.value) {
+          b.bucket = bkSel.value;
+          const bIn = container.querySelector('[data-s3-bucket]') as HTMLInputElement;
+          if (bIn) bIn.value = b.bucket;
+          this.refreshSaveBarOnly();
+        }
       });
       const bind = (sel: string, fn: (v: string) => void) => {
         const el = container.querySelector(sel) as HTMLInputElement;
@@ -1263,16 +1533,83 @@ export class SyncCenterController {
       bind('[data-s3-ak]', (v) => (b.access_key = v));
       bind('[data-s3-sk]', (v) => (b.secret_key = v));
     } else if (b.type === 'one_drive') {
+      const vaultSubName =
+        (profileDisplayName(p) || 'MyVault').replace(/[\\/:*?"<>|]/g, '-').trim() || 'MyVault';
+      const odLocal = this.detectedClouds.find((c) => c.provider === 'one_drive');
+      const apiOpen = this.oauthApiExpanded || Boolean(b.client_id.trim());
       container.innerHTML = `
-        <div class="form-grid">
-          <div class="form-label">앱 Client ID</div>
-          <input type="text" class="text-input" data-od-cid placeholder="Azure 앱 등록에서 받은 애플리케이션 ID" value="${escapeAttr(b.client_id)}" />
-          <div class="form-label">테넌트(Tenant)</div>
-          <input type="text" class="text-input" data-od-tenant placeholder="common" value="${escapeAttr(b.tenant || 'common')}" />
-          <div class="form-label">OneDrive 폴더</div>
-          <input type="text" class="text-input" data-od-folder placeholder="ObsidianSync" value="${escapeAttr(b.folder)}" />
+        <div class="cloud-quick-card" style="margin-bottom:10px;">
+          <div style="font-weight:700;font-size:13px;">
+            ${
+              odLocal
+                ? `⚡ 간편 연결 (권장) — PC OneDrive 폴더 자동 감지됨`
+                : `⚡ 간편 연결 안내 — PC OneDrive 동기화 앱 폴더 사용`
+            }
+          </div>
+          <div style="font-size:12px;color:var(--text-secondary);line-height:1.5;">
+            ${
+              odLocal
+                ? `감지된 폴더(<code>${escapeHtml(odLocal.path)}</code>)에 <code>OnyxVault/${escapeHtml(vaultSubName)}</code>를 자동 연결하면 <strong>Microsoft Azure Client ID 발급 없이</strong> 바로 동기화됩니다.`
+                : `PC에 OneDrive 앱이 설치되어 있다면 별도 API 키를 발급받지 않고 <strong>동기화 폴더 지정</strong>만으로 바로 연동할 수 있습니다.`
+            }
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            ${
+              odLocal
+                ? `<button type="button" class="btn btn-sm btn-primary" data-od-easy-connect>⚡ OneDrive 폴더로 1클릭 연결</button>`
+                : `<button type="button" class="btn btn-sm btn-primary" data-od-pick-folder>📂 OneDrive 폴더 직접 고르기…</button>`
+            }
+            <button type="button" class="btn btn-sm" data-toggle-oauth-api>
+              ${apiOpen ? '▲ 직접 OAuth API 접기' : '🔐 고급: 직접 OAuth Client ID 입력 (모바일/원격용)'}
+            </button>
+          </div>
+        </div>
+        <div data-od-api-fields style="display:${apiOpen ? 'block' : 'none'};">
+          <div class="form-grid">
+            <div class="form-label">앱 Client ID</div>
+            <input type="text" class="text-input" data-od-cid placeholder="Azure 앱 등록에서 받은 애플리케이션 ID" value="${escapeAttr(b.client_id)}" />
+            <div class="form-label">테넌트(Tenant)</div>
+            <input type="text" class="text-input" data-od-tenant placeholder="common" value="${escapeAttr(b.tenant || 'common')}" />
+            <div class="form-label">OneDrive 폴더</div>
+            <input type="text" class="text-input" data-od-folder placeholder="OnyxVault" value="${escapeAttr(b.folder)}" />
+          </div>
         </div>
       `;
+      container.querySelector('[data-od-easy-connect]')?.addEventListener('click', async () => {
+        if (!odLocal) return;
+        try {
+          const prep = await api.syncPrepareFolderTarget(
+            odLocal.path,
+            `OnyxVault/${vaultSubName}`
+          );
+          const nextBackend: BackendConfig = { type: 'local_folder', path: prep.path };
+          p.backend = nextBackend;
+          this.backendCache.set(`${p.id}:local_folder`, nextBackend);
+          this.callbacks.onToast(`OneDrive 폴더로 간편 연결했습니다: ${prep.path}`);
+          this.renderFull();
+        } catch (err: any) {
+          this.callbacks.onToast(err?.message || 'OneDrive 간편 연결 실패', true);
+        }
+      });
+      container.querySelector('[data-od-pick-folder]')?.addEventListener('click', async () => {
+        this.pickerBusy = true;
+        try {
+          const res = await api.syncPickFolder();
+          if (res.path) {
+            const nextBackend: BackendConfig = { type: 'local_folder', path: res.path };
+            p.backend = nextBackend;
+            this.backendCache.set(`${p.id}:local_folder`, nextBackend);
+            this.callbacks.onToast(`폴더 기반 연결로 전환했습니다: ${res.path}`);
+            this.renderFull();
+          }
+        } finally {
+          this.pickerBusy = false;
+        }
+      });
+      container.querySelector('[data-toggle-oauth-api]')?.addEventListener('click', () => {
+        this.oauthApiExpanded = !this.oauthApiExpanded;
+        this.renderFull();
+      });
       const cidIn = container.querySelector('[data-od-cid]') as HTMLInputElement;
       const tenIn = container.querySelector('[data-od-tenant]') as HTMLInputElement;
       const folIn = container.querySelector('[data-od-folder]') as HTMLInputElement;
@@ -1289,16 +1626,84 @@ export class SyncCenterController {
         this.refreshSettingsLiveZones();
       });
     } else if (b.type === 'google_drive') {
+      const vaultSubName =
+        (profileDisplayName(p) || 'MyVault').replace(/[\\/:*?"<>|]/g, '-').trim() || 'MyVault';
+      const gdLocal = this.detectedClouds.find((c) => c.provider === 'google_drive');
+      const apiOpen =
+        this.oauthApiExpanded || Boolean(b.client_id.trim()) || Boolean(b.client_secret.trim());
       container.innerHTML = `
-        <div class="form-grid">
-          <div class="form-label">Client ID</div>
-          <input type="text" class="text-input" data-gd-cid placeholder="OAuth 클라이언트 ID (TV 및 입력 제한 기기)" value="${escapeAttr(b.client_id)}" />
-          <div class="form-label">Client Secret</div>
-          <input type="${pwType}" class="text-input" data-gd-sec value="${escapeAttr(b.client_secret)}" />
-          <div class="form-label">Drive 폴더</div>
-          <input type="text" class="text-input" data-gd-folder placeholder="ObsidianSync" value="${escapeAttr(b.folder)}" />
+        <div class="cloud-quick-card" style="margin-bottom:10px;border-color:#1e8e3e;background:rgba(30,142,62,0.07);">
+          <div style="font-weight:700;font-size:13px;">
+            ${
+              gdLocal
+                ? `⚡ 간편 연결 (권장) — Google Drive 데스크톱 폴더 자동 감지됨`
+                : `⚡ 간편 연결 안내 — Google Drive 데스크톱 폴더 사용`
+            }
+          </div>
+          <div style="font-size:12px;color:var(--text-secondary);line-height:1.5;">
+            ${
+              gdLocal
+                ? `감지된 Google Drive(<code>${escapeHtml(gdLocal.path)}</code>)에 <code>OnyxVault/${escapeHtml(vaultSubName)}</code>를 연결하면 <strong>복잡한 Google Cloud OAuth 키 발급 없이</strong> 바로 동기화됩니다.`
+                : `PC에 Google Drive 데스크톱 앱이 있다면 API 키 없이 내 드라이브 폴더 지정만으로 바로 동기화할 수 있습니다.`
+            }
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            ${
+              gdLocal
+                ? `<button type="button" class="btn btn-sm btn-primary" data-gd-easy-connect>⚡ Google Drive 폴더 1클릭 연결</button>`
+                : `<button type="button" class="btn btn-sm btn-primary" data-gd-pick-folder>📂 Google Drive 폴더 직접 고르기…</button>`
+            }
+            <button type="button" class="btn btn-sm" data-toggle-oauth-api>
+              ${apiOpen ? '▲ 직접 OAuth API 접기' : '🔐 고급: 직접 OAuth Client ID/Secret (모바일/원격용)'}
+            </button>
+          </div>
+        </div>
+        <div data-gd-api-fields style="display:${apiOpen ? 'block' : 'none'};">
+          <div class="form-grid">
+            <div class="form-label">Client ID</div>
+            <input type="text" class="text-input" data-gd-cid placeholder="OAuth 클라이언트 ID (TV 및 입력 제한 기기)" value="${escapeAttr(b.client_id)}" />
+            <div class="form-label">Client Secret</div>
+            <input type="${pwType}" class="text-input" data-gd-sec value="${escapeAttr(b.client_secret)}" />
+            <div class="form-label">Drive 폴더</div>
+            <input type="text" class="text-input" data-gd-folder placeholder="OnyxVault" value="${escapeAttr(b.folder)}" />
+          </div>
         </div>
       `;
+      container.querySelector('[data-gd-easy-connect]')?.addEventListener('click', async () => {
+        if (!gdLocal) return;
+        try {
+          const prep = await api.syncPrepareFolderTarget(
+            gdLocal.path,
+            `OnyxVault/${vaultSubName}`
+          );
+          const nextBackend: BackendConfig = { type: 'local_folder', path: prep.path };
+          p.backend = nextBackend;
+          this.backendCache.set(`${p.id}:local_folder`, nextBackend);
+          this.callbacks.onToast(`Google Drive 폴더로 간편 연결했습니다: ${prep.path}`);
+          this.renderFull();
+        } catch (err: any) {
+          this.callbacks.onToast(err?.message || 'Google Drive 간편 연결 실패', true);
+        }
+      });
+      container.querySelector('[data-gd-pick-folder]')?.addEventListener('click', async () => {
+        this.pickerBusy = true;
+        try {
+          const res = await api.syncPickFolder();
+          if (res.path) {
+            const nextBackend: BackendConfig = { type: 'local_folder', path: res.path };
+            p.backend = nextBackend;
+            this.backendCache.set(`${p.id}:local_folder`, nextBackend);
+            this.callbacks.onToast(`폴더 기반 연결로 전환했습니다: ${res.path}`);
+            this.renderFull();
+          }
+        } finally {
+          this.pickerBusy = false;
+        }
+      });
+      container.querySelector('[data-toggle-oauth-api]')?.addEventListener('click', () => {
+        this.oauthApiExpanded = !this.oauthApiExpanded;
+        this.renderFull();
+      });
       const cidIn = container.querySelector('[data-gd-cid]') as HTMLInputElement;
       const secIn = container.querySelector('[data-gd-sec]') as HTMLInputElement;
       const folIn = container.querySelector('[data-gd-folder]') as HTMLInputElement;
@@ -1676,7 +2081,7 @@ export class SyncCenterController {
           </div>
           <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;padding:8px 10px;border-radius:8px;background:var(--bg-inset);">
             <div>
-              <div>앱 버전: <strong>v${escapeHtml(info.version || '0.7.0')}</strong>${
+              <div>앱 버전: <strong>v${escapeHtml(info.version || '0.8.0')}</strong>${
                 info.available_update_tag
                   ? ` · <span style="color:var(--accent);font-weight:600;">새 버전 ${escapeHtml(info.available_update_tag)} 출시</span>`
                   : ''

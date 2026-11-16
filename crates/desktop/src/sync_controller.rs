@@ -14,6 +14,38 @@ use std::sync::{Arc, Mutex};
 
 pub const SETUP_DOC: &str = "https://github.com/bluewind201/obsidian-sync/blob/main/docs/SETUP.md";
 
+fn copy_missing_dir_contents(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_missing_dir_contents(&from, &to)?;
+        } else if file_type.is_file() && !to.exists() {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Migrate legacy `ObsidianSync` config directory to `OnyxStudio` on first v0.8.0 launch.
+fn migrate_legacy_data_dir(legacy: &std::path::Path, target: &std::path::Path) {
+    if target.join("config.json").exists() || !legacy.exists() {
+        return;
+    }
+    if !target.exists() {
+        if let Some(parent) = target.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::rename(legacy, target).is_ok() {
+            return;
+        }
+    }
+    let _ = copy_missing_dir_contents(legacy, target);
+}
+
 #[cfg(not(target_os = "android"))]
 pub fn app_dirs() -> (PathBuf, PathBuf) {
     // 실행 파일 옆에 portable.txt가 있으면 포터블 모드 (설정을 exe 옆 data 폴더에 저장)
@@ -25,15 +57,23 @@ pub fn app_dirs() -> (PathBuf, PathBuf) {
             }
         }
     }
-    let base = directories::BaseDirs::new()
-        .map(|b| b.config_dir().join("ObsidianSync"))
-        .unwrap_or_else(|| PathBuf::from("ObsidianSync"));
+    let (legacy, base) = directories::BaseDirs::new()
+        .map(|b| {
+            (
+                b.config_dir().join("ObsidianSync"),
+                b.config_dir().join("OnyxStudio"),
+            )
+        })
+        .unwrap_or_else(|| (PathBuf::from("ObsidianSync"), PathBuf::from("OnyxStudio")));
+    migrate_legacy_data_dir(&legacy, &base);
     (base.join("config.json"), base)
 }
 
 #[cfg(target_os = "android")]
 pub fn app_dirs() -> (PathBuf, PathBuf) {
-    let base = PathBuf::from("ObsidianSync");
+    let legacy = PathBuf::from("ObsidianSync");
+    let base = PathBuf::from("OnyxStudio");
+    migrate_legacy_data_dir(&legacy, &base);
     (base.join("config.json"), base)
 }
 
@@ -234,9 +274,27 @@ impl App {
                 seen.insert(p.id.clone());
             }
         }
+        let prev_saved = self.saved.clone();
         self.cfg = cfg;
         match self.cfg.save(&self.config_path) {
             Ok(()) => {
+                // 기존 동기화 폴더가 변경되거나 프로필이 제거된 경우 구 상태 파일 정리 (오작동/대량삭제 방지)
+                for old_p in &prev_saved.profiles {
+                    let changed_or_removed =
+                        match self.cfg.profiles.iter().find(|n| n.id == old_p.id) {
+                            None => true,
+                            Some(new_p) => {
+                                old_p.local_path.trim() != new_p.local_path.trim()
+                                    || old_p.backend.summary() != new_p.backend.summary()
+                            }
+                        };
+                    if changed_or_removed && !old_p.local_path.trim().is_empty() {
+                        obsidian_sync_core::engine::clear_profile_state_files(
+                            &self.data_dir,
+                            old_p,
+                        );
+                    }
+                }
                 self.saved = self.cfg.clone();
                 if start_after_save {
                     self.start_service();
@@ -569,6 +627,38 @@ impl App {
         }
     }
 
+    pub fn disconnect_profile(&mut self, profile_id: &str) -> anyhow::Result<Option<String>> {
+        self.stop_service();
+        let mut removed_prof: Option<Profile> = None;
+        if let Some(pos) = self.cfg.profiles.iter().position(|p| p.id == profile_id) {
+            removed_prof = Some(self.cfg.profiles.remove(pos));
+        }
+        let save_res = self.cfg.save(&self.config_path);
+        match save_res {
+            Ok(()) => {
+                if let Some(ref p) = removed_prof {
+                    obsidian_sync_core::engine::clear_profile_state_files(&self.data_dir, p);
+                }
+                self.saved = self.cfg.clone();
+                if self.cfg.profiles.iter().any(|p| p.enabled) {
+                    self.start_service();
+                }
+                self.set_msg(
+                    "동기화 연결을 해제했습니다 (로컬 파일은 그대로 유지됩니다).",
+                    false,
+                );
+                Ok(removed_prof
+                    .map(|p| p.local_path)
+                    .filter(|s| !s.trim().is_empty()))
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                self.set_msg(msg.clone(), true);
+                anyhow::bail!(msg)
+            }
+        }
+    }
+
     pub fn oauth_logout(&mut self, backend: &BackendConfig) {
         self.oauth_cancel();
         auth::logout(&self.data_dir, backend);
@@ -729,5 +819,236 @@ impl App {
             message,
             default_device_name: self.saved.effective_device_name(),
         }
+    }
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct DetectedCloudFolderDto {
+    pub provider: String,
+    pub label: String,
+    pub path: String,
+    pub has_onyx_vault: bool,
+}
+
+fn push_detected_cloud(
+    out: &mut Vec<DetectedCloudFolderDto>,
+    seen: &mut HashSet<String>,
+    provider: &str,
+    label: &str,
+    path: PathBuf,
+) {
+    if !path.is_dir() {
+        return;
+    }
+    let display = path.to_string_lossy().to_string();
+    let key = if cfg!(windows) {
+        display.replace('\\', "/").to_lowercase()
+    } else {
+        display.replace('\\', "/")
+    };
+    if !seen.insert(key) {
+        return;
+    }
+    let has_onyx_vault = path.join("OnyxVault").is_dir()
+        || path.join("ObsidianSyncVault").is_dir()
+        || path.join("Obsidian").is_dir()
+        || path.join(".obsidian").is_dir();
+    out.push(DetectedCloudFolderDto {
+        provider: provider.to_string(),
+        label: label.to_string(),
+        path: display,
+        has_onyx_vault,
+    });
+}
+
+/// PC 또는 기기에 이미 설치·마운트된 클라우드/공유 동기화 폴더를 자동 탐지합니다.
+pub fn detect_cloud_folders() -> Vec<DetectedCloudFolderDto> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    #[cfg(not(target_os = "android"))]
+    {
+        for env_key in ["OneDrive", "OneDriveConsumer", "OneDriveCommercial"] {
+            if let Ok(val) = std::env::var(env_key) {
+                let p = PathBuf::from(val.trim());
+                let name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "OneDrive".into());
+                push_detected_cloud(&mut out, &mut seen, "one_drive", &name, p);
+            }
+        }
+
+        if let Some(base) = directories::BaseDirs::new() {
+            let home = base.home_dir();
+            if let Ok(entries) = std::fs::read_dir(home) {
+                for ent in entries.flatten() {
+                    if !ent.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        continue;
+                    }
+                    let fname = ent.file_name().to_string_lossy().to_string();
+                    let lower = fname.to_ascii_lowercase();
+                    if lower.starts_with("onedrive") {
+                        push_detected_cloud(&mut out, &mut seen, "one_drive", &fname, ent.path());
+                    } else if lower.contains("google drive") || lower == "googledrive" {
+                        push_detected_cloud(
+                            &mut out,
+                            &mut seen,
+                            "google_drive",
+                            "Google Drive",
+                            ent.path(),
+                        );
+                    } else if lower.contains("mybox") {
+                        push_detected_cloud(
+                            &mut out,
+                            &mut seen,
+                            "naver_mybox",
+                            "네이버 MYBOX",
+                            ent.path(),
+                        );
+                    } else if lower == "dropbox" {
+                        push_detected_cloud(&mut out, &mut seen, "dropbox", "Dropbox", ent.path());
+                    } else if lower == "iclouddrive" {
+                        push_detected_cloud(
+                            &mut out,
+                            &mut seen,
+                            "icloud",
+                            "iCloud Drive",
+                            ent.path(),
+                        );
+                    } else if lower == "synologydrive" {
+                        push_detected_cloud(
+                            &mut out,
+                            &mut seen,
+                            "synology_drive",
+                            "Synology Drive",
+                            ent.path(),
+                        );
+                    }
+                }
+            }
+            for (cand, prov, lbl) in [
+                (
+                    "Google Drive/내 드라이브",
+                    "google_drive",
+                    "Google Drive (내 드라이브)",
+                ),
+                (
+                    "Google Drive/My Drive",
+                    "google_drive",
+                    "Google Drive (My Drive)",
+                ),
+                ("Documents/Obsidian", "obsidian_vault", "문서 / Obsidian"),
+                ("Documents/OnyxVault", "obsidian_vault", "문서 / OnyxVault"),
+            ] {
+                push_detected_cloud(&mut out, &mut seen, prov, lbl, home.join(cand));
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            for letter in b'D'..=b'Z' {
+                let drv = format!("{}:\\", letter as char);
+                for (sub, prov, lbl) in [
+                    ("내 드라이브", "google_drive", "Google Drive (내 드라이브)"),
+                    ("My Drive", "google_drive", "Google Drive (My Drive)"),
+                    ("MYBOX", "naver_mybox", "네이버 MYBOX 드라이브"),
+                    ("NAVER MYBOX", "naver_mybox", "네이버 MYBOX 드라이브"),
+                ] {
+                    let p = PathBuf::from(&drv).join(sub);
+                    push_detected_cloud(
+                        &mut out,
+                        &mut seen,
+                        prov,
+                        &format!("{lbl} ({}:)", letter as char),
+                        p,
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        for (cand, prov, lbl) in [
+            (
+                "/storage/emulated/0/Documents/OnyxVault",
+                "obsidian_vault",
+                "내장 메모리 / Documents / OnyxVault",
+            ),
+            (
+                "/storage/emulated/0/Documents/Obsidian",
+                "obsidian_vault",
+                "내장 메모리 / Documents / Obsidian",
+            ),
+            (
+                "/storage/emulated/0/Obsidian",
+                "obsidian_vault",
+                "내장 메모리 / Obsidian",
+            ),
+            (
+                "/storage/emulated/0/Documents",
+                "obsidian_vault",
+                "내장 메모리 / Documents",
+            ),
+        ] {
+            push_detected_cloud(&mut out, &mut seen, prov, lbl, PathBuf::from(cand));
+        }
+    }
+
+    out
+}
+
+/// 선택한 클라우드/공유 드라이브 안에 Onyx 동기화 대상 폴더를 1클릭으로 준비합니다.
+pub fn prepare_folder_target(base_folder: &str, subfolder: &str) -> anyhow::Result<String> {
+    let base_trimmed = base_folder.trim();
+    if base_trimmed.is_empty() {
+        anyhow::bail!("기준 클라우드 폴더 경로를 입력하거나 선택해 주세요");
+    }
+    let mut target = PathBuf::from(base_trimmed);
+    for seg in subfolder
+        .trim()
+        .replace('\\', "/")
+        .split('/')
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+    {
+        target.push(seg);
+    }
+    std::fs::create_dir_all(&target).map_err(|e| {
+        anyhow::anyhow!("대상 폴더를 만들지 못했습니다 ({}): {e}", target.display())
+    })?;
+    if !target.is_dir() {
+        anyhow::bail!("대상 경로가 폴더가 아닙니다: {}", target.display());
+    }
+    Ok(target.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepare_folder_target_creates_nested_vault_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let created =
+            prepare_folder_target(tmp.path().to_str().unwrap(), "OnyxVault/Work").unwrap();
+        let p = PathBuf::from(&created);
+        assert!(p.is_dir());
+        assert!(created.ends_with("Work"));
+    }
+
+    #[test]
+    fn migrate_legacy_data_dir_preserves_existing_files_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = tmp.path().join("ObsidianSync");
+        let target = tmp.path().join("OnyxStudio");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("config.json"), b"{\"version\":1}").unwrap();
+        std::fs::write(legacy.join("workspace_ui.json"), b"{}").unwrap();
+
+        migrate_legacy_data_dir(&legacy, &target);
+        assert!(target.join("config.json").is_file());
+        assert!(target.join("workspace_ui.json").is_file());
     }
 }

@@ -888,9 +888,9 @@ export function openPageSetupModal(opts: {
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
               <span style="font-size:12px;font-weight:700;color:var(--text-secondary);">여백 설정 (0.0 ~ 6.0 cm)</span>
               <div style="display:flex;gap:4px;flex-wrap:wrap;">
-                <button type="button" class="btn btn-sm" data-preset="default">기본 (상2/하1/좌우3)</button>
+                <button type="button" class="btn btn-sm" data-preset="default">기본 (상2/하1/좌우1.5)</button>
                 <button type="button" class="btn btn-sm" data-preset="standard">표준 (2.5)</button>
-                <button type="button" class="btn btn-sm" data-preset="narrow">좁게 (1.5)</button>
+                <button type="button" class="btn btn-sm" data-preset="narrow">좁게 (1.0)</button>
               </div>
             </div>
             <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;">
@@ -923,7 +923,7 @@ export function openPageSetupModal(opts: {
               <input type="checkbox" data-ps-autofit /> 모니터 창 폭에 맞춰 A4 자동 축소 (Auto-Fit)
             </label>
             <label style="display:flex;align-items:center;gap:7px;cursor:pointer;">
-              <input type="checkbox" data-ps-guides /> A4 페이지 구분선 (297mm 단위) 표시
+              <input type="checkbox" data-ps-guides /> 용지 구분선 및 작성 경계라인(희미한 점선) 표시
             </label>
             <label style="display:flex;align-items:center;gap:7px;cursor:pointer;">
               <input type="checkbox" data-ps-title /> 인쇄·PDF 상단에 문서 제목 포함
@@ -1043,18 +1043,18 @@ export function openPageSetupModal(opts: {
       if (kind === 'default') {
         state.margin_top_cm = 2.0;
         state.margin_bottom_cm = 1.0;
-        state.margin_left_cm = 3.0;
-        state.margin_right_cm = 3.0;
+        state.margin_left_cm = 1.5;
+        state.margin_right_cm = 1.5;
       } else if (kind === 'standard') {
         state.margin_top_cm = 2.5;
         state.margin_bottom_cm = 2.5;
         state.margin_left_cm = 2.5;
         state.margin_right_cm = 2.5;
       } else {
-        state.margin_top_cm = 1.5;
-        state.margin_bottom_cm = 1.5;
-        state.margin_left_cm = 1.5;
-        state.margin_right_cm = 1.5;
+        state.margin_top_cm = 1.0;
+        state.margin_bottom_cm = 1.0;
+        state.margin_left_cm = 1.0;
+        state.margin_right_cm = 1.0;
       }
       syncDomFromState();
       updatePreview();

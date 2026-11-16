@@ -2,6 +2,7 @@ import type {
   AndroidAppInfoDto,
   AppConfig,
   BackendConfig,
+  DetectedCloudFolderDto,
   BootstrapDto,
   GraphDto,
   NoteDocumentDto,
@@ -361,6 +362,29 @@ export const api = {
   syncPickFolder: () => rpc<{ path: string | null }>('sync/pick_folder', {}),
 
   syncOpenPath: (path: string) => rpc<Record<string, never>>('sync/open_path', { path }),
+
+  syncDisconnectProfile: (profileId: string, removeVault = false) =>
+    rpc<{ sync: SyncSnapshotDto; workspace: WorkspaceState }>('sync/disconnect_profile', {
+      profile_id: profileId,
+      remove_vault: removeVault,
+    }),
+
+  syncDetectCloudFolders: () =>
+    rpc<{ folders: DetectedCloudFolderDto[] }>('sync/detect_cloud_folders', {}),
+
+  syncPrepareFolderTarget: (baseFolder: string, subfolder: string) =>
+    rpc<{ path: string }>('sync/prepare_folder_target', {
+      base_folder: baseFolder,
+      subfolder,
+    }),
+
+  syncS3ListBuckets: (req: {
+    endpoint: string;
+    region: string;
+    access_key: string;
+    secret_key: string;
+    create_bucket?: string;
+  }) => rpc<{ buckets: string[] }>('sync/s3_list_buckets', req),
 
   syncOpenDataDir: () => rpc<Record<string, never>>('sync/open_data_dir', {}),
 

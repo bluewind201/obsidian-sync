@@ -41,7 +41,7 @@ fn main() {
     let window_icon = tao::window::Icon::from_rgba(platform::icon_rgba(64), 64, 64).ok();
 
     let window = tao::window::WindowBuilder::new()
-        .with_title("Obsidian Sync")
+        .with_title("Onyx Studio")
         .with_inner_size(tao::dpi::LogicalSize::new(1400.0, 900.0))
         .with_min_inner_size(tao::dpi::LogicalSize::new(900.0, 600.0))
         .with_window_icon(window_icon)
@@ -119,7 +119,7 @@ fn main() {
                     .body(std::borrow::Cow::Borrowed(bytes))
                     .unwrap(),
                 None => {
-                    let fallback = b"<!doctype html><html><head><meta charset=\"utf-8\"><title>Obsidian Sync</title></head><body>Web UI bundle not found.</body></html>";
+                    let fallback = b"<!doctype html><html><head><meta charset=\"utf-8\"><title>Onyx Studio</title></head><body>Web UI bundle not found.</body></html>";
                     wry::http::Response::builder()
                         .status(404)
                         .header("Content-Type", "text/html; charset=utf-8")
@@ -286,7 +286,7 @@ fn export_webview_to_pdf(
 #[cfg(not(windows))]
 fn main() {
     println!(
-        "Obsidian Sync Desktop v{} (Windows WebView2 전용 실행 바이너리)",
+        "Onyx Studio Desktop v{} (Windows WebView2 전용 실행 바이너리)",
         obsidian_sync_core::VERSION
     );
 }

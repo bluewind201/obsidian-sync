@@ -28,7 +28,8 @@ import org.json.JSONObject;
  */
 final class Updater {
     static final String REPO = "bluewind201/obsidian-sync";
-    static final String ASSET = "ObsidianSync-android.apk";
+    static final String ASSET = "OnyxStudio-android.apk";
+    static final String LEGACY_ASSET = "ObsidianSync-android.apk";
     private static final String PREFS = "updater";
     private static final String CHANNEL = "update";
     static final int NOTIFY_ID = 7;
@@ -119,7 +120,7 @@ final class Updater {
     static Release latest() throws Exception {
         HttpURLConnection h = (HttpURLConnection) new URL("https://api.github.com/repos/" + REPO + "/releases/latest").openConnection();
         h.setRequestProperty("Accept", "application/vnd.github+json");
-        h.setRequestProperty("User-Agent", "ObsidianSync-Android");
+        h.setRequestProperty("User-Agent", "OnyxStudio-Android");
         h.setConnectTimeout(15000);
         h.setReadTimeout(15000);
         try {
@@ -136,11 +137,21 @@ final class Updater {
         String tag = r.optString("tag_name");
         JSONArray assets = r.optJSONArray("assets");
         if (assets == null) return null;
+        JSONObject picked = null;
         for (int i = 0; i < assets.length(); i++) {
             JSONObject a = assets.optJSONObject(i);
-            if (a != null && ASSET.equals(a.optString("name"))) {
-                return new Release(tag, buildOf(tag), a.optString("browser_download_url"), a.optLong("size", -1));
+            if (a == null) continue;
+            String name = a.optString("name");
+            if (ASSET.equals(name)) {
+                picked = a;
+                break;
             }
+            if (LEGACY_ASSET.equals(name) && picked == null) {
+                picked = a;
+            }
+        }
+        if (picked != null) {
+            return new Release(tag, buildOf(tag), picked.optString("browser_download_url"), picked.optLong("size", -1));
         }
         return null;
     }
@@ -163,7 +174,7 @@ final class Updater {
         File part = new File(dir, r.tag + ".part");
         HttpURLConnection h = (HttpURLConnection) new URL(r.url).openConnection();
         h.setInstanceFollowRedirects(true);
-        h.setRequestProperty("User-Agent", "ObsidianSync-Android");
+        h.setRequestProperty("User-Agent", "OnyxStudio-Android");
         h.setConnectTimeout(15000);
         h.setReadTimeout(60000);
         try (InputStream in = h.getInputStream(); OutputStream os = new FileOutputStream(part)) {

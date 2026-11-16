@@ -106,7 +106,7 @@ public final class NativeSyncTest {
         assertFalse(Updater.isNewerSemver("v0.5.0", "0.6.0-b30"));
         JSONObject rel = new JSONObject().put("tag_name", "v0.4.1-b20").put("assets", new org.json.JSONArray()
                 .put(new JSONObject().put("name", "SHA256SUMS.txt").put("browser_download_url", "https://x/sums"))
-                .put(new JSONObject().put("name", "ObsidianSync-android.apk").put("browser_download_url", "https://x/app.apk").put("size", 123)));
+                .put(new JSONObject().put("name", "OnyxStudio-android.apk").put("browser_download_url", "https://x/app.apk").put("size", 123)));
         Updater.Release r = Updater.parse(rel);
         assertEquals(20, r.build);
         assertEquals("https://x/app.apk", r.url);

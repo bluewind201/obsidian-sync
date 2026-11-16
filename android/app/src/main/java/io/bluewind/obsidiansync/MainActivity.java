@@ -156,7 +156,7 @@ public final class MainActivity extends Activity {
                 if (uri != null && "appassets.androidplatform.net".equals(uri.getHost())
                         && !"/favicon.ico".equals(uri.getPath())) {
                     String msg = "WebResourceError " + err.getErrorCode() + " (" + err.getDescription() + ") for " + uri;
-                    Log.e("ObsidianSyncWeb", msg);
+                    Log.e("OnyxStudioWeb", msg);
                     webErrors.add(msg);
                 }
             }
@@ -168,7 +168,7 @@ public final class MainActivity extends Activity {
                 if (uri != null && "appassets.androidplatform.net".equals(uri.getHost())
                         && !"/favicon.ico".equals(uri.getPath())) {
                     String msg = "WebHttpError " + errResp.getStatusCode() + " for " + uri;
-                    Log.e("ObsidianSyncWeb", msg);
+                    Log.e("OnyxStudioWeb", msg);
                     webErrors.add(msg);
                 }
             }
@@ -197,7 +197,7 @@ public final class MainActivity extends Activity {
                     String text = cm.message() == null ? "" : cm.message();
                     if (!src.contains("cdn.jsdelivr.net") && !text.contains("ResizeObserver loop")) {
                         String msg = src + ":" + cm.lineNumber() + " " + text;
-                        Log.e("ObsidianSyncWeb", msg);
+                        Log.e("OnyxStudioWeb", msg);
                         webErrors.add(msg);
                     }
                 }
@@ -724,7 +724,7 @@ public final class MainActivity extends Activity {
             completeRpc(cbId, errJson("인쇄 서비스에 접근할 수 없습니다."));
             return;
         }
-        String cleanName = docTitle == null || docTitle.trim().isEmpty() ? "ObsidianSyncDocument" : docTitle.trim();
+        String cleanName = docTitle == null || docTitle.trim().isEmpty() ? "OnyxStudioDocument" : docTitle.trim();
         PrintAttributes.MediaSize mediaSize = landscape
                 ? PrintAttributes.MediaSize.ISO_A4.asLandscape()
                 : PrintAttributes.MediaSize.ISO_A4.asPortrait();

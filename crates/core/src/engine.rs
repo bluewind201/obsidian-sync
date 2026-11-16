@@ -160,6 +160,22 @@ impl<W: Write> Write for HashWriter<W> {
     }
 }
 
+/// 지정한 로컬 경로와 백엔드 ID에 해당하는 저장 상태 파일을 즉시 삭제합니다(오프라인/연결 해제용).
+pub fn clear_state_file(data_dir: &Path, vault: &str, backend_id: &str) {
+    let p = state_file(data_dir, vault, backend_id);
+    let _ = std::fs::remove_file(p);
+}
+
+/// 프로필 설정에 매핑된 로컬 동기화 상태 파일을 즉시 삭제합니다(네트워크 호출 없음).
+pub fn clear_profile_state_files(data_dir: &Path, profile: &crate::config::Profile) {
+    if profile.local_path.trim().is_empty() {
+        return;
+    }
+    if let Ok(b) = crate::backend::create_backend(&profile.backend, data_dir) {
+        clear_state_file(data_dir, &profile.local_path, &b.id());
+    }
+}
+
 fn state_file(data_dir: &Path, vault: &str, backend_id: &str) -> PathBuf {
     let key = hash_bytes(format!("{vault}\n{backend_id}").as_bytes());
     data_dir.join(format!("state-{}.json", &key[..16]))

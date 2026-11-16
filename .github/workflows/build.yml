@@ -38,11 +38,11 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           New-Item -ItemType Directory -Force release-win | Out-Null
-          Copy-Item target/release/ObsidianSync.exe dist/
+          Copy-Item target/release/OnyxStudio.exe dist/
           Copy-Item README.md dist/
           Copy-Item docs/SETUP.md dist/
-          Compress-Archive -Path dist/* -DestinationPath release-win/ObsidianSync-windows-x64.zip -Force
-          Copy-Item target/release/ObsidianSync.exe release-win/ObsidianSync.exe -Force
+          Compress-Archive -Path dist/* -DestinationPath release-win/OnyxStudio-windows-x64.zip -Force
+          Copy-Item target/release/OnyxStudio.exe release-win/OnyxStudio.exe -Force
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x64
@@ -108,8 +108,10 @@ jobs:
             adb shell am start -n io.bluewind.obsidiansync/.MainActivity
             sleep 6
             adb exec-out screencap -p > android-preview.png
-            adb logcat -d -s ObsidianSyncWeb:E > android-web-errors.log || true
-      - run: cp android/app/build/outputs/apk/release/app-release.apk ObsidianSync-android.apk
+            adb logcat -d -s OnyxStudioWeb:E > android-web-errors.log || true
+      - run: |
+          cp android/app/build/outputs/apk/release/app-release.apk OnyxStudio-android.apk
+          cp android/app/build/outputs/apk/release/app-release.apk ObsidianSync-android.apk
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -122,7 +124,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: android-apk
-          path: ObsidianSync-android.apk
+          path: |
+            OnyxStudio-android.apk
+            ObsidianSync-android.apk
 
   # 태그 v* 를 직접 올리거나 workflow_dispatch 수동 실행 시 릴리즈
   release:
@@ -141,7 +145,7 @@ jobs:
         with:
           path: artifacts
           name: windows-x64
-      - run: cd artifacts && sha256sum ObsidianSync* > SHA256SUMS.txt
+      - run: cd artifacts && sha256sum OnyxStudio* ObsidianSync* > SHA256SUMS.txt
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -153,8 +157,8 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then TAG="$GITHUB_REF_NAME"; else TAG="v${VERSION}-b${GITHUB_RUN_NUMBER}"; fi
           cat > notes.md <<NOTES
           ## 받는 법
-          - **Windows**: \`ObsidianSync-windows-x64.zip\` 압축을 풀고 \`ObsidianSync.exe\` 실행 (또는 \`ObsidianSync.exe\` 단일 실행)
-          - **Android**: \`ObsidianSync-android.apk\` 설치. 앱의 "앱 업데이트"에서 새 버전을 자동으로 받아 설치할 수 있습니다.
+          - **Windows**: \`OnyxStudio-windows-x64.zip\` 압축을 풀고 \`OnyxStudio.exe\` 실행 (또는 \`OnyxStudio.exe\` 단일 실행)
+          - **Android**: \`OnyxStudio-android.apk\` 설치. 앱의 "앱 업데이트"에서 새 버전을 자동으로 받아 설치할 수 있습니다. (구버전 자동 업데이트 호환용 \`ObsidianSync-android.apk\` 포함)
           ${SIGN_NOTE}
 
           처음 사용할 때는 볼트를 백업한 뒤 시작하세요. 저장소별 설정 방법은 [설정 안내](https://github.com/${GH_REPO}/blob/main/docs/SETUP.md)를 참고하세요.
@@ -165,10 +169,10 @@ jobs:
             EXISTING_BODY=$(gh release view "$TAG" --json body --jq '.body // ""')
             gh release upload "$TAG" artifacts/* --clobber
             if [[ -z "$(printf '%s' "$EXISTING_BODY" | tr -d '[:space:]')" ]]; then
-              gh release edit "$TAG" --title "Obsidian Sync $TAG" --notes-file notes.md --latest
+              gh release edit "$TAG" --title "Onyx Studio $TAG" --notes-file notes.md --latest
             else
               gh release edit "$TAG" --latest
             fi
           else
-            gh release create "$TAG" artifacts/* --target "$GITHUB_SHA" --title "Obsidian Sync $TAG" --notes-file notes.md --latest
+            gh release create "$TAG" artifacts/* --target "$GITHUB_SHA" --title "Onyx Studio $TAG" --notes-file notes.md --latest
           fi

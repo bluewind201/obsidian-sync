@@ -85,13 +85,14 @@ const HIGHLIGHT_SWATCHES = [
 ];
 
 const FONT_SIZE_PRESETS = [
-  { label: '매우 작게 (11px)', size: '11px' },
-  { label: '작게 (13px)', size: '13px' },
-  { label: '보통 (15px)', size: '15px' },
-  { label: '조금 크게 (18px)', size: '18px' },
-  { label: '크게 (22px)', size: '22px' },
-  { label: '제목급 (26px)', size: '26px' },
-  { label: '대제목급 (32px)', size: '32px' },
+  { label: '아주 작게 (8pt)', size: '8pt' },
+  { label: '작게 (9pt)', size: '9pt' },
+  { label: '보통 · 기본 (10pt)', size: '10pt' },
+  { label: '조금 크게 (11pt)', size: '11pt' },
+  { label: '중간 (12pt)', size: '12pt' },
+  { label: '크게 (14pt)', size: '14pt' },
+  { label: '제목급 (18pt)', size: '18pt' },
+  { label: '대제목급 (24pt)', size: '24pt' },
 ];
 
 const STATUS_BADGES = [
@@ -743,6 +744,11 @@ export class StudioEditorController {
   private findCaseSensitive = false;
   private lastMatchIdx = -1;
 
+  // Right-click context menu state
+  private contextMenuEl: HTMLElement | null = null;
+  private ctxDocClickBound: ((ev: Event) => void) | null = null;
+  private ctxDocKeyBound: ((ev: KeyboardEvent) => void) | null = null;
+
   constructor(hostEl: HTMLElement, callbacks: StudioEditorCallbacks) {
     this.hostEl = hostEl;
     this.callbacks = callbacks;
@@ -785,6 +791,7 @@ export class StudioEditorController {
 
     this.editorMountEl = document.createElement('div');
     this.hostEl.append(this.findBarEl, this.editorMountEl);
+    this.attachEditorContextMenu();
 
     const vault = this.callbacks.getActiveVault();
     const hydrated = hydrateMarkdownMediaUrls(params.initialMarkdown, vault);
@@ -1902,6 +1909,241 @@ export class StudioEditorController {
     }
   }
 
+  private execHistoryStep(kind: 'undo' | 'redo'): void {
+    const view = this.getActiveProseMirrorView();
+    if (!view) return;
+    if (kind === 'undo') {
+      undo(view.state, view.dispatch);
+    } else {
+      redo(view.state, view.dispatch);
+    }
+    this.editor?.focus();
+  }
+
+  private execEditorCommand(cmd: string, payload?: Record<string, any>): void {
+    if (!this.editor) return;
+    try {
+      this.editor.exec(cmd, payload);
+    } catch {
+      // fallback ignore for mode-specific commands
+    }
+    this.editor.focus();
+  }
+
+  private insertTextOrSnippet(text: string): void {
+    if (!this.editor) return;
+    this.editor.insertText(text);
+    this.editor.focus();
+  }
+
+  private attachEditorContextMenu(): void {
+    if (!this.editorMountEl) return;
+    this.editorMountEl.addEventListener('contextmenu', (ev: MouseEvent) => {
+      // Ctrl/Shift+우클릭 시에는 브라우저 기본 맞춤법 메뉴 허용
+      if (ev.ctrlKey || ev.shiftKey) return;
+      if (!this.editor) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      this.openEditorContextMenu(ev);
+    });
+  }
+
+  private closeEditorContextMenu(): void {
+    if (this.contextMenuEl) {
+      this.contextMenuEl.remove();
+      this.contextMenuEl = null;
+    }
+    if (this.ctxDocClickBound) {
+      document.removeEventListener('mousedown', this.ctxDocClickBound, true);
+      window.removeEventListener('scroll', this.ctxDocClickBound, true);
+      window.removeEventListener('resize', this.ctxDocClickBound);
+      this.ctxDocClickBound = null;
+    }
+    if (this.ctxDocKeyBound) {
+      document.removeEventListener('keydown', this.ctxDocKeyBound, true);
+      this.ctxDocKeyBound = null;
+    }
+  }
+
+  private openEditorContextMenu(ev: MouseEvent): void {
+    this.closeEditorContextMenu();
+    if (!this.editor) return;
+
+    const target = ev.target as HTMLElement | null;
+    const isWysiwyg = this.editor.isWysiwygMode();
+    const inTableCell = Boolean(target?.closest('td, th'));
+    const hasSelection = (window.getSelection()?.toString() || '').length > 0;
+
+    const menu = document.createElement('div');
+    menu.className = 'editor-ctx-menu';
+    menu.setAttribute('role', 'menu');
+
+    // Top Quick Formatting Bar
+    const quickBar = document.createElement('div');
+    quickBar.className = 'editor-ctx-quickbar';
+    const quickActions: { label: string; title: string; run: () => void }[] = [
+      { label: '↩', title: '실행 취소 (Ctrl+Z)', run: () => this.execHistoryStep('undo') },
+      { label: '↪', title: '다시 실행 (Ctrl+Y)', run: () => this.execHistoryStep('redo') },
+      { label: 'B', title: '굵게 (Ctrl+B)', run: () => this.execEditorCommand('bold') },
+      { label: 'I', title: '기울임 (Ctrl+I)', run: () => this.execEditorCommand('italic') },
+      { label: 'U', title: '밑줄', run: () => this.execEditorCommand('toggleUnderline') },
+      { label: 'S', title: '취소선', run: () => this.execEditorCommand('strike') },
+      {
+        label: '==',
+        title: '노란 형광펜',
+        run: () => this.execEditorCommand('setHighlight', { color: 'rgba(250, 204, 21, 0.45)' }),
+      },
+      { label: '<>', title: '인라인 코드', run: () => this.execEditorCommand('code') },
+      { label: 'Tx', title: '서식 지우기', run: () => this.execEditorCommand('clearInlineStyle') },
+    ];
+    for (const qa of quickActions) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'editor-ctx-qbtn';
+      b.textContent = qa.label;
+      b.title = qa.title;
+      b.addEventListener('click', () => {
+        qa.run();
+        this.closeEditorContextMenu();
+      });
+      quickBar.appendChild(b);
+    }
+    menu.appendChild(quickBar);
+
+    const addSection = (title: string) => {
+      const s = document.createElement('div');
+      s.className = 'editor-ctx-section';
+      s.textContent = title;
+      menu.appendChild(s);
+    };
+    const addSep = () => {
+      const d = document.createElement('div');
+      d.className = 'editor-ctx-sep';
+      menu.appendChild(d);
+    };
+    const addItem = (icon: string, label: string, onClick: () => void, danger = false) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = `editor-ctx-item${danger ? ' danger' : ''}`;
+      b.innerHTML = `<span style="width:18px;text-align:center;">${icon}</span><span>${label}</span>`;
+      b.addEventListener('click', () => {
+        onClick();
+        this.closeEditorContextMenu();
+      });
+      menu.appendChild(b);
+    };
+
+    if (isWysiwyg && inTableCell) {
+      addSection('표 편집 도구');
+      addItem('⬆️', '위에 행 추가', () => this.execEditorCommand('addRowToUp'));
+      addItem('⬇️', '아래에 행 추가', () => this.execEditorCommand('addRowToDown'));
+      addItem('⬅️', '왼쪽에 열 추가', () => this.execEditorCommand('addColumnToLeft'));
+      addItem('➡️', '오른쪽에 열 추가', () => this.execEditorCommand('addColumnToRight'));
+      addItem('➖', '현재 행 삭제', () => this.execEditorCommand('removeRow'), true);
+      addItem('⏐', '현재 열 삭제', () => this.execEditorCommand('removeColumn'), true);
+      addItem('🗑️', '표 전체 삭제', () => this.execEditorCommand('removeTable'), true);
+      addSep();
+    }
+
+    addSection('제목 · 문단 정렬');
+    addItem('H1', '제목 1', () => this.execEditorCommand('heading', { level: 1 }));
+    addItem('H2', '제목 2', () => this.execEditorCommand('heading', { level: 2 }));
+    addItem('H3', '제목 3', () => this.execEditorCommand('heading', { level: 3 }));
+    addItem('¶', '기본 본문 (10pt)', () => this.execEditorCommand('heading', { level: 0 }));
+    addItem('⬅', '왼쪽 정렬', () => this.execEditorCommand('setTextAlign', { align: 'left' }));
+    addItem('⬌', '가운데 정렬', () => this.execEditorCommand('setTextAlign', { align: 'center' }));
+    addItem('➡', '오른쪽 정렬', () => this.execEditorCommand('setTextAlign', { align: 'right' }));
+
+    addSep();
+    addSection('블록 · 요소 삽입');
+    addItem('📊', '3×3 표 삽입', () =>
+      this.execEditorCommand('addTable', { columnCount: 3, rowCount: 3 })
+    );
+    addItem('☑️', '체크리스트', () => this.execEditorCommand('task'));
+    addItem('•', '글머리 목록', () => this.execEditorCommand('bulletList'));
+    addItem('💡', '콜아웃 메모 블록', () =>
+      this.execEditorCommand('insertCallout', { calloutType: 'note', calloutTitle: '메모' })
+    );
+    addItem('▸', '접기 / 펼치기 토글', () => {
+      if (isWysiwyg) {
+        const cur = this.editor!.getHTML();
+        void cur;
+        this.editor!.setHTML(
+          `${this.editor!.getHTML()}<details open><summary>토글 제목</summary><p>접기/펼치기 내용을 입력하세요.</p></details>`,
+          false
+        );
+      } else {
+        this.insertTextOrSnippet(
+          '\n<details open>\n<summary>토글 제목</summary>\n\n내용을 입력하세요.\n\n</details>\n'
+        );
+      }
+    });
+    addItem('💻', '코드 블록', () => this.execEditorCommand('codeBlock'));
+    addItem('🔗', '[[위키링크]] 연결…', () => {
+      this.bracketTriggeredFromTyping = false;
+      this.callbacks.onRequestWikiLinkPicker(false);
+    });
+    if (this.callbacks.onPickFileAttachment) {
+      addItem('📎', '파일 / 이미지 첨부…', () => {
+        void this.callbacks.onPickFileAttachment?.();
+      });
+    }
+    addItem('✂️', '인쇄 페이지 나누기', () =>
+      this.insertTextOrSnippet('\n<div class="page-break"></div>\n')
+    );
+    addItem('📅', '오늘 날짜 삽입', () => {
+      const now = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      this.insertTextOrSnippet(`${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`);
+    });
+
+    addSep();
+    addItem('🔍', '본문 찾기 / 바꾸기 (Ctrl+F)', () => this.openFindBar(true));
+    if (hasSelection) {
+      addItem('📋', '선택 텍스트 복사', () => {
+        const sel = window.getSelection()?.toString() || '';
+        if (sel) {
+          void navigator.clipboard.writeText(sel);
+          this.callbacks.onToast('선택 영역을 복사했습니다.');
+        }
+      });
+    }
+    addItem('📄', '문서 마크다운 전체 복사', () => {
+      const md = this.getCleanMarkdown();
+      void navigator.clipboard.writeText(md);
+      this.callbacks.onToast('마크다운 전체를 클립보드에 복사했습니다.');
+    });
+
+    document.body.appendChild(menu);
+    this.contextMenuEl = menu;
+
+    const r = menu.getBoundingClientRect();
+    const maxX = Math.max(8, window.innerWidth - r.width - 8);
+    const maxY = Math.max(8, window.innerHeight - r.height - 8);
+    menu.style.left = `${Math.min(ev.clientX, maxX)}px`;
+    menu.style.top = `${Math.min(ev.clientY, maxY)}px`;
+
+    this.ctxDocClickBound = (e: Event) => {
+      if (e.type === 'mousedown' && menu.contains(e.target as Node)) return;
+      this.closeEditorContextMenu();
+    };
+    this.ctxDocKeyBound = (ke: KeyboardEvent) => {
+      if (ke.key === 'Escape') {
+        this.closeEditorContextMenu();
+      }
+    };
+    setTimeout(() => {
+      if (this.ctxDocClickBound) {
+        document.addEventListener('mousedown', this.ctxDocClickBound, true);
+        window.addEventListener('scroll', this.ctxDocClickBound, true);
+        window.addEventListener('resize', this.ctxDocClickBound);
+      }
+      if (this.ctxDocKeyBound) {
+        document.addEventListener('keydown', this.ctxDocKeyBound, true);
+      }
+    }, 0);
+  }
+
   public getCleanMarkdown(): string {
     if (!this.editor) return '';
     const raw = this.editor.getMarkdown();
@@ -1957,6 +2199,7 @@ export class StudioEditorController {
   }
 
   public destroy(): void {
+    this.closeEditorContextMenu();
     this.hostEl.removeEventListener('click', this.handleHostClick);
     this.findBarEl = null;
     this.editorMountEl = null;
@@ -2037,7 +2280,7 @@ export function renderPrintableHtml(markdown: string, vault: string | null): str
   host.style.position = 'fixed';
   host.style.left = '-99999px';
   host.style.top = '0';
-  host.style.width = '800px';
+  host.style.width = '680px';
   host.style.visibility = 'hidden';
   document.body.appendChild(host);
 
@@ -2060,6 +2303,17 @@ export function renderPrintableHtml(markdown: string, vault: string | null): str
     });
     const contentsEl = host.querySelector('.toastui-editor-contents');
     inner = enhanceRenderedHtml(contentsEl?.innerHTML || '');
+
+    // Ensure <details> toggles are expanded and tables have explicit print-safe DOM attributes
+    const cleanBox = document.createElement('div');
+    cleanBox.innerHTML = inner;
+    cleanBox.querySelectorAll('details').forEach((d) => {
+      d.setAttribute('open', '');
+    });
+    cleanBox.querySelectorAll('.toastui-editor-dark').forEach((el) => {
+      el.classList.remove('toastui-editor-dark');
+    });
+    inner = cleanBox.innerHTML;
   } finally {
     try {
       viewer?.destroy();
