@@ -194,8 +194,9 @@ public final class MainActivity extends Activity {
             public boolean onConsoleMessage(ConsoleMessage cm) {
                 if (cm != null && cm.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
                     String src = cm.sourceId() == null ? "" : cm.sourceId();
-                    if (!src.contains("cdn.jsdelivr.net")) {
-                        String msg = src + ":" + cm.lineNumber() + " " + cm.message();
+                    String text = cm.message() == null ? "" : cm.message();
+                    if (!src.contains("cdn.jsdelivr.net") && !text.contains("ResizeObserver loop")) {
+                        String msg = src + ":" + cm.lineNumber() + " " + text;
                         Log.e("ObsidianSyncWeb", msg);
                         webErrors.add(msg);
                     }

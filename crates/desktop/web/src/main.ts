@@ -115,6 +115,7 @@ class ObsidianSyncStudioApp {
   private toastStackEl!: HTMLElement;
   private printRootEl: HTMLElement | null = null;
   private resizeObserver: ResizeObserver | null = null;
+  private layoutRafPending = false;
   private androidInfo: AndroidAppInfoDto | null = null;
 
   private pollTimer: number | null = null;
@@ -427,7 +428,12 @@ class ObsidianSyncStudioApp {
     if (typeof ResizeObserver === 'undefined') return;
     this.resizeObserver?.disconnect();
     this.resizeObserver = new ResizeObserver(() => {
-      this.applyPageLayoutVariables();
+      if (this.layoutRafPending) return;
+      this.layoutRafPending = true;
+      window.requestAnimationFrame(() => {
+        this.layoutRafPending = false;
+        this.applyPageLayoutVariables();
+      });
     });
     if (this.editorPaneEl) {
       this.resizeObserver.observe(this.editorPaneEl);
@@ -490,8 +496,10 @@ class ObsidianSyncStudioApp {
       const naturalW = sheetEl.offsetWidth;
       const naturalH = sheetEl.offsetHeight;
       if (naturalW > 0) {
-        scaleOuter.style.width = `${Math.round(naturalW * finalScale)}px`;
-        scaleOuter.style.height = `${Math.round(naturalH * finalScale)}px`;
+        const nextW = `${Math.round(naturalW * finalScale)}px`;
+        const nextH = `${Math.round(naturalH * finalScale)}px`;
+        if (scaleOuter.style.width !== nextW) scaleOuter.style.width = nextW;
+        if (scaleOuter.style.height !== nextH) scaleOuter.style.height = nextH;
       }
     }
   }
