@@ -2087,17 +2087,20 @@ dependencies = [
 
 [[package]]
 name = "obsidian-sync-android"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "jni",
  "obsidian-sync-core",
+ "obsidian-sync-desktop",
+ "percent-encoding",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
 name = "obsidian-sync-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2119,7 +2122,7 @@ dependencies = [
 
 [[package]]
 name = "obsidian-sync-desktop"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base64",

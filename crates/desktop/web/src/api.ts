@@ -1,4 +1,5 @@
 import type {
+  AndroidAppInfoDto,
   AppConfig,
   BackendConfig,
   BootstrapDto,
@@ -24,21 +25,84 @@ interface ApiEnvelope<T> {
   error?: string;
 }
 
-export async function rpc<T>(endpoint: string, payload: Record<string, unknown> = {}): Promise<T> {
-  const res = await fetch(`/api/${endpoint}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(payload),
-  });
+interface AndroidHostBridge {
+  invokeApiAsync(callbackId: string, endpoint: string, bodyJson: string): void;
+  takeApiResponse(callbackId: string): string;
+}
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(text || `HTTP ${res.status} (${endpoint})`);
+declare global {
+  interface Window {
+    __OBSIDIAN_ANDROID__?: AndroidHostBridge;
+    __onAndroidRpcDone?: (callbackId: string) => void;
+    __handleAndroidBack?: () => boolean;
+  }
+}
+
+export function isAndroidApp(): boolean {
+  return typeof window !== 'undefined' && Boolean(window.__OBSIDIAN_ANDROID__);
+}
+
+let androidRpcSeq = 0;
+const androidPending = new Map<
+  string,
+  { resolve: (raw: string) => void; reject: (err: Error) => void }
+>();
+
+function ensureAndroidCallbackHook(): void {
+  if (typeof window === 'undefined' || window.__onAndroidRpcDone) return;
+  window.__onAndroidRpcDone = (id: string) => {
+    const entry = androidPending.get(id);
+    if (!entry) return;
+    androidPending.delete(id);
+    try {
+      const raw = window.__OBSIDIAN_ANDROID__?.takeApiResponse(id) ?? '';
+      entry.resolve(raw);
+    } catch (err: any) {
+      entry.reject(new Error(err?.message || 'Android 브리지 응답 읽기 실패'));
+    }
+  };
+}
+
+function callAndroidBridge(endpoint: string, payload: Record<string, unknown>): Promise<string> {
+  const bridge = window.__OBSIDIAN_ANDROID__;
+  if (!bridge) {
+    return Promise.reject(new Error('Android 브리지를 찾을 수 없습니다.'));
+  }
+  ensureAndroidCallbackHook();
+  const id = `rpc_${++androidRpcSeq}_${Date.now()}`;
+  return new Promise<string>((resolve, reject) => {
+    androidPending.set(id, { resolve, reject });
+    try {
+      bridge.invokeApiAsync(id, endpoint, JSON.stringify(payload));
+    } catch (err: any) {
+      androidPending.delete(id);
+      reject(new Error(err?.message || `Android API 호출 오류 (${endpoint})`));
+    }
+  });
+}
+
+export async function rpc<T>(endpoint: string, payload: Record<string, unknown> = {}): Promise<T> {
+  let json: ApiEnvelope<T>;
+  if (isAndroidApp()) {
+    const raw = await callAndroidBridge(endpoint, payload);
+    json = JSON.parse(raw) as ApiEnvelope<T>;
+  } else {
+    const res = await fetch(`/api/${endpoint}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(text || `HTTP ${res.status} (${endpoint})`);
+    }
+
+    json = (await res.json()) as ApiEnvelope<T>;
   }
 
-  const json = (await res.json()) as ApiEnvelope<T>;
   if (!json.ok) {
     throw new Error(json.error || `요청 처리 중 오류가 발생했습니다 (${endpoint})`);
   }
@@ -113,7 +177,11 @@ export const api = {
     margin_bottom_cm?: number;
     margin_left_cm?: number;
     margin_right_cm?: number;
-  }) => rpc<{ exported: boolean; path: string | null }>('note/export_pdf', params),
+  }) =>
+    rpc<{ exported: boolean; path: string | null; delegated_to_system_print?: boolean }>(
+      'note/export_pdf',
+      params
+    ),
 
   createFolder: (vault: string, parent: string, name: string) =>
     rpc<{ path: string; scan: VaultScanDto }>('vault/create_folder', { vault, parent, name }),
@@ -297,6 +365,16 @@ export const api = {
   syncOpenDataDir: () => rpc<Record<string, never>>('sync/open_data_dir', {}),
 
   syncClearMessage: () => rpc<SyncSnapshotDto>('sync/clear_message', {}),
+
+  // Android Native Controls
+  androidInfo: () => rpc<AndroidAppInfoDto>('android/info', {}),
+
+  androidGrantFilesAccess: () => rpc<{ opened: boolean }>('android/grant_files_access', {}),
+
+  androidUpdateNow: () => rpc<{ message: string; tag?: string | null }>('android/update_now', {}),
+
+  androidSetAutoUpdate: (enabled: boolean) =>
+    rpc<{ auto_update: boolean }>('android/set_auto_update', { enabled }),
 };
 
 function safeEncodeUrlComponent(val: string): string {

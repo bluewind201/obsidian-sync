@@ -1,40 +1,11 @@
 // 릴리즈 빌드에서는 콘솔 창을 띄우지 않음
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-pub mod api;
-pub mod crypto;
-pub mod platform;
-pub mod sync_controller;
-pub mod vault;
+use obsidian_sync_desktop::{api, get_web_asset, platform, AppUserEvent};
 
-#[derive(Debug)]
-pub enum AppUserEvent {
-    ExportPdf {
-        output_path: std::path::PathBuf,
-        landscape: bool,
-        margin_top_cm: f64,
-        margin_bottom_cm: f64,
-        margin_left_cm: f64,
-        margin_right_cm: f64,
-        reply: std::sync::mpsc::Sender<Result<(), String>>,
-    },
-}
-
-#[allow(dead_code)]
-mod web_assets {
-    include!(concat!(env!("OUT_DIR"), "/web_assets.rs"));
-}
-pub use web_assets::get_web_asset;
-
-pub use sync_controller::App;
-
-#[cfg(test)]
-use obsidian_sync_core::{AppConfig, BackendConfig, Profile};
-#[cfg(test)]
-use std::path::PathBuf;
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 use std::sync::{Arc, Mutex};
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 use std::time::Duration;
 
 #[cfg(windows)]
@@ -318,6 +289,3 @@ fn main() {
         obsidian_sync_core::VERSION
     );
 }
-
-#[cfg(test)]
-mod lifecycle_tests;

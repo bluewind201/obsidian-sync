@@ -3826,9 +3826,19 @@ pub fn resolve_vault_media_file(vault_root: &Path, rel_or_name: &str) -> Option<
 // ───────────────────────────── 샘플 볼트 생성 ─────────────────────────────
 
 pub fn create_sample_vault(base_dir: &Path) -> Result<PathBuf> {
+    #[cfg(not(target_os = "android"))]
     let preferred_parent = directories::UserDirs::new()
         .and_then(|u| u.document_dir().map(Path::to_path_buf))
         .unwrap_or_else(|| base_dir.to_path_buf());
+    #[cfg(target_os = "android")]
+    let preferred_parent = {
+        let docs = PathBuf::from("/storage/emulated/0/Documents");
+        if docs.is_dir() {
+            docs
+        } else {
+            base_dir.to_path_buf()
+        }
+    };
 
     let vault_dir = preferred_parent.join("ObsidianSyncVault");
     let target = if fs::create_dir_all(&vault_dir).is_ok() {

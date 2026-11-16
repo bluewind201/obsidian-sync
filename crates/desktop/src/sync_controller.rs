@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 
 pub const SETUP_DOC: &str = "https://github.com/bluewind201/obsidian-sync/blob/main/docs/SETUP.md";
 
+#[cfg(not(target_os = "android"))]
 pub fn app_dirs() -> (PathBuf, PathBuf) {
     // 실행 파일 옆에 portable.txt가 있으면 포터블 모드 (설정을 exe 옆 data 폴더에 저장)
     if let Ok(exe) = std::env::current_exe() {
@@ -27,6 +28,12 @@ pub fn app_dirs() -> (PathBuf, PathBuf) {
     let base = directories::BaseDirs::new()
         .map(|b| b.config_dir().join("ObsidianSync"))
         .unwrap_or_else(|| PathBuf::from("ObsidianSync"));
+    (base.join("config.json"), base)
+}
+
+#[cfg(target_os = "android")]
+pub fn app_dirs() -> (PathBuf, PathBuf) {
+    let base = PathBuf::from("ObsidianSync");
     (base.join("config.json"), base)
 }
 
@@ -537,7 +544,10 @@ impl App {
                         user_code: dc.user_code.clone(),
                         uri: dc.verification_uri.clone(),
                     };
-                    let _ = open::that(&dc.verification_uri);
+                    #[cfg(not(target_os = "android"))]
+                    {
+                        let _ = open::that(&dc.verification_uri);
+                    }
                 },
                 &cn,
             );

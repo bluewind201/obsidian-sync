@@ -17,14 +17,15 @@ import java.util.concurrent.Executors;
 import org.json.JSONObject;
 
 /**
- * 실시간 동기화 서비스. Rust 엔진이 볼트 폴더를 감시하고 주기적으로 원격을 확인합니다.
- * 알림을 띄운 채 계속 실행되며, 알림의 '중지' 버튼으로 끌 수 있습니다.
+ * 실시간 동기화 포그라운드 서비스.
+ * 공통 Studio 백엔드(Native.studioInit / Native.studioApi)와 연동해 알림 상태를 유지하고,
+ * 백그라운드·재부팅 후에도 중단 없이 동기화를 실행합니다.
  */
 public final class SyncService extends Service {
     static final String STOP = "stop";
+    static final String ATTACH_ONLY = "attach_only";
     private static final int ID = 1;
     private final Handler handler = new Handler(Looper.getMainLooper());
-    /** 엔진 시작/중지는 진행 중인 동기화를 기다릴 수 있어 메인 스레드에서 하지 않습니다 (순서 보장용 단일 스레드). */
     private static final ExecutorService ENGINE = Executors.newSingleThreadExecutor();
     private String lastText = "";
     private volatile boolean destroyed;
@@ -32,6 +33,11 @@ public final class SyncService extends Service {
     static void start(Context c) {
         ConfigStore.setEnabled(c, true);
         c.startForegroundService(new Intent(c, SyncService.class));
+    }
+
+    static void attachForeground(Context c) {
+        ConfigStore.setEnabled(c, true);
+        c.startForegroundService(new Intent(c, SyncService.class).setAction(ATTACH_ONLY));
     }
 
     static void stop(Context c) {
@@ -46,8 +52,10 @@ public final class SyncService extends Service {
     }
 
     private Notification notification(String text) {
-        PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE);
-        PendingIntent stop = PendingIntent.getService(this, 1, new Intent(this, SyncService.class).setAction(STOP), PendingIntent.FLAG_IMMUTABLE);
+        PendingIntent open = PendingIntent.getActivity(
+                this, 0, new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE);
+        PendingIntent stop = PendingIntent.getService(
+                this, 1, new Intent(this, SyncService.class).setAction(STOP), PendingIntent.FLAG_IMMUTABLE);
         return new Notification.Builder(this, "sync")
                 .setSmallIcon(R.drawable.ic_stat_sync)
                 .setContentTitle("Obsidian 실시간 동기화")
@@ -62,7 +70,10 @@ public final class SyncService extends Service {
         if (intent != null && STOP.equals(intent.getAction())) {
             ConfigStore.setEnabled(this, false);
             handler.removeCallbacksAndMessages(null);
-            ENGINE.execute(Native::stop);
+            ENGINE.execute(() -> {
+                Native.studioApi("/api/sync/stop", "{}");
+                Native.stop();
+            });
             stopForeground(STOP_FOREGROUND_REMOVE);
             stopSelf();
             return START_NOT_STICKY;
@@ -71,14 +82,24 @@ public final class SyncService extends Service {
         if (Build.VERSION.SDK_INT >= 34) startForeground(ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
         else startForeground(ID, n);
 
+        boolean attachOnly = intent != null && ATTACH_ONLY.equals(intent.getAction());
         String config = ConfigStore.load(this);
         String dataDir = ConfigStore.dataDir(this);
         handler.removeCallbacksAndMessages(null);
         ENGINE.execute(() -> {
-            String result = config.isEmpty() ? "{\"ok\":false,\"error\":\"설정이 없습니다\"}" : Native.start(config, dataDir);
-            handler.post(() -> started(result));
+            String initRaw = Native.studioInit(dataDir, config);
+            String result = initRaw;
+            try {
+                if (new JSONObject(initRaw).optBoolean("ok") && !attachOnly) {
+                    JSONObject st = new JSONObject(Native.studioSyncNotificationStatus());
+                    if (!st.optBoolean("running")) {
+                        result = Native.studioApi("/api/sync/start", "{}");
+                    }
+                }
+            } catch (Exception ignored) { }
+            final String finalRes = result;
+            handler.post(() -> started(finalRes));
         });
-        // 시스템이 종료시켜도 다시 시작
         return START_STICKY;
     }
 
@@ -99,15 +120,11 @@ public final class SyncService extends Service {
 
     private void refresh() {
         try {
-            JSONObject s = new JSONObject(Native.status());
-            String text;
-            if (s.optBoolean("syncing")) text = "동기화 중…";
-            else if (!s.isNull("last_error") && !s.optString("last_error").isEmpty()) text = "확인 필요: " + s.optString("last_error");
-            else if (!s.isNull("last_sync")) text = "마지막 동기화 " + s.optString("last_sync").substring(11) + " · " + s.optString("last_summary");
-            else text = "대기 중";
+            JSONObject st = new JSONObject(Native.studioSyncNotificationStatus());
+            String text = st.optString("text", "대기 중");
             update(text);
         } catch (Exception ignored) { }
-        handler.postDelayed(this::refresh, 5000);
+        handler.postDelayed(this::refresh, 3500);
     }
 
     private void update(String text) {
@@ -119,7 +136,10 @@ public final class SyncService extends Service {
     @Override public void onDestroy() {
         destroyed = true;
         handler.removeCallbacksAndMessages(null);
-        ENGINE.execute(Native::stop);
+        ENGINE.execute(() -> {
+            Native.studioApi("/api/sync/stop", "{}");
+            Native.stop();
+        });
         super.onDestroy();
     }
 

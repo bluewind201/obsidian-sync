@@ -341,3 +341,11 @@ export type SaveStatus = 'saved' | 'saving' | 'dirty' | 'error';
 export type ActiveMainView = 'editor' | 'graph' | 'sync';
 export type RightInspectorTab = 'backlinks' | 'outline' | 'local_graph';
 export type SyncSubTab = 'home' | 'settings' | 'logs';
+
+export interface AndroidAppInfoDto {
+  version: string;
+  auto_update: boolean;
+  all_files_granted: boolean;
+  available_update_tag: string | null;
+  last_update_message: string;
+}

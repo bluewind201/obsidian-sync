@@ -43,6 +43,8 @@ export class ForceGraphCanvas {
   private pointerDownPos = { x: 0, y: 0 };
   private lastPointerPos = { x: 0, y: 0 };
   private pointerMoved = false;
+  private pinchStartDist = 0;
+  private pinchStartScale = 1;
 
   constructor(container: HTMLElement, data: GraphDto, opts: ForceGraphOptions) {
     this.opts = opts;
@@ -208,7 +210,102 @@ export class ForceGraphCanvas {
       },
       { passive: false }
     );
+
+    this.canvas.addEventListener('touchstart', this.handleTouchStart, { passive: false });
+    this.canvas.addEventListener('touchmove', this.handleTouchMove, { passive: false });
+    this.canvas.addEventListener('touchend', this.handleTouchEnd);
+    this.canvas.addEventListener('touchcancel', this.handleTouchEnd);
   }
+
+  private handleTouchStart = (ev: TouchEvent): void => {
+    const rect = this.canvas.getBoundingClientRect();
+    if (ev.touches.length === 1) {
+      const t = ev.touches[0];
+      const sx = t.clientX - rect.left;
+      const sy = t.clientY - rect.top;
+      this.pointerDownPos = { x: sx, y: sy };
+      this.lastPointerPos = { x: sx, y: sy };
+      this.pointerMoved = false;
+      this.pinchStartDist = 0;
+      const hit = this.findNodeAt(sx, sy);
+      if (hit) {
+        this.draggedNode = hit;
+        hit.pinned = true;
+        this.isPanning = false;
+        this.alpha = Math.max(this.alpha, 0.5);
+      } else {
+        this.draggedNode = null;
+        this.isPanning = true;
+      }
+    } else if (ev.touches.length === 2) {
+      ev.preventDefault();
+      if (this.draggedNode) {
+        this.draggedNode.pinned = false;
+        this.draggedNode = null;
+      }
+      this.isPanning = false;
+      this.pointerMoved = true;
+      const [t0, t1] = [ev.touches[0], ev.touches[1]];
+      this.pinchStartDist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+      this.pinchStartScale = this.scale;
+    }
+  };
+
+  private handleTouchMove = (ev: TouchEvent): void => {
+    ev.preventDefault();
+    const rect = this.canvas.getBoundingClientRect();
+    if (ev.touches.length === 2 && this.pinchStartDist > 0) {
+      const [t0, t1] = [ev.touches[0], ev.touches[1]];
+      const dist = Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+      const mx = (t0.clientX + t1.clientX) * 0.5 - rect.left;
+      const my = (t0.clientY + t1.clientY) * 0.5 - rect.top;
+      const before = this.screenToWorld(mx, my);
+      this.scale = Math.min(4.0, Math.max(0.22, this.pinchStartScale * (dist / this.pinchStartDist)));
+      this.panX = mx - rect.width / 2 - before.x * this.scale;
+      this.panY = my - rect.height / 2 - before.y * this.scale;
+      this.draw();
+      return;
+    }
+    if (ev.touches.length === 1) {
+      const t = ev.touches[0];
+      const sx = t.clientX - rect.left;
+      const sy = t.clientY - rect.top;
+      if (Math.hypot(sx - this.pointerDownPos.x, sy - this.pointerDownPos.y) > 6) {
+        this.pointerMoved = true;
+      }
+      if (this.draggedNode) {
+        const w = this.screenToWorld(sx, sy);
+        this.draggedNode.x = w.x;
+        this.draggedNode.y = w.y;
+        this.draggedNode.vx = 0;
+        this.draggedNode.vy = 0;
+        this.alpha = Math.max(this.alpha, 0.35);
+        this.draw();
+      } else if (this.isPanning) {
+        this.panX += sx - this.lastPointerPos.x;
+        this.panY += sy - this.lastPointerPos.y;
+        this.lastPointerPos = { x: sx, y: sy };
+        this.draw();
+      }
+    }
+  };
+
+  private handleTouchEnd = (ev: TouchEvent): void => {
+    if (ev.touches.length < 2) {
+      this.pinchStartDist = 0;
+    }
+    if (ev.touches.length === 0) {
+      if (this.draggedNode) {
+        const clickedNode = this.draggedNode;
+        clickedNode.pinned = false;
+        this.draggedNode = null;
+        if (!this.pointerMoved) {
+          this.opts.onNodeClick(clickedNode);
+        }
+      }
+      this.isPanning = false;
+    }
+  };
 
   private handleWindowMouseMove = (ev: MouseEvent): void => {
     const rect = this.canvas.getBoundingClientRect();
@@ -452,6 +549,10 @@ export class ForceGraphCanvas {
       this.rafId = null;
     }
     this.resizeObserver?.disconnect();
+    this.canvas.removeEventListener('touchstart', this.handleTouchStart);
+    this.canvas.removeEventListener('touchmove', this.handleTouchMove);
+    this.canvas.removeEventListener('touchend', this.handleTouchEnd);
+    this.canvas.removeEventListener('touchcancel', this.handleTouchEnd);
     window.removeEventListener('mousemove', this.handleWindowMouseMove);
     window.removeEventListener('mouseup', this.handleWindowMouseUp);
   }

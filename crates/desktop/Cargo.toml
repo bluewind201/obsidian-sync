@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Obsidian Sync & Notion-style Markdown Studio (TOAST UI Editor + Rust Sync Engine)"
 
+[lib]
+name = "obsidian_sync_desktop"
+path = "src/lib.rs"
+
 [[bin]]
 name = "ObsidianSync"
 path = "src/main.rs"
@@ -17,13 +21,15 @@ serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 walkdir = "2"
 notify = { version = "6.1", default-features = false }
-directories = "5"
-open = "5"
 log = "0.4"
 percent-encoding = "2"
 base64 = "0.22"
 ring = "0.17"
 zeroize = "1"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+directories = "5"
+open = "5"
 
 [target.'cfg(windows)'.dependencies]
 tao = "0.37"

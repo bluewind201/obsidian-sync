@@ -1,5 +1,6 @@
-import { api } from './api';
+import { api, isAndroidApp } from './api';
 import type {
+  AndroidAppInfoDto,
   AppConfig,
   BackendConfig,
   BackendKind,
@@ -221,6 +222,7 @@ export class SyncCenterController {
   private nasOtpValue = '';
   private nasModalEl: HTMLElement | null = null;
   private lastLiveSignature = '';
+  private androidInfo: AndroidAppInfoDto | null = null;
 
   constructor(
     container: HTMLElement,
@@ -1557,6 +1559,11 @@ export class SyncCenterController {
   }
 
   private populateAdvancedSettings(body: HTMLElement): void {
+    const isAndroid = isAndroidApp();
+    const autostartLabel = isAndroid
+      ? 'Android 부팅 시 자동 실행 및 백그라운드 동기화 유지'
+      : 'Windows 시작 시 자동 실행 (트레이에서 조용히 실행)';
+
     body.innerHTML = `
       <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px;">
         <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;">
@@ -1569,7 +1576,7 @@ export class SyncCenterController {
         </label>
         <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;">
           <input type="checkbox" data-adv-autostart ${this.snapshot.autostart ? 'checked' : ''} />
-          Windows 시작 시 자동 실행 (트레이에서 조용히 실행)
+          ${escapeHtml(autostartLabel)}
         </label>
       </div>
       <div class="form-grid" style="max-width:520px;">
@@ -1580,12 +1587,21 @@ export class SyncCenterController {
         <div class="form-label">저장 후 대기(ms)</div>
         <input type="number" min="200" max="60000" class="text-input" data-adv-debounce value="${this.draftCfg.debounce_ms}" />
         <div class="form-label">기기 이름</div>
-        <input type="text" class="text-input" data-adv-devname placeholder="${escapeAttr(this.snapshot.default_device_name || 'PC')}" value="${escapeAttr(this.draftCfg.device_name)}" />
+        <input type="text" class="text-input" data-adv-devname placeholder="${escapeAttr(this.snapshot.default_device_name || (isAndroid ? 'Android' : 'PC'))}" value="${escapeAttr(this.draftCfg.device_name)}" />
       </div>
-      <div style="margin-top:14px;">
-        <button type="button" class="btn btn-sm" data-open-datadir>📂 설정 데이터 폴더 열기</button>
-      </div>
+      ${
+        isAndroid
+          ? `<div id="android-native-settings-zone" style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border-subtle);"></div>`
+          : `<div style="margin-top:14px;">
+              <button type="button" class="btn btn-sm" data-open-datadir>📂 설정 데이터 폴더 열기</button>
+            </div>`
+      }
     `;
+
+    if (isAndroid) {
+      const az = body.querySelector('#android-native-settings-zone') as HTMLElement | null;
+      if (az) this.renderAndroidNativeSettings(az);
+    }
 
     const watchChk = body.querySelector('[data-adv-watch]') as HTMLInputElement;
     watchChk.addEventListener('change', () => {
@@ -1636,6 +1652,84 @@ export class SyncCenterController {
     body.querySelector('[data-open-datadir]')?.addEventListener('click', () => {
       void api.syncOpenDataDir();
     });
+  }
+
+  private renderAndroidNativeSettings(zone: HTMLElement): void {
+    const paint = (info: AndroidAppInfoDto | null) => {
+      if (!info) {
+        zone.innerHTML = `<div style="font-size:12.5px;color:var(--text-muted);">Android 기기 정보를 불러오는 중…</div>`;
+        return;
+      }
+      zone.innerHTML = `
+        <div style="font-weight:700;font-size:13.5px;margin-bottom:8px;">📱 Android 권한 및 앱 업데이트</div>
+        <div style="display:flex;flex-direction:column;gap:8px;font-size:13px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;padding:8px 10px;border-radius:8px;background:var(--bg-inset);">
+            <span>
+              모든 파일 접근 권한:
+              <strong style="color:${info.all_files_granted ? 'var(--ok)' : 'var(--warn)'};">
+                ${info.all_files_granted ? '허용됨' : '허용 필요'}
+              </strong>
+            </span>
+            <button type="button" class="btn btn-sm" data-android-files-perm>
+              ${info.all_files_granted ? '권한 설정 보기' : '🔓 권한 허용하기'}
+            </button>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;padding:8px 10px;border-radius:8px;background:var(--bg-inset);">
+            <div>
+              <div>앱 버전: <strong>v${escapeHtml(info.version || '0.7.0')}</strong>${
+                info.available_update_tag
+                  ? ` · <span style="color:var(--accent);font-weight:600;">새 버전 ${escapeHtml(info.available_update_tag)} 출시</span>`
+                  : ''
+              }</div>
+              ${
+                info.last_update_message
+                  ? `<div style="font-size:12px;color:var(--text-muted);margin-top:2px;">${escapeHtml(info.last_update_message)}</div>`
+                  : ''
+              }
+            </div>
+            <button type="button" class="btn btn-sm ${info.available_update_tag ? 'btn-primary' : ''}" data-android-update-now>
+              ${info.available_update_tag ? '📲 지금 업데이트' : '업데이트 확인'}
+            </button>
+          </div>
+          <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;">
+            <input type="checkbox" data-android-auto-update ${info.auto_update ? 'checked' : ''} />
+            새 버전이 나오면 자동으로 받아서 설치
+          </label>
+        </div>
+      `;
+
+      zone.querySelector('[data-android-files-perm]')?.addEventListener('click', () => {
+        void api.androidGrantFilesAccess();
+      });
+      zone.querySelector('[data-android-update-now]')?.addEventListener('click', async () => {
+        try {
+          const res = await api.androidUpdateNow();
+          this.callbacks.onToast(res.message);
+          this.androidInfo = await api.androidInfo();
+          paint(this.androidInfo);
+        } catch (err: any) {
+          this.callbacks.onToast(err?.message || '업데이트 확인 실패', true);
+        }
+      });
+      const autoUpChk = zone.querySelector('[data-android-auto-update]') as HTMLInputElement | null;
+      autoUpChk?.addEventListener('change', async () => {
+        try {
+          const res = await api.androidSetAutoUpdate(autoUpChk.checked);
+          if (this.androidInfo) this.androidInfo.auto_update = res.auto_update;
+        } catch (err: any) {
+          this.callbacks.onToast(err?.message || '자동 업데이트 설정 실패', true);
+        }
+      });
+    };
+
+    paint(this.androidInfo);
+    void api
+      .androidInfo()
+      .then((info) => {
+        this.androidInfo = info;
+        if (document.body.contains(zone)) paint(info);
+      })
+      .catch(() => {});
   }
 
   private renderLogsTab(host: HTMLElement): void {

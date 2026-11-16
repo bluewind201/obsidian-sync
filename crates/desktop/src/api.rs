@@ -40,6 +40,33 @@ impl BackendState {
             event_proxy,
         }
     }
+
+    pub fn new_at_dir(
+        data_dir: PathBuf,
+        initial_cfg_json: Option<&str>,
+        trigger: SharedTrigger,
+    ) -> Self {
+        let _ = std::fs::create_dir_all(&data_dir);
+        let config_path = data_dir.join("config.json");
+        if !config_path.exists() {
+            if let Some(raw) = initial_cfg_json {
+                let trimmed = raw.trim();
+                if !trimmed.is_empty() {
+                    if let Ok(cfg) = AppConfig::from_json(trimmed) {
+                        let _ = cfg.save(&config_path);
+                    }
+                }
+            }
+        }
+        let sync = App::new(config_path, data_dir.clone(), trigger);
+        let workspace = WorkspaceManager::new(data_dir, &sync.cfg);
+        Self {
+            sync,
+            workspace,
+            crypto: crate::crypto::VaultCryptoSession::new(),
+            event_proxy: None,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -1042,6 +1069,7 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
             if p.is_empty() {
                 bail!("열 경로가 비어 있습니다");
             }
+            #[cfg(not(target_os = "android"))]
             open::that(p).with_context(|| format!("폴더를 열지 못했습니다: {p}"))?;
             Ok(json!({}))
         }
@@ -1049,6 +1077,7 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
         "/api/sync/open_data_dir" => {
             let dir = state.lock().unwrap().sync.data_dir.clone();
             let _ = std::fs::create_dir_all(&dir);
+            #[cfg(not(target_os = "android"))]
             open::that(&dir).context("설정 폴더를 열지 못했습니다")?;
             Ok(json!({}))
         }

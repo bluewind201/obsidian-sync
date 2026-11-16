@@ -154,6 +154,10 @@ textarea {
   margin-left: -262px;
 }
 
+.sidebar-backdrop {
+  display: none;
+}
+
 .sidebar-vault-header {
   padding: 10px 10px 6px;
   display: flex;
@@ -2422,6 +2426,167 @@ details.notion-toggle[open] > summary::before {
   );
   padding: 4px;
   box-sizing: border-box;
+}
+
+/* ───────────────────────── v0.7.0 Mobile & Tablet Responsive Layout ───────────────────────── */
+@media (max-width: 960px) {
+  .inspector:not(.collapsed) {
+    position: fixed;
+    right: 0;
+    top: 82px;
+    bottom: 0;
+    z-index: 430;
+    width: min(86vw, 310px);
+    min-width: 0;
+    box-shadow: var(--shadow-lg);
+  }
+  .split-pane {
+    position: fixed;
+    right: 0;
+    top: 82px;
+    bottom: 0;
+    width: min(92vw, 440px);
+    min-width: 0;
+    z-index: 425;
+    box-shadow: var(--shadow-lg);
+  }
+}
+
+@media (max-width: 860px) {
+  .sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 450;
+    margin-left: 0 !important;
+    transform: translateX(0);
+    transition: transform 0.2s ease;
+    box-shadow: var(--shadow-lg);
+  }
+  .sidebar.collapsed {
+    transform: translateX(-105%);
+    box-shadow: none;
+  }
+  .sidebar-backdrop.visible {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: var(--bg-backdrop);
+    z-index: 440;
+  }
+}
+
+@media (max-width: 680px) {
+  .topbar {
+    padding: 0 8px;
+    gap: 6px;
+  }
+  .breadcrumbs {
+    max-width: 34vw;
+    font-size: 12px;
+  }
+  .topbar-right {
+    flex: 1;
+    justify-content: flex-end;
+    overflow-x: auto;
+    gap: 4px;
+  }
+  .topbar-right::-webkit-scrollbar {
+    height: 0;
+  }
+  .a4-desk-stage {
+    padding: 10px 8px 36px;
+    overflow-x: hidden;
+  }
+  .a4-scale-outer {
+    width: 100% !important;
+    height: auto !important;
+  }
+  .a4-paper-sheet {
+    width: 100% !important;
+    min-height: auto !important;
+    padding: 14px 14px 48px !important;
+    transform: none !important;
+    border-radius: 8px;
+  }
+  .a4-paper-sheet #notion-cover-zone {
+    margin-left: -14px;
+    margin-right: -14px;
+    margin-top: -14px;
+  }
+  .a4-ruler-badge {
+    max-width: 100%;
+    flex-wrap: wrap;
+    justify-content: center;
+    border-radius: 10px;
+    font-size: 10.5px;
+  }
+  .notion-page-column,
+  .notion-page-column.wide-md,
+  .editor-mount-wrap,
+  .editor-mount-wrap.wide-md,
+  .page-status-footer {
+    padding-left: 14px !important;
+    padding-right: 14px !important;
+  }
+  .a4-paper-sheet .notion-page-column,
+  .a4-paper-sheet .editor-mount-wrap,
+  .a4-paper-sheet .page-status-footer {
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+  }
+  .notion-title-input {
+    font-size: 24px;
+  }
+  .prop-key-input {
+    width: 96px;
+    min-width: 82px;
+  }
+  .prop-delete-btn {
+    opacity: 0.7;
+  }
+  .tree-hover-actions {
+    display: inline-flex;
+  }
+  .editor-mount-wrap .toastui-editor-toolbar-item-wrapper {
+    width: 24px !important;
+    height: 24px !important;
+  }
+  .editor-mount-wrap .toastui-editor-defaultUI-toolbar button.toastui-editor-toolbar-icons {
+    transform: scale(0.62);
+  }
+  .tui-custom-btn {
+    height: 22px !important;
+    padding: 0 5px !important;
+    font-size: 11px !important;
+  }
+  .sync-screen {
+    padding: 14px 12px 56px;
+  }
+  .form-grid {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+  .page-setup-grid {
+    grid-template-columns: 1fr;
+  }
+  .modal-backdrop {
+    padding-top: 4vh;
+  }
+  .modal-card {
+    max-height: 90vh;
+  }
+  .graph-controls-panel {
+    width: calc(100% - 24px);
+    left: 12px;
+    top: 12px;
+    padding: 10px;
+  }
+  .empty-vault-hero {
+    margin: 24px 12px;
+    padding: 22px 16px;
+  }
 }
 
 /* ───────────────────────── v0.6.0 1:1 Print & PDF Root ───────────────────────── */

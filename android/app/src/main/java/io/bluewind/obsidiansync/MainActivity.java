@@ -1,1143 +1,595 @@
 package io.bluewind.obsidiansync;
 
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
-import android.content.ClipData;
-import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.pm.PackageManager;
-import android.graphics.Color;
-import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
+import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.CancellationSignal;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.ParcelFileDescriptor;
+import android.print.PageRange;
+import android.print.PrintAttributes;
+import android.print.PrintDocumentAdapter;
+import android.print.PrintManager;
 import android.provider.DocumentsContract;
+import android.provider.OpenableColumns;
 import android.provider.Settings;
-import android.text.InputType;
-import android.view.Gravity;
-import android.view.View;
-import android.view.ViewGroup;
-import android.widget.Button;
-import android.widget.CheckBox;
-import android.widget.EditText;
-import android.widget.LinearLayout;
-import android.widget.RadioButton;
-import android.widget.RadioGroup;
-import android.widget.ScrollView;
-import android.widget.TextView;
+import android.webkit.JavascriptInterface;
+import android.webkit.ValueCallback;
+import android.webkit.WebChromeClient;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
+import android.widget.Toast;
 import androidx.work.Constraints;
 import androidx.work.ExistingPeriodicWorkPolicy;
 import androidx.work.NetworkType;
 import androidx.work.PeriodicWorkRequest;
 import androidx.work.WorkManager;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
+import java.io.ByteArrayInputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import org.json.JSONArray;
 import org.json.JSONObject;
 
 /**
- * 메인 화면: 위쪽 상태 카드 + 동기화 프로필 목록.
- * 프로필 하나 = 휴대폰 폴더 1개 ↔ 저장소 폴더 1개. 프로필을 누르면 편집 화면으로 바뀝니다.
+ * Obsidian Sync Studio 통합 Android 호스트 액티비티.
+ * Windows 앱과 동일한 Notion + TOAST UI 에디터 · 볼트 · AES-256 암호화 · A4/PDF · 6종 실시간 동기화 UI를
+ * Android WebView + Rust JNI 백엔드로 구동하고, SAF 파일 선택기·권한·PrintManager·자동 업데이터를 연결합니다.
  */
 public final class MainActivity extends Activity {
-    // 색상 (Windows 앱과 동일)
-    static final int ACCENT = Color.rgb(124, 58, 237), ACCENT_SOFT = Color.rgb(243, 238, 255);
-    static final int OK = Color.rgb(22, 150, 85), WARN = Color.rgb(214, 120, 0), DANGER = Color.rgb(208, 56, 56);
-    static final int MUTED = Color.rgb(110, 114, 128), TEXT = Color.rgb(30, 32, 40), BG = Color.rgb(246, 247, 250), BORDER = Color.rgb(225, 227, 234);
-    private static final int PICK_LOCAL = 10;
+    private static final String APP_ORIGIN = "https://appassets.androidplatform.net";
+    private static final int REQ_PICK_FOLDER = 10;
+    private static final int REQ_MANAGE_FILES = 11;
+    private static final int REQ_PICK_ATTACHMENT = 12;
+    private static final int REQ_WEB_FILE_CHOOSER = 13;
 
-    /** 저장소 종류: type, 이름, 설명 */
-    private static final String[][] BACKENDS = {
-            {"synology", "Synology NAS", "DSM 계정으로 로그인 (File Station)"},
-            {"one_drive", "OneDrive", "Microsoft 계정으로 로그인"},
-            {"google_drive", "Google Drive", "Google 계정으로 로그인"},
-            {"s3", "네이버 클라우드 / Google Cloud Storage", "S3 호환 스토리지 (액세스 키)"},
-            {"local_folder", "휴대폰 안의 다른 폴더", "다른 동기화 앱이 관리하는 폴더 등"},
-    };
-
-    private final ExecutorService bg = Executors.newSingleThreadExecutor();
+    private final ExecutorService bg = Executors.newCachedThreadPool();
     private final Handler ui = new Handler(Looper.getMainLooper());
-    private JSONObject cfg = new JSONObject();
+    private final ConcurrentHashMap<String, String> pendingResponses = new ConcurrentHashMap<>();
 
-    private LinearLayout root;
-    // 목록 화면
-    private TextView statusTitle, statusSub, permWarn;
-    private View statusDot;
-    private Button toggleBtn, syncBtn, deleteBtn;
-    private LinearLayout logBox, profileBox;
-    private final List<TextView> profileLines = new ArrayList<>();
-    // 편집 화면
-    private boolean editing;
-    private int editIndex = -1;
-    private JSONObject edit;
-    private String backendType = "synology";
-    private final Map<String, EditText> fields = new LinkedHashMap<>();
-    private final Map<String, LinearLayout> backendCards = new LinkedHashMap<>();
-    private LinearLayout fieldBox, loginBox, otpBox;
-    private TextView localPath, testResult;
-    private EditText nameEdit, ignoreEdit, otpEdit;
-    private RadioButton kindObsidian, modeTwoWay, modeUp, modeDown, polKeepBoth, polLocal, polRemote;
-    private CheckBox chkEnabled, chkDeletes, chkObsidian, chkTarget;
-    private LinearLayout twoWayBox;
-    private boolean loggingIn;
-    // 앱 업데이트
-    static volatile boolean visible;
-    private TextView updateLine;
-    private Button updateBtn;
-    private Updater.Release available;
+    private WebView webView;
+    private Updater.Release availableUpdate;
 
-    // ─────────────────────────── 시작 ───────────────────────────
-    @Override public void onCreate(Bundle state) {
-        super.onCreate(state);
-        loadConfig();
-        ScrollView scroll = new ScrollView(this);
-        scroll.setBackgroundColor(BG);
-        root = vbox();
-        root.setPadding(dp(16), dp(20), dp(16), dp(32));
-        scroll.addView(root);
-        setContentView(scroll);
-        showList();
-        scheduleUpdateCheck();
-    }
+    // Pending Android Intent picker state
+    private String pendingFolderCallbackId;
+    private String pendingFolderEndpoint;
+    private String pendingAttachCallbackId;
+    private String pendingAttachVault;
+    private boolean pendingAttachImageOnly;
+    private ValueCallback<Uri[]> webFileChooserCallback;
 
-    private void loadConfig() {
-        try {
-            JSONObject r = new JSONObject(Native.normalize(ConfigStore.load(this)));
-            if (r.optBoolean("ok")) cfg = r.getJSONObject("config");
-        } catch (Exception ignored) { }
-    }
+    @SuppressLint({"SetJavaScriptEnabled", "JavascriptInterface"})
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
 
-    private JSONArray profiles() {
-        JSONArray a = cfg.optJSONArray("profiles");
-        if (a == null) {
-            a = new JSONArray();
-            try { cfg.put("profiles", a); } catch (Exception ignored) { }
+        String dataDir = ConfigStore.dataDir(this);
+        String legacyConfig = ConfigStore.load(this);
+        Native.studioInit(dataDir, legacyConfig);
+
+        if (ConfigStore.enabled(this)) {
+            try { SyncService.attachForeground(this); } catch (RuntimeException ignored) { }
         }
-        return a;
+        scheduleUpdateCheck();
+        checkUpdateQuietly();
+
+        webView = new WebView(this);
+        WebSettings ws = webView.getSettings();
+        ws.setJavaScriptEnabled(true);
+        ws.setDomStorageEnabled(true);
+        ws.setTextZoom(100);
+        ws.setBuiltInZoomControls(false);
+        ws.setDisplayZoomControls(false);
+        ws.setAllowFileAccess(false);
+        ws.setAllowContentAccess(false);
+
+        webView.addJavascriptInterface(new StudioBridge(), "__OBSIDIAN_ANDROID__");
+
+        webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest req) {
+                Uri uri = req.getUrl();
+                if (uri != null && "https".equals(uri.getScheme())
+                        && "appassets.androidplatform.net".equals(uri.getHost())) {
+                    String path = uri.getPath();
+                    if (path == null || path.isEmpty()) path = "/index.html";
+                    if ("/vault-media".equals(path)) {
+                        String q = uri.getEncodedQuery();
+                        return toWebResourceResponse(q == null ? null : Native.studioVaultMedia(q));
+                    }
+                    return toWebResourceResponse(Native.studioWebAsset(path));
+                }
+                return super.shouldInterceptRequest(view, req);
+            }
+
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
+                Uri uri = req.getUrl();
+                if (uri != null && "appassets.androidplatform.net".equals(uri.getHost())) {
+                    return false;
+                }
+                if (uri != null && ("http".equals(uri.getScheme()) || "https".equals(uri.getScheme()))) {
+                    try {
+                        startActivity(new Intent(Intent.ACTION_VIEW, uri));
+                    } catch (Exception ignored) { }
+                    return true;
+                }
+                return false;
+            }
+        });
+
+        webView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> cb, FileChooserParams params) {
+                if (webFileChooserCallback != null) {
+                    webFileChooserCallback.onReceiveValue(null);
+                }
+                webFileChooserCallback = cb;
+                try {
+                    Intent i = params.createIntent();
+                    startActivityForResult(i, REQ_WEB_FILE_CHOOSER);
+                    return true;
+                } catch (Exception e) {
+                    webFileChooserCallback = null;
+                    return false;
+                }
+            }
+        });
+
+        setContentView(webView);
+        webView.loadUrl(APP_ORIGIN + "/index.html");
     }
 
-    @Override protected void onResume() {
-        super.onResume();
-        visible = true;
-        if (permWarn != null) permWarn.setVisibility(Environment.isExternalStorageManager() ? View.GONE : View.VISIBLE);
-        if (editing) refreshLogin(); else tick();
-    }
-
-    @Override protected void onPause() {
-        visible = false;
-        ui.removeCallbacksAndMessages(null);
-        super.onPause();
-    }
-
-    @Override protected void onDestroy() {
-        if (loggingIn) Native.loginCancel();
+    @Override
+    protected void onDestroy() {
         bg.shutdown();
+        if (webView != null) {
+            webView.removeJavascriptInterface("__OBSIDIAN_ANDROID__");
+            webView.destroy();
+            webView = null;
+        }
         super.onDestroy();
     }
 
-    @Override public void onBackPressed() {
-        if (editing) showList(); else super.onBackPressed();
-    }
-
-    // ─────────────────────────── 목록 화면 ───────────────────────────
-    private void showList() {
-        editing = false;
-        if (loggingIn) { Native.loginCancel(); loggingIn = false; }
-        root.removeAllViews();
-        profileLines.clear();
-
-        TextView title = text("Obsidian Sync", 26, TEXT);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
-        root.addView(title);
-        root.addView(text("노트와 사진을 내 저장소와 실시간으로 동기화합니다", 14, MUTED));
-        space(root, 12);
-
-        // 상태 카드
-        LinearLayout status = card(root);
-        LinearLayout row = hbox();
-        statusDot = new View(this);
-        row.addView(statusDot, new LinearLayout.LayoutParams(dp(14), dp(14)));
-        statusTitle = text("", 20, TEXT);
-        statusTitle.setTypeface(Typeface.DEFAULT_BOLD);
-        statusTitle.setPadding(dp(10), 0, 0, 0);
-        row.addView(statusTitle);
-        status.addView(row);
-        statusSub = text("", 14, MUTED);
-        status.addView(statusSub);
-        LinearLayout btns = hbox();
-        toggleBtn = primary("동기화 시작");
-        toggleBtn.setOnClickListener(v -> toggle());
-        syncBtn = secondary("지금 동기화");
-        syncBtn.setOnClickListener(v -> { if (!Native.syncNow()) toast("먼저 동기화를 시작하세요"); });
-        btns.addView(toggleBtn, weight());
-        btns.addView(syncBtn, weight());
-        status.addView(btns);
-        // 대량 삭제 확인: 의도한 삭제일 때만 누르도록 평소엔 숨김
-        deleteBtn = secondary("삭제 진행");
-        deleteBtn.setVisibility(View.GONE);
-        deleteBtn.setOnClickListener(v -> {
-            deleteBtn.setEnabled(false);
-            bg.execute(() -> {
-                boolean ok = Native.allowDeletes("");
-                ui.post(() -> toast(ok ? "삭제를 진행합니다" : "동기화가 켜져 있을 때만 진행할 수 있습니다"));
-            });
-        });
-        status.addView(deleteBtn);
-        permWarn = text("⚠ 폴더의 파일을 읽고 쓰려면 '모든 파일 접근' 권한이 필요합니다. 눌러서 허용하세요.", 14, WARN);
-        permWarn.setPadding(0, dp(8), 0, 0);
-        permWarn.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:" + getPackageName()))));
-        permWarn.setVisibility(Environment.isExternalStorageManager() ? View.GONE : View.VISIBLE);
-        status.addView(permWarn);
-
-        // 프로필 목록
-        LinearLayout pc = card(root);
-        TextView pt = text("동기화 폴더", 16, TEXT);
-        pt.setTypeface(Typeface.DEFAULT_BOLD);
-        pc.addView(pt);
-        pc.addView(text("폴더마다 저장소 폴더를 1:1로 연결합니다. 눌러서 편집하세요.", 13, MUTED));
-        space(pc, 6);
-        profileBox = vbox();
-        pc.addView(profileBox);
-        JSONArray ps = profiles();
-        if (ps.length() == 0) profileBox.addView(text("아직 없습니다. 아래 버튼으로 추가하세요.", 14, MUTED));
-        for (int i = 0; i < ps.length(); i++) profileBox.addView(profileRow(i, ps.optJSONObject(i)));
-        LinearLayout add = hbox();
-        Button addVault = secondary("+ Obsidian 볼트");
-        addVault.setOnClickListener(v -> newProfile("obsidian"));
-        Button addFolder = secondary("+ 사진/일반 폴더");
-        addFolder.setOnClickListener(v -> newProfile("folder"));
-        add.addView(addVault, weight());
-        add.addView(addFolder, weight());
-        pc.addView(add);
-
-        // 최근 활동
-        LinearLayout c5 = card(root);
-        TextView lt = text("최근 활동", 16, TEXT);
-        lt.setTypeface(Typeface.DEFAULT_BOLD);
-        c5.addView(lt);
-        logBox = vbox();
-        c5.addView(logBox);
-
-        LinearLayout more = hbox();
-        Button help = secondary("도움말");
-        help.setOnClickListener(v -> startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/bluewind201/obsidian-sync/blob/main/docs/SETUP.md"))));
-        more.addView(help, weight());
-        root.addView(more);
-
-        // 앱 업데이트
-        LinearLayout uc = card(root);
-        TextView ut = text("앱 업데이트", 16, TEXT);
-        ut.setTypeface(Typeface.DEFAULT_BOLD);
-        uc.addView(ut);
-        updateLine = text("버전 " + Updater.currentName(this), 14, MUTED);
-        uc.addView(updateLine);
-        updateBtn = secondary("업데이트 확인");
-        updateBtn.setOnClickListener(v -> updateNow());
-        uc.addView(updateBtn);
-        CheckBox auto = check("새 버전이 나오면 자동으로 받아서 설치", Updater.autoEnabled(this));
-        auto.setOnCheckedChangeListener((b, on) -> { Updater.setAutoEnabled(this, on); scheduleUpdateCheck(); });
-        uc.addView(auto);
-        checkUpdateQuietly();
-
-        root.addView(text("충돌이 나면 두 버전을 모두 남깁니다: 노트 (충돌 기기 날짜).md", 12, MUTED));
-        tick();
-    }
-
-    private View profileRow(int index, JSONObject p) {
-        LinearLayout r = vbox();
-        r.setPadding(dp(12), dp(10), dp(12), dp(10));
-        r.setBackground(round(ACCENT_SOFT, ACCENT_SOFT, 0, 10));
-        LinearLayout top = hbox();
-        TextView n = text(displayName(p), 16, p.optBoolean("enabled", true) ? TEXT : MUTED);
-        n.setTypeface(Typeface.DEFAULT_BOLD);
-        top.addView(n, weight());
-        CheckBox on = new CheckBox(this);
-        on.setText("켜기");
-        on.setChecked(p.optBoolean("enabled", true));
-        on.setOnCheckedChangeListener((b, checked) -> {
-            try {
-                p.put("enabled", checked);
-                persist(false);
-                if (ConfigStore.enabled(this)) SyncService.start(this);
-            } catch (Exception ignored) { }
-            showList();
-        });
-        top.addView(on);
-        r.addView(top);
-        String kind = "folder".equals(p.optString("kind")) ? "폴더" : "Obsidian";
-        String mode = "upload_only".equals(p.optString("mode")) ? "올리기만 (백업)"
-                : "download_only".equals(p.optString("mode")) ? "내려받기만" : "양방향";
-        r.addView(text(kind + " · " + mode, 12, MUTED));
-        r.addView(text(p.optString("local_path") + "  ⇄  " + backendSummary(p.optJSONObject("backend")), 13, TEXT));
-        TextView line = text("", 13, MUTED);
-        line.setTag(p.optString("id"));
-        r.addView(line);
-        profileLines.add(line);
-        r.setOnClickListener(v -> showEditor(index));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.bottomMargin = dp(8);
-        r.setLayoutParams(lp);
-        return r;
-    }
-
-    static String displayName(JSONObject p) {
-        String n = p.optString("name", "").trim();
-        if (!n.isEmpty()) return n;
-        String path = p.optString("local_path", "");
-        int i = path.lastIndexOf('/');
-        String last = i >= 0 ? path.substring(i + 1) : path;
-        return last.isEmpty() ? "이름 없음" : last;
-    }
-
-    static String backendSummary(JSONObject b) {
-        if (b == null) return "-";
-        switch (b.optString("type")) {
-            case "synology":
-                String host = b.optString("url").replaceFirst("^https?://", "");
-                return "Synology · " + host + " " + b.optString("folder");
-            case "s3": return "S3 · " + b.optString("bucket") + "/" + b.optString("prefix");
-            case "one_drive": return "OneDrive · /" + b.optString("folder");
-            case "google_drive": return "Google Drive · /" + b.optString("folder");
-            default: return "폴더 · " + b.optString("path");
-        }
-    }
-
-    private void newProfile(String kind) {
-        try {
-            JSONObject p = new JSONObject();
-            p.put("id", Native.newProfileId());
-            p.put("name", kind.equals("obsidian") ? "Obsidian" : "사진");
-            p.put("kind", kind);
-            p.put("enabled", true);
-            p.put("mode", kind.equals("obsidian") ? "two_way" : "upload_only");
-            p.put("propagate_deletes", kind.equals("obsidian"));
-            p.put("delete_in_target", false);
-            p.put("conflict_policy", "keep_both");
-            p.put("sync_obsidian_folder", true);
-            if (kind.equals("folder")) p.put("local_path", Environment.getExternalStorageDirectory().getAbsolutePath() + "/DCIM/Camera");
-            // 같은 NAS를 쓰는 경우가 많으므로 기존 Synology 계정을 복사 (폴더는 기본값 /home)
-            JSONObject b = new JSONObject().put("type", "synology").put("folder", "/home");
-            JSONArray ps = profiles();
-            for (int i = ps.length() - 1; i >= 0; i--) {
-                JSONObject ob = ps.getJSONObject(i).optJSONObject("backend");
-                if (ob != null && "synology".equals(ob.optString("type"))) {
-                    b = new JSONObject(ob.toString()).put("folder", "/home");
-                    break;
-                }
-            }
-            p.put("backend", b);
-            edit = p;
-            editIndex = -1;
-            buildEditor();
-        } catch (Exception e) {
-            toast("프로필을 만들 수 없습니다");
-        }
-    }
-
-    // ─────────────────────────── 편집 화면 ───────────────────────────
-    private void showEditor(int index) {
-        try {
-            edit = new JSONObject(profiles().getJSONObject(index).toString());
-            editIndex = index;
-            buildEditor();
-        } catch (Exception e) {
-            toast("프로필을 열 수 없습니다");
-        }
-    }
-
-    private void buildEditor() {
-        editing = true;
-        ui.removeCallbacksAndMessages(null);
-        root.removeAllViews();
-        fields.clear();
-        backendCards.clear();
-        JSONObject b = edit.optJSONObject("backend");
-        backendType = b != null ? b.optString("type", "synology") : "synology";
-
-        Button back = secondary("← 목록으로 (저장 안 함)");
-        back.setOnClickListener(v -> showList());
-        root.addView(back);
-        TextView title = text(editIndex < 0 ? "새 프로필" : "프로필 편집", 24, TEXT);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
-        title.setPadding(0, dp(8), 0, dp(8));
-        root.addView(title);
-
-        // ① 이름과 종류
-        LinearLayout c1 = step(root, "1", "이름과 종류");
-        c1.addView(label("프로필 이름"));
-        nameEdit = input(edit.optString("name"), "예: Obsidian, 사진", false);
-        c1.addView(nameEdit);
-        RadioGroup kinds = new RadioGroup(this);
-        kindObsidian = radio("Obsidian 볼트");
-        RadioButton kindFolder = radio("일반 폴더 (사진·문서 등)");
-        kinds.addView(kindObsidian);
-        kinds.addView(kindFolder);
-        boolean isObsidian = !"folder".equals(edit.optString("kind"));
-        (isObsidian ? kindObsidian : kindFolder).setChecked(true);
-        kinds.setOnCheckedChangeListener((g, id) -> chkObsidian.setVisibility(kindObsidian.isChecked() ? View.VISIBLE : View.GONE));
-        c1.addView(kinds);
-        chkEnabled = check("이 프로필 동기화하기", edit.optBoolean("enabled", true));
-        c1.addView(chkEnabled);
-
-        // ② 휴대폰 폴더
-        LinearLayout c2 = step(root, "2", "휴대폰 폴더");
-        c2.addView(text("동기화할 폴더를 고르세요. 사진은 보통 DCIM/Camera 입니다.", 14, MUTED));
-        localPath = text(edit.optString("local_path", ""), 15, TEXT);
-        localPath.setPadding(0, dp(6), 0, dp(6));
-        c2.addView(localPath);
-        Button pick = secondary("폴더 선택");
-        pick.setOnClickListener(v -> startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), PICK_LOCAL));
-        c2.addView(pick);
-
-        // ③ 저장소
-        LinearLayout c3 = step(root, "3", "저장소");
-        for (String[] be : BACKENDS) {
-            LinearLayout bc = vbox();
-            bc.setPadding(dp(12), dp(10), dp(12), dp(10));
-            TextView n = text(be[1], 15, TEXT);
-            n.setTypeface(Typeface.DEFAULT_BOLD);
-            bc.addView(n);
-            bc.addView(text(be[2], 13, MUTED));
-            bc.setOnClickListener(v -> selectBackend(be[0]));
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            lp.bottomMargin = dp(6);
-            c3.addView(bc, lp);
-            backendCards.put(be[0], bc);
-        }
-        fieldBox = vbox();
-        c3.addView(fieldBox);
-
-        // ④ 연결 확인
-        LinearLayout c4 = step(root, "4", "연결 확인");
-        loginBox = vbox();
-        c4.addView(loginBox);
-        Button test = secondary("연결 테스트");
-        test.setOnClickListener(v -> testConnection());
-        c4.addView(test);
-        testResult = text("", 14, MUTED);
-        c4.addView(testResult);
-        otpBox = vbox();
-        otpBox.setPadding(dp(12), dp(10), dp(12), dp(10));
-        otpBox.setBackground(round(ACCENT_SOFT, ACCENT_SOFT, 0, 10));
-        otpBox.addView(text("🔐 2단계 인증 코드(OTP) 6자리를 입력하세요. 한 번 인증하면 이 휴대폰을 기억합니다.", 14, TEXT));
-        LinearLayout otpRow = hbox();
-        otpEdit = input("", "123456", false);
-        otpEdit.setInputType(InputType.TYPE_CLASS_NUMBER);
-        otpRow.addView(otpEdit, weight());
-        Button otpBtn = primary("인증");
-        otpBtn.setOnClickListener(v -> submitOtp());
-        otpRow.addView(otpBtn);
-        otpBox.addView(otpRow);
-        otpBox.setVisibility(View.GONE);
-        c4.addView(otpBox);
-
-        // ⑤ 동기화 방식
-        LinearLayout c5 = step(root, "5", "동기화 방식");
-        c5.addView(label("동기화 방향"));
-        RadioGroup modes = new RadioGroup(this);
-        modeTwoWay = radio("양방향 — 어느 쪽에서 바꿔도 서로 맞춥니다");
-        modeUp = radio("올리기만 (백업) — 휴대폰 → 저장소로만 올립니다");
-        modeDown = radio("내려받기만 — 저장소 → 휴대폰으로만 받습니다. 휴대폰에서 바꾼 내용은 올리지 않습니다");
-        modes.addView(modeTwoWay);
-        modes.addView(modeUp);
-        modes.addView(modeDown);
-        String m = edit.optString("mode", "two_way");
-        ("upload_only".equals(m) ? modeUp : "download_only".equals(m) ? modeDown : modeTwoWay).setChecked(true);
-        c5.addView(modes);
-
-        twoWayBox = new LinearLayout(this);
-        twoWayBox.setOrientation(LinearLayout.VERTICAL);
-        chkDeletes = check("삭제도 동기화 (지워진 파일은 폴더 안 .trash 로 이동)", edit.optBoolean("propagate_deletes", true));
-        twoWayBox.addView(chkDeletes);
-        twoWayBox.addView(label("데이터 기준 (양쪽이 모두 바뀌었을 때)"));
-        RadioGroup policies = new RadioGroup(this);
-        polKeepBoth = radio("둘 다 보존 — 저장소 쪽을 이름 바꾼 사본(충돌 사본)으로 함께 둡니다");
-        polLocal = radio("내 기기 기준 — 이 휴대폰의 내용으로 저장소를 덮어씁니다");
-        polRemote = radio("저장소 기준 — 저장소 내용으로 덮어쓰고, 이 휴대폰의 이전 내용은 .trash 에 보관합니다");
-        policies.addView(polKeepBoth);
-        policies.addView(polLocal);
-        policies.addView(polRemote);
-        String pol = edit.optString("conflict_policy", "keep_both");
-        ("prefer_local".equals(pol) ? polLocal : "prefer_remote".equals(pol) ? polRemote : polKeepBoth).setChecked(true);
-        twoWayBox.addView(policies);
-        c5.addView(twoWayBox);
-
-        chkTarget = check("", edit.optBoolean("delete_in_target", false));
-        c5.addView(chkTarget);
-        updateModeOptions();
-        modes.setOnCheckedChangeListener((g, id) -> updateModeOptions());
-        chkObsidian = check(".obsidian 설정 폴더도 동기화 (플러그인, 테마)", edit.optBoolean("sync_obsidian_folder", true));
-        chkObsidian.setVisibility(isObsidian ? View.VISIBLE : View.GONE);
-        c5.addView(chkObsidian);
-        c5.addView(label("동기화하지 않을 파일/폴더 (한 줄에 하나, 예: *.mp4)"));
-        StringBuilder ig = new StringBuilder();
-        JSONArray igs = edit.optJSONArray("ignore_patterns");
-        if (igs != null) for (int i = 0; i < igs.length(); i++) ig.append(i > 0 ? "\n" : "").append(igs.optString(i));
-        ignoreEdit = input(ig.toString(), "", false);
-        ignoreEdit.setSingleLine(false);
-        ignoreEdit.setMinLines(2);
-        c5.addView(ignoreEdit);
-
-        // 저장 / 삭제
-        Button save = primary("저장");
-        save.setOnClickListener(v -> saveProfile());
-        root.addView(save);
-        if (editIndex >= 0) {
-            LinearLayout more = hbox();
-            Button reset = secondary("동기화 기록 초기화");
-            reset.setOnClickListener(v -> resetState());
-            Button del = secondary("프로필 삭제");
-            del.setTextColor(DANGER);
-            del.setOnClickListener(v -> confirmDelete());
-            more.addView(reset, weight());
-            more.addView(del, weight());
-            space(root, 8);
-            root.addView(more);
-        }
-
-        selectBackend(backendType);
-    }
-
-    private void selectBackend(String type) {
-        // 입력하던 값은 유지
-        if (!fields.isEmpty()) try { edit.put("backend", backendJson()); } catch (Exception ignored) { }
-        backendType = type;
-        for (Map.Entry<String, LinearLayout> e : backendCards.entrySet()) {
-            boolean sel = e.getKey().equals(type);
-            e.getValue().setBackground(round(sel ? ACCENT_SOFT : Color.WHITE, sel ? ACCENT : BORDER, sel ? 2 : 1, 10));
-        }
-        JSONObject saved = edit.optJSONObject("backend");
-        if (saved != null && !type.equals(saved.optString("type"))) saved = null;
-        fieldBox.removeAllViews();
-        fields.clear();
-        boolean folderKind = "folder".equals(edit.optString("kind"));
-        switch (type) {
-            case "synology":
-                field("url", "NAS 주소", "https://내NAS주소:5001", false, saved);
-                field("username", "아이디", "DSM 로그인 아이디", false, saved);
-                field("password", "비밀번호", "", true, saved);
-                field("folder", "NAS 폴더", folderKind ? "/photo/휴대폰" : "/home/Obsidian", false, saved, "/home");
-                Button pickNas = secondary("NAS에서 폴더 고르기");
-                pickNas.setOnClickListener(v -> openNasPicker());
-                fieldBox.addView(pickNas);
-                fieldBox.addView(text("목록에서 고르면 오타가 없습니다. 직접 적을 때는 공유 폴더 이름부터 적습니다.", 12, MUTED));
-                break;
-            case "s3":
-                LinearLayout presets = hbox();
-                Button ncp = secondary("네이버 클라우드");
-                ncp.setOnClickListener(v -> { fields.get("endpoint").setText("https://kr.object.ncloudstorage.com"); fields.get("region").setText("kr-standard"); });
-                Button gcs = secondary("Google Cloud");
-                gcs.setOnClickListener(v -> { fields.get("endpoint").setText("https://storage.googleapis.com"); fields.get("region").setText("auto"); });
-                presets.addView(ncp, weight());
-                presets.addView(gcs, weight());
-                fieldBox.addView(presets);
-                field("endpoint", "엔드포인트", "https://kr.object.ncloudstorage.com", false, saved, "https://kr.object.ncloudstorage.com");
-                field("region", "리전", "kr-standard", false, saved, "kr-standard");
-                field("bucket", "버킷 이름", "my-obsidian", false, saved);
-                field("prefix", "저장 폴더", "obsidian", false, saved, "obsidian");
-                field("access_key", "Access Key", "", false, saved);
-                field("secret_key", "Secret Key", "", true, saved);
-                break;
-            case "one_drive":
-                field("client_id", "앱 Client ID", "Azure 앱 등록의 애플리케이션 ID", false, saved);
-                field("folder", "OneDrive 폴더", "ObsidianSync", false, saved, "ObsidianSync");
-                break;
-            case "google_drive":
-                field("client_id", "Client ID", "TV 및 입력 제한 기기용 OAuth 클라이언트", false, saved);
-                field("client_secret", "Client Secret", "", true, saved);
-                field("folder", "Drive 폴더", "ObsidianSync", false, saved, "ObsidianSync");
-                break;
-            default:
-                field("path", "대상 폴더 경로", "/storage/emulated/0/Sync/Obsidian", false, saved);
-        }
-        testResult.setText("");
-        otpBox.setVisibility(View.GONE);
-        refreshLogin();
-    }
-
-    // ─────────────────────────── NAS 폴더 선택 ───────────────────────────
-    private void openNasPicker() {
-        EditText url = fields.get("url"), user = fields.get("username");
-        if (url == null || user == null || url.getText().toString().trim().isEmpty() || user.getText().toString().trim().isEmpty()) {
-            toast("NAS 주소와 아이디를 먼저 입력하세요");
-            return;
-        }
-        String cur = fields.get("folder").getText().toString().trim().replaceAll("/+$", "");
-        int i = cur.lastIndexOf('/');
-        new NasPicker().show(i > 0 ? cur.substring(0, i) : "/");
-    }
-
-    /** NAS 폴더를 목록에서 골라 '저장소 폴더' 칸에 넣는 창 */
-    private final class NasPicker {
-        final String backend = backendStr();
-        final String dir = ConfigStore.dataDir(MainActivity.this);
-        String path = "/";
-        AlertDialog dialog;
-        TextView pathView, msg;
-        LinearLayout list, otpRow, newRow;
-        EditText otpIn, newName;
-        Button up, use;
-
-        void show(String start) {
-            LinearLayout box = vbox();
-            box.setPadding(dp(20), dp(8), dp(20), 0);
-            LinearLayout head = hbox();
-            up = secondary("위로");
-            up.setOnClickListener(v -> load(parent(path), null, null));
-            head.addView(up);
-            pathView = text("", 15, TEXT);
-            pathView.setTypeface(Typeface.DEFAULT_BOLD);
-            pathView.setPadding(dp(10), 0, 0, 0);
-            head.addView(pathView, weight());
-            box.addView(head);
-            msg = text("", 13, MUTED);
-            box.addView(msg);
-            list = vbox();
-            ScrollView sv = new ScrollView(MainActivity.this);
-            sv.addView(list);
-            box.addView(sv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(280)));
-            otpRow = hbox();
-            otpIn = input("", "인증 코드 6자리", false);
-            otpIn.setInputType(InputType.TYPE_CLASS_NUMBER);
-            otpRow.addView(otpIn, weight());
-            Button ok = primary("인증");
-            ok.setOnClickListener(v -> {
-                String code = otpIn.getText().toString().trim();
-                if (!code.isEmpty()) load(path, null, code);
-            });
-            otpRow.addView(ok);
-            box.addView(otpRow);
-            newRow = hbox();
-            newName = input("", "새 폴더 이름", false);
-            newRow.addView(newName, weight());
-            Button mk = secondary("+ 새 폴더");
-            mk.setOnClickListener(v -> {
-                String n = newName.getText().toString().trim();
-                if (n.isEmpty()) { toast("새 폴더 이름을 입력하세요"); return; }
-                load(path, n, null);
-            });
-            newRow.addView(mk);
-            box.addView(newRow);
-            dialog = new AlertDialog.Builder(MainActivity.this)
-                    .setTitle("NAS 폴더 선택")
-                    .setView(box)
-                    .setPositiveButton("이 폴더 사용", null)
-                    .setNegativeButton("취소", null)
-                    .create();
-            dialog.setOnShowListener(x -> {
-                use = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
-                use.setOnClickListener(v -> {
-                    EditText f = fields.get("folder");
-                    if (f != null) f.setText(path);
-                    testResult.setText("");
-                    dialog.dismiss();
-                });
-                load(start, null, null);
-            });
-            dialog.show();
-        }
-
-        String parent(String p) {
-            int i = p.lastIndexOf('/');
-            return i > 0 ? p.substring(0, i) : "/";
-        }
-
-        /** 폴더 목록 불러오기. create가 있으면 새 폴더를 만들고 그 안으로, otp가 있으면 먼저 인증 */
-        void load(String p, String create, String otp) {
-            path = p;
-            boolean root = "/".equals(p);
-            pathView.setText(root ? "공유 폴더" : p);
-            up.setEnabled(!root);
-            use.setEnabled(false);
-            newRow.setVisibility(root ? View.GONE : View.VISIBLE);
-            otpRow.setVisibility(View.GONE);
-            list.removeAllViews();
-            msg.setTextColor(MUTED);
-            msg.setText("불러오는 중…");
-            bg.execute(() -> {
-                JSONObject r;
-                String target = p;
-                try {
-                    r = new JSONObject("{\"ok\":true}");
-                    if (otp != null) r = new JSONObject(Native.synologyLogin(backend, dir, otp));
-                    if (r.optBoolean("ok") && create != null) {
-                        r = new JSONObject(Native.synologyCreateFolder(backend, dir, p, create));
-                        if (r.optBoolean("ok")) target = r.optString("path", p);
-                    }
-                    if (r.optBoolean("ok")) r = new JSONObject(Native.synologyFolders(backend, dir, target));
-                } catch (Exception e) {
-                    r = new JSONObject();
-                }
-                JSONObject res = r;
-                String at = target;
-                ui.post(() -> show(at, res));
-            });
-        }
-
-        void show(String at, JSONObject r) {
-            if (!dialog.isShowing()) return;
-            path = at;
-            boolean root = "/".equals(at);
-            pathView.setText(root ? "공유 폴더" : at);
-            up.setEnabled(!root);
-            newRow.setVisibility(root ? View.GONE : View.VISIBLE);
-            if (r.optBoolean("ok")) {
-                newName.setText("");
-                JSONArray fs = r.optJSONArray("folders");
-                int n = fs == null ? 0 : fs.length();
-                msg.setText(root ? "공유 폴더를 눌러 들어간 뒤, 동기화할 폴더에서 [이 폴더 사용]을 누르세요."
-                        : n == 0 ? "하위 폴더가 없습니다" : "");
-                for (int i = 0; i < n; i++) {
-                    JSONObject f = fs.optJSONObject(i);
-                    if (f == null) continue;
-                    String fp = f.optString("path");
-                    TextView row = text(f.optString("name") + "   ›", 16, TEXT);
-                    row.setPadding(dp(4), dp(12), dp(4), dp(12));
-                    row.setOnClickListener(v -> load(fp, null, null));
-                    list.addView(row);
-                }
-                use.setEnabled(!root);
-            } else if (r.optBoolean("need_otp")) {
-                otpRow.setVisibility(View.VISIBLE);
-                msg.setTextColor(WARN);
-                msg.setText("2단계 인증이 필요합니다. OTP 앱의 6자리 코드를 입력하세요.");
-                otpIn.requestFocus();
-            } else {
-                msg.setTextColor(DANGER);
-                msg.setText("✖ " + friendly(r.optString("error", "NAS에 연결할 수 없습니다")));
-            }
-        }
-    }
-
-    private void field(String key, String label, String hint, boolean secret, JSONObject saved) { field(key, label, hint, secret, saved, ""); }
-
-    private void field(String key, String label, String hint, boolean secret, JSONObject saved, String def) {
-        fieldBox.addView(label(label));
-        EditText e = input(saved != null ? saved.optString(key, def) : def, hint, secret);
-        fieldBox.addView(e);
-        fields.put(key, e);
-    }
-
-    private JSONObject backendJson() throws Exception {
-        JSONObject b = new JSONObject();
-        b.put("type", backendType);
-        for (Map.Entry<String, EditText> e : fields.entrySet()) {
-            String v = e.getValue().getText().toString();
-            b.put(e.getKey(), e.getKey().equals("password") ? v : v.trim());
-        }
-        if (backendType.equals("one_drive")) b.put("tenant", "common");
-        return b;
-    }
-
-    private String backendStr() {
-        try { return backendJson().toString(); } catch (Exception e) { return "{}"; }
-    }
-
-    /** 편집 중인 내용을 프로필 JSON으로 */
-    /** 동기화 방향에 맞는 옵션만 보여 줍니다. */
-    private void updateModeOptions() {
-        boolean two = modeTwoWay.isChecked();
-        twoWayBox.setVisibility(two ? View.VISIBLE : View.GONE);
-        chkTarget.setVisibility(two ? View.GONE : View.VISIBLE);
-        if (modeUp.isChecked()) {
-            chkTarget.setText("휴대폰에서 지운 파일은 저장소에서도 지우기 (끄면 저장소에 남음)");
-        } else if (modeDown.isChecked()) {
-            chkTarget.setText("저장소에서 지운 파일은 휴대폰에서도 지우기 (.trash 로 이동, 끄면 휴대폰에 남음)");
-        }
-    }
-
-    private JSONObject profileJson() throws Exception {
-        JSONObject p = new JSONObject(edit.toString());
-        p.put("name", nameEdit.getText().toString().trim());
-        p.put("kind", kindObsidian.isChecked() ? "obsidian" : "folder");
-        p.put("enabled", chkEnabled.isChecked());
-        p.put("local_path", localPath.getText().toString().trim());
-        p.put("backend", backendJson());
-        p.put("mode", modeUp.isChecked() ? "upload_only" : modeDown.isChecked() ? "download_only" : "two_way");
-        p.put("propagate_deletes", chkDeletes.isChecked());
-        p.put("conflict_policy", polLocal.isChecked() ? "prefer_local" : polRemote.isChecked() ? "prefer_remote" : "keep_both");
-        p.put("delete_in_target", chkTarget.isChecked());
-        p.put("sync_obsidian_folder", chkObsidian.isChecked());
-        JSONArray ig = new JSONArray();
-        for (String l : ignoreEdit.getText().toString().split("\n")) if (!l.trim().isEmpty()) ig.put(l.trim());
-        p.put("ignore_patterns", ig);
-        return p;
-    }
-
-    private void saveProfile() {
-        if (!Environment.isExternalStorageManager()) {
-            toast("먼저 목록 화면에서 '모든 파일 접근' 권한을 허용해 주세요");
-            return;
-        }
-        try {
-            JSONObject p = profileJson();
-            JSONObject next = new JSONObject(cfg.toString());
-            JSONArray ps = next.optJSONArray("profiles");
-            if (ps == null) { ps = new JSONArray(); next.put("profiles", ps); }
-            if (editIndex >= 0) ps.put(editIndex, p); else ps.put(p);
-            JSONObject v = new JSONObject(Native.validate(withDevice(next).toString()));
-            if (!v.optBoolean("ok")) { toast(friendly(v.optString("error"))); return; }
-            cfg = next;
-            persist(true);
-            if (ConfigStore.enabled(this)) SyncService.start(this); // 바뀐 설정으로 다시 시작
-            toast("저장했습니다");
-            showList();
-        } catch (Exception e) {
-            toast("저장하지 못했습니다");
-        }
-    }
-
-    private JSONObject withDevice(JSONObject c) throws Exception {
-        if (!c.has("poll_interval_secs")) c.put("poll_interval_secs", 60);
-        if (c.optString("device_name").isEmpty()) c.put("device_name", Build.MODEL.replace(' ', '-'));
-        return c;
-    }
-
-    private void persist(boolean strict) throws Exception {
-        try {
-            ConfigStore.save(this, withDevice(cfg).toString());
-        } catch (Exception e) {
-            if (strict) throw e;
-        }
-    }
-
-    private void confirmDelete() {
-        new AlertDialog.Builder(this)
-                .setTitle("프로필 삭제")
-                .setMessage("'" + displayName(edit) + "' 프로필을 지울까요? 폴더 안의 파일은 지워지지 않습니다.")
-                .setPositiveButton("삭제", (d, w) -> {
-                    try {
-                        profiles().remove(editIndex);
-                        persist(true);
-                        if (ConfigStore.enabled(this)) {
-                            if (profiles().length() == 0) SyncService.stop(this); else SyncService.start(this);
+    @Override
+    public void onBackPressed() {
+        if (webView != null) {
+            webView.evaluateJavascript(
+                    "window.__handleAndroidBack ? window.__handleAndroidBack() : false",
+                    val -> {
+                        if (!"true".equals(val) && !isFinishing() && !isDestroyed()) {
+                            MainActivity.super.onBackPressed();
                         }
-                        showList();
-                    } catch (Exception e) { toast("삭제하지 못했습니다"); }
-                })
-                .setNegativeButton("취소", null)
-                .show();
-    }
-
-    // ─────────────────────────── 동작 ───────────────────────────
-    private void startSync() {
-        String dir = ConfigStore.dataDir(this);
-        JSONArray ps = profiles();
-        for (int i = 0; i < ps.length(); i++) {
-            JSONObject p = ps.optJSONObject(i);
-            if (p == null || !p.optBoolean("enabled", true)) continue;
-            JSONObject b = p.optJSONObject("backend");
-            if (b != null && !Native.isLoggedIn(b.toString(), dir)) { toast("'" + displayName(p) + "' 프로필: 먼저 로그인해 주세요"); return; }
-        }
-        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
-            requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 1);
-        try {
-            SyncService.start(this);
-        } catch (RuntimeException e) {
-            toast("Android가 백그라운드 시작을 막았습니다. 잠시 후 다시 눌러 주세요");
-            return;
-        }
-        // 서비스가 시스템에 의해 꺼졌을 때를 대비한 예비 주기 동기화
-        Constraints net = new Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build();
-        WorkManager.getInstance(this).enqueueUniquePeriodicWork("obsidian-sync", ExistingPeriodicWorkPolicy.UPDATE,
-                new PeriodicWorkRequest.Builder(SyncWorker.class, 15, TimeUnit.MINUTES).setConstraints(net).build());
-        toast("실시간 동기화를 시작했습니다");
-        ui.postDelayed(this::tick, 800);
-    }
-
-    // ─────────────────────────── 앱 업데이트 ───────────────────────────
-    private void scheduleUpdateCheck() {
-        WorkManager wm = WorkManager.getInstance(this);
-        if (!Updater.autoEnabled(this)) { wm.cancelUniqueWork("app-update"); return; }
-        Constraints net = new Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build();
-        wm.enqueueUniquePeriodicWork("app-update", ExistingPeriodicWorkPolicy.KEEP,
-                new PeriodicWorkRequest.Builder(UpdateWorker.class, 6, TimeUnit.HOURS).setConstraints(net).build());
-    }
-
-    private void showUpdateState() {
-        if (updateLine == null) return;
-        String v = "버전 " + Updater.currentName(this);
-        String msg = Updater.lastMessage(this);
-        if (available != null) {
-            updateLine.setText(v + "\n새 버전 " + available.tag + " 이 있습니다");
-            updateLine.setTextColor(ACCENT);
-            updateBtn.setText("지금 업데이트");
+                    });
         } else {
-            updateLine.setText(msg.isEmpty() ? v : v + "\n" + msg);
-            updateLine.setTextColor(MUTED);
-            updateBtn.setText("업데이트 확인");
+            super.onBackPressed();
         }
     }
 
-    /** 화면을 열 때 새 버전이 있는지만 확인합니다. */
-    private void checkUpdateQuietly() {
-        showUpdateState();
-        bg.execute(() -> {
-            try {
-                Updater.Release r = Updater.check(this);
-                ui.post(() -> { available = r; showUpdateState(); });
-            } catch (Exception ignored) { }
-        });
-    }
-
-    private void updateNow() {
-        if (!getPackageManager().canRequestPackageInstalls()) {
-            toast("'이 출처 허용'을 켠 뒤 돌아와서 다시 눌러 주세요");
-            startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName())));
-            return;
+    private static WebResourceResponse toWebResourceResponse(byte[] packed) {
+        if (packed == null) {
+            return new WebResourceResponse("text/plain", "utf-8", 404, "Not Found", null,
+                    new ByteArrayInputStream(new byte[0]));
         }
-        updateBtn.setEnabled(false);
-        updateLine.setText("새 버전 확인 중…");
-        bg.execute(() -> {
-            String result;
-            try {
-                String tag = Updater.run(this);
-                result = tag == null ? "이미 최신 버전입니다" : tag + " 설치를 시작했습니다";
-            } catch (Exception e) {
-                result = "업데이트 실패: " + e.getMessage();
-                Updater.setMessage(this, result);
+        int nl = -1;
+        int limit = Math.min(packed.length, 160);
+        for (int i = 0; i < limit; i++) {
+            if (packed[i] == '\n') {
+                nl = i;
+                break;
             }
-            String r = result;
-            ui.post(() -> {
-                updateBtn.setEnabled(true);
-                available = null;
-                showUpdateState();
-                toast(r);
-            });
+        }
+        if (nl < 0) {
+            return new WebResourceResponse("application/octet-stream", null,
+                    new ByteArrayInputStream(packed));
+        }
+        String fullMime = new String(packed, 0, nl, StandardCharsets.UTF_8);
+        String mime = fullMime;
+        String encoding = null;
+        int semi = fullMime.indexOf(';');
+        if (semi >= 0) {
+            mime = fullMime.substring(0, semi).trim();
+            String rest = fullMime.substring(semi + 1).toLowerCase(Locale.ROOT);
+            if (rest.contains("utf-8")) encoding = "utf-8";
+        }
+        byte[] body = Arrays.copyOfRange(packed, nl + 1, packed.length);
+        Map<String, String> headers = new HashMap<>();
+        headers.put("Cache-Control", mime.startsWith("image/") ? "private, max-age=60" : "no-store");
+        return new WebResourceResponse(mime, encoding, 200, "OK", headers, new ByteArrayInputStream(body));
+    }
+
+    // ─────────────────────────── JS Bridge ───────────────────────────
+    final class StudioBridge {
+        @JavascriptInterface
+        public void invokeApiAsync(String callbackId, String endpoint, String bodyJson) {
+            bg.execute(() -> handleApiCall(callbackId, endpoint, bodyJson == null ? "{}" : bodyJson));
+        }
+
+        @JavascriptInterface
+        public String takeApiResponse(String callbackId) {
+            String v = pendingResponses.remove(callbackId);
+            return v == null ? "{\"ok\":false,\"error\":\"응답이 만료되었습니다\"}" : v;
+        }
+    }
+
+    private void completeRpc(String callbackId, String jsonResponse) {
+        pendingResponses.put(callbackId, jsonResponse);
+        ui.post(() -> {
+            if (webView != null) {
+                webView.evaluateJavascript(
+                        "window.__onAndroidRpcDone && window.__onAndroidRpcDone("
+                                + JSONObject.quote(callbackId) + ");",
+                        null);
+            }
         });
     }
 
-    private void toggle() {
-        if (ConfigStore.enabled(this)) {
-            SyncService.stop(this);
-            WorkManager.getInstance(this).cancelUniqueWork("obsidian-sync");
-            ui.postDelayed(this::tick, 500);
-            return;
-        }
-        if (!Environment.isExternalStorageManager()) {
-            toast("먼저 '모든 파일 접근' 권한을 허용해 주세요");
-            permWarn.performClick();
-            return;
-        }
+    private static String okJson(Object data) {
         try {
-            JSONObject v = new JSONObject(Native.validate(withDevice(cfg).toString()));
-            if (!v.optBoolean("ok")) { toast(friendly(v.optString("error"))); return; }
-            persist(true);
+            return new JSONObject().put("ok", true).put("data", data).toString();
         } catch (Exception e) {
-            toast("설정을 저장하지 못했습니다");
-            return;
+            return "{\"ok\":false,\"error\":\"직렬화 오류\"}";
         }
-        startSync();
     }
 
-    private void testConnection() {
-        String backend = backendStr();
-        testResult.setTextColor(MUTED);
-        testResult.setText("확인하는 중…");
-        bg.execute(() -> {
-            String r = Native.testConnection(backend, ConfigStore.dataDir(this));
-            ui.post(() -> showTestResult(r, false));
-        });
-    }
-
-    private void submitOtp() {
-        String backend = backendStr(), otp = otpEdit.getText().toString().trim();
-        if (otp.isEmpty()) { toast("인증 코드를 입력하세요"); return; }
-        otpEdit.setText("");
-        testResult.setTextColor(MUTED);
-        testResult.setText("인증하는 중…");
-        bg.execute(() -> {
-            String dir = ConfigStore.dataDir(this);
-            String r = Native.synologyLogin(backend, dir, otp);
-            try { if (new JSONObject(r).optBoolean("ok")) r = Native.testConnection(backend, dir); } catch (Exception ignored) { }
-            String fr = r;
-            ui.post(() -> { showTestResult(fr, true); refreshLogin(); });
-        });
-    }
-
-    private void showTestResult(String r, boolean afterOtp) {
-        if (!editing) return;
+    private static String errJson(String msg) {
         try {
-            JSONObject o = new JSONObject(r);
-            if (o.optBoolean("ok")) {
-                int n = o.optInt("count");
-                otpBox.setVisibility(View.GONE);
-                testResult.setTextColor(OK);
-                String pre = afterOtp ? "✔ 인증 완료! 다음부터는 코드를 묻지 않습니다. " : "✔ 연결 성공! ";
-                testResult.setText(pre + (n == 0 ? "원격 폴더가 비어 있어(또는 아직 없어) 첫 동기화 때 파일을 올립니다." : "원격에 파일 " + n + "개가 있습니다."));
-            } else if (o.optBoolean("need_otp")) {
-                otpBox.setVisibility(View.VISIBLE);
-                testResult.setTextColor(WARN);
-                testResult.setText(o.optString("error").split("\n")[0]);
-                otpEdit.requestFocus();
-            } else {
-                testResult.setTextColor(DANGER);
-                testResult.setText("✖ " + friendly(o.optString("error")));
+            return new JSONObject().put("ok", false).put("error", msg == null ? "오류" : msg).toString();
+        } catch (Exception e) {
+            return "{\"ok\":false,\"error\":\"오류\"}";
+        }
+    }
+
+    private void handleApiCall(String cbId, String endpoint, String bodyJson) {
+        try {
+            if ("workspace/open_vault_dialog".equals(endpoint) || "sync/pick_folder".equals(endpoint)) {
+                ui.post(() -> startFolderPickerFlow(cbId, endpoint));
+                return;
+            }
+            if ("vault/pick_attachment".equals(endpoint) || "vault/pick_file_attachment".equals(endpoint)) {
+                JSONObject req = new JSONObject(bodyJson);
+                String vault = req.optString("vault", "");
+                boolean imageOnly = "vault/pick_attachment".equals(endpoint);
+                ui.post(() -> startAttachmentPickerFlow(cbId, vault, imageOnly));
+                return;
+            }
+            if ("note/export_pdf".equals(endpoint)) {
+                JSONObject req = new JSONObject(bodyJson);
+                String name = req.optString("default_filename", "document.pdf").replaceAll("\\.pdf$", "");
+                boolean landscape = req.optBoolean("landscape", false);
+                ui.post(() -> startAndroidPrint(cbId, name, landscape));
+                return;
+            }
+            if ("sync/open_path".equals(endpoint)) {
+                String path = new JSONObject(bodyJson).optString("path", "").trim();
+                if (path.startsWith("http://") || path.startsWith("https://")) {
+                    ui.post(() -> {
+                        try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(path))); }
+                        catch (Exception ignored) { }
+                    });
+                } else if (!path.isEmpty()) {
+                    ui.post(() -> Toast.makeText(this, "경로: " + path, Toast.LENGTH_SHORT).show());
+                }
+                completeRpc(cbId, okJson(new JSONObject()));
+                return;
+            }
+            if ("sync/open_data_dir".equals(endpoint)) {
+                String dir = ConfigStore.dataDir(this);
+                ui.post(() -> Toast.makeText(this, "설정 폴더: " + dir, Toast.LENGTH_SHORT).show());
+                completeRpc(cbId, okJson(new JSONObject()));
+                return;
+            }
+            if ("android/info".equals(endpoint)) {
+                JSONObject info = new JSONObject()
+                        .put("version", Updater.currentName(this))
+                        .put("auto_update", Updater.autoEnabled(this))
+                        .put("all_files_granted", Environment.isExternalStorageManager())
+                        .put("available_update_tag", availableUpdate == null ? JSONObject.NULL : availableUpdate.tag)
+                        .put("last_update_message", Updater.lastMessage(this));
+                completeRpc(cbId, okJson(info));
+                return;
+            }
+            if ("android/grant_files_access".equals(endpoint)) {
+                ui.post(() -> {
+                    try {
+                        startActivity(new Intent(
+                                Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                                Uri.parse("package:" + getPackageName())));
+                    } catch (Exception e) {
+                        Toast.makeText(this, "설정 화면을 열 수 없습니다.", Toast.LENGTH_SHORT).show();
+                    }
+                });
+                completeRpc(cbId, okJson(new JSONObject().put("opened", true)));
+                return;
+            }
+            if ("android/set_auto_update".equals(endpoint)) {
+                boolean on = new JSONObject(bodyJson).optBoolean("enabled", true);
+                Updater.setAutoEnabled(this, on);
+                scheduleUpdateCheck();
+                completeRpc(cbId, okJson(new JSONObject().put("auto_update", on)));
+                return;
+            }
+            if ("android/update_now".equals(endpoint)) {
+                handleUpdateNowRpc(cbId);
+                return;
+            }
+
+            String res = Native.studioApi("/api/" + endpoint, bodyJson);
+            if ("sync/save_config".equals(endpoint)
+                    || "sync/start".equals(endpoint)
+                    || "sync/stop".equals(endpoint)
+                    || "sync/set_autostart".equals(endpoint)) {
+                syncAndroidServiceHook(endpoint, res);
+            }
+            completeRpc(cbId, res);
+        } catch (Exception e) {
+            completeRpc(cbId, errJson(e.getMessage()));
+        }
+    }
+
+    private void syncAndroidServiceHook(String endpoint, String resJson) {
+        try {
+            String savedCfg = Native.studioSavedConfigJson();
+            if (!savedCfg.isEmpty()) {
+                ConfigStore.save(this, savedCfg);
+            }
+            JSONObject resp = new JSONObject(resJson);
+            if (!resp.optBoolean("ok")) return;
+            JSONObject snap = resp.optJSONObject("data");
+            boolean running = snap != null && (snap.optBoolean("service_running") || snap.optBoolean("transitioning"));
+
+            if ("sync/stop".equals(endpoint)) {
+                ConfigStore.setEnabled(this, false);
+                WorkManager.getInstance(this).cancelUniqueWork("obsidian-sync");
+                SyncService.stop(this);
+            } else if (running || "sync/start".equals(endpoint)) {
+                ConfigStore.setEnabled(this, true);
+                ui.post(() -> {
+                    if (Build.VERSION.SDK_INT >= 33
+                            && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                                    != PackageManager.PERMISSION_GRANTED) {
+                        requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 1);
+                    }
+                    try { SyncService.attachForeground(this); } catch (RuntimeException ignored) { }
+                    Constraints net = new Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build();
+                    WorkManager.getInstance(this).enqueueUniquePeriodicWork(
+                            "obsidian-sync",
+                            ExistingPeriodicWorkPolicy.UPDATE,
+                            new PeriodicWorkRequest.Builder(SyncWorker.class, 15, TimeUnit.MINUTES)
+                                    .setConstraints(net)
+                                    .build());
+                });
             }
         } catch (Exception ignored) { }
     }
 
-    private void refreshLogin() {
-        if (loginBox == null || !editing) return;
-        loginBox.removeAllViews();
-        String backend = backendStr(), dir = ConfigStore.dataDir(this);
-        if (backendType.equals("synology")) {
-            if (Native.synologyRemembered(backend, dir)) {
-                LinearLayout row = hbox();
-                row.addView(text("● 2단계 인증 완료 (이 휴대폰 기억됨)", 14, OK), weight());
-                Button f = secondary("기억 해제");
-                f.setOnClickListener(v -> { Native.synologyForget(backend, dir); refreshLogin(); });
-                row.addView(f);
-                loginBox.addView(row);
-            }
-            return;
-        }
-        if (!backendType.equals("one_drive") && !backendType.equals("google_drive")) return;
-        if (loggingIn) return;
-        boolean in = Native.isLoggedIn(backend, dir);
-        LinearLayout row = hbox();
-        TextView st = text(in ? "● 계정 연결됨" : "● 로그인 필요", 14, in ? OK : WARN);
-        row.addView(st, weight());
-        Button b = secondary(in ? "다시 로그인" : "로그인");
-        b.setOnClickListener(v -> login());
-        row.addView(b);
-        if (in) {
-            Button out = secondary("로그아웃");
-            out.setOnClickListener(v -> { Native.logout(backend, dir); refreshLogin(); });
-            row.addView(out);
-        }
-        loginBox.addView(row);
-    }
-
-    private void login() {
-        String backend = backendStr();
-        loggingIn = true;
-        loginBox.removeAllViews();
-        loginBox.addView(text("로그인 준비 중…", 14, MUTED));
+    // ─────────────────────────── Folder / Attachment Pickers ───────────────────────────
+    private void finishPendingFolderCancelled() {
+        String cbId = pendingFolderCallbackId;
+        String ep = pendingFolderEndpoint;
+        pendingFolderCallbackId = null;
+        pendingFolderEndpoint = null;
+        if (cbId == null) return;
         bg.execute(() -> {
             try {
-                JSONObject s = new JSONObject(Native.loginStart(backend));
-                if (!s.optBoolean("ok")) throw new Exception(s.optString("error"));
-                String code = s.optString("user_code"), uri = s.optString("verification_uri");
-                ui.post(() -> showCode(code, uri));
-                JSONObject w = new JSONObject(Native.loginWait(backend, ConfigStore.dataDir(this)));
-                if (!w.optBoolean("ok")) throw new Exception(w.optString("error"));
-                ui.post(() -> { loggingIn = false; refreshLogin(); toast("로그인했습니다. 연결 테스트로 확인해 보세요"); });
+                if ("sync/pick_folder".equals(ep)) {
+                    completeRpc(cbId, okJson(new JSONObject().put("path", JSONObject.NULL)));
+                    return;
+                }
+                JSONObject boot = new JSONObject(Native.studioApi("/api/bootstrap", "{}"));
+                JSONObject data = boot.optJSONObject("data");
+                if (data != null) data.put("picked", JSONObject.NULL);
+                completeRpc(cbId, boot.toString());
             } catch (Exception e) {
-                ui.post(() -> { loggingIn = false; refreshLogin(); toast(friendly(String.valueOf(e.getMessage()))); });
+                completeRpc(cbId, errJson(e.getMessage()));
             }
         });
     }
 
-    private void showCode(String code, String uri) {
-        if (!editing) return;
-        loginBox.removeAllViews();
-        LinearLayout box = vbox();
-        box.setPadding(dp(12), dp(10), dp(12), dp(10));
-        box.setBackground(round(ACCENT_SOFT, ACCENT_SOFT, 0, 10));
-        box.addView(text("아래 코드를 복사한 뒤, 열리는 브라우저 화면에 붙여넣고 계정을 승인하세요.", 14, TEXT));
-        TextView c = text(code, 28, ACCENT);
-        c.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
-        c.setGravity(Gravity.CENTER);
-        box.addView(c);
-        LinearLayout r = hbox();
-        Button copy = primary("코드 복사 후 브라우저 열기");
-        copy.setOnClickListener(v -> {
-            getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText("code", code));
-            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(uri)));
-        });
-        Button cancel = secondary("취소");
-        cancel.setOnClickListener(v -> Native.loginCancel());
-        r.addView(copy, weight());
-        r.addView(cancel);
-        box.addView(r);
-        box.addView(text("승인을 기다리는 중… 승인 후 이 앱으로 돌아오세요.", 13, MUTED));
-        loginBox.addView(box);
+    private void startFolderPickerFlow(String cbId, String endpoint) {
+        if (pendingFolderCallbackId != null) {
+            completeRpc(cbId, errJson("이미 폴더 선택기가 열려 있습니다."));
+            return;
+        }
+        pendingFolderCallbackId = cbId;
+        pendingFolderEndpoint = endpoint;
+
+        if (!Environment.isExternalStorageManager()) {
+            new AlertDialog.Builder(this)
+                    .setTitle("모든 파일 접근 권한 필요")
+                    .setMessage("휴대폰 저장소의 Obsidian 볼트 폴더(.md 파일 및 첨부파일)를 읽고 쓰려면 '모든 파일 접근 권한' 허용이 필요합니다.")
+                    .setPositiveButton("권한 설정 열기", (d, w) -> {
+                        try {
+                            startActivityForResult(
+                                    new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                                            Uri.parse("package:" + getPackageName())),
+                                    REQ_MANAGE_FILES);
+                        } catch (Exception e) {
+                            finishPendingFolderCancelled();
+                        }
+                    })
+                    .setNegativeButton("취소", (d, w) -> finishPendingFolderCancelled())
+                    .setOnCancelListener(d -> finishPendingFolderCancelled())
+                    .show();
+            return;
+        }
+        launchDocumentTreePicker();
     }
 
-    private void resetState() {
-        String json = cfg.toString(), id = edit.optString("id");
-        bg.execute(() -> {
-            String r = Native.resetState(json, ConfigStore.dataDir(this), id);
-            ui.post(() -> toast(r.contains("\"ok\":true") ? "동기화 기록을 초기화했습니다" : "초기화하지 못했습니다: " + friendly(r)));
-        });
-    }
-
-    // ─────────────────────────── 상태 갱신 ───────────────────────────
-    private void tick() {
-        ui.removeCallbacksAndMessages(null);
-        if (editing || statusTitle == null) return;
+    private void launchDocumentTreePicker() {
         try {
-            JSONObject s = new JSONObject(Native.status());
-            boolean enabled = ConfigStore.enabled(this);
-            String startErr = getSharedPreferences("state", 0).getString("start_error", null);
-            String err = s.isNull("last_error") ? null : s.optString("last_error", null);
-            if (s.optBoolean("syncing")) setStatus(ACCENT, "동기화 중…", "변경된 파일을 주고받고 있습니다");
-            else if (enabled && startErr != null) setStatus(DANGER, "시작하지 못했습니다", friendly(startErr));
-            else if (s.optBoolean("running") && err != null && !err.isEmpty()) setStatus(DANGER, "확인이 필요합니다", friendly(err));
-            else if (s.optBoolean("running")) setStatus(OK, "실시간 동기화 켜짐",
-                    s.isNull("last_sync") ? "첫 동기화를 준비하고 있습니다" : "마지막 동기화 " + s.optString("last_sync"));
-            else if (enabled) setStatus(WARN, "다시 시작하는 중…", "잠시만 기다려 주세요");
-            else if (profiles().length() == 0) setStatus(WARN, "설정이 필요합니다", "아래에서 동기화할 폴더를 추가하세요");
-            else setStatus(MUTED, "동기화 꺼짐", "시작을 누르면 실시간 동기화가 켜집니다");
-            toggleBtn.setText(enabled ? "일시 중지" : "동기화 시작");
-            syncBtn.setEnabled(s.optBoolean("running") && !s.optBoolean("syncing"));
+            startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQ_PICK_FOLDER);
+        } catch (Exception e) {
+            finishPendingFolderCancelled();
+        }
+    }
 
-            // 프로필별 상태
-            JSONArray pst = s.optJSONArray("profiles");
-            int pending = 0;
-            if (pst != null) for (int i = 0; i < pst.length(); i++)
-                if (!pst.getJSONObject(i).isNull("pending_deletes")) pending += pst.getJSONObject(i).optInt("pending_deletes");
-            deleteBtn.setVisibility(pending > 0 ? View.VISIBLE : View.GONE);
-            deleteBtn.setEnabled(pending > 0);
-            if (pending > 0) deleteBtn.setText("삭제 진행 (" + pending + "개)");
-            for (TextView line : profileLines) {
-                JSONObject st = null;
-                if (pst != null) for (int i = 0; i < pst.length(); i++)
-                    if (pst.getJSONObject(i).optString("id").equals(line.getTag())) st = pst.getJSONObject(i);
-                if (st == null) { line.setText(s.optBoolean("running") ? "꺼짐" : ""); line.setTextColor(MUTED); }
-                else if (st.optBoolean("syncing")) { line.setText("● 동기화 중…"); line.setTextColor(ACCENT); }
-                else if (!st.isNull("last_error")) { line.setText("● " + friendly(st.optString("last_error"))); line.setTextColor(DANGER); }
-                else if (!st.isNull("last_sync")) { line.setText("● " + st.optString("last_sync").substring(5) + " · " + st.optString("last_summary")); line.setTextColor(OK); }
-                else { line.setText("● 준비 중"); line.setTextColor(MUTED); }
+    private void startAttachmentPickerFlow(String cbId, String vault, boolean imageOnly) {
+        if (pendingAttachCallbackId != null) {
+            completeRpc(cbId, errJson("이미 파일 선택기가 열려 있습니다."));
+            return;
+        }
+        pendingAttachCallbackId = cbId;
+        pendingAttachVault = vault;
+        pendingAttachImageOnly = imageOnly;
+        try {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType(imageOnly ? "image/*" : "*/*");
+            startActivityForResult(i, REQ_PICK_ATTACHMENT);
+        } catch (Exception e) {
+            pendingAttachCallbackId = null;
+            completeRpc(cbId, errJson("파일 선택기를 열 수 없습니다."));
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int req, int res, Intent data) {
+        super.onActivityResult(req, res, data);
+
+        if (req == REQ_WEB_FILE_CHOOSER) {
+            ValueCallback<Uri[]> cb = webFileChooserCallback;
+            webFileChooserCallback = null;
+            if (cb != null) {
+                Uri[] uris = WebChromeClient.FileChooserParams.parseResult(res, data);
+                cb.onReceiveValue(uris);
             }
+            return;
+        }
 
-            logBox.removeAllViews();
-            JSONArray logs = s.optJSONArray("logs");
-            if (logs == null || logs.length() == 0) logBox.addView(text("아직 기록이 없습니다", 13, MUTED));
-            else for (int i = logs.length() - 1; i >= Math.max(0, logs.length() - 10); i--) {
-                JSONObject l = logs.getJSONObject(i);
-                logBox.addView(text(l.optString("time").substring(6) + "  " + l.optString("text"), 13, l.optBoolean("error") ? DANGER : TEXT));
+        if (req == REQ_MANAGE_FILES) {
+            if (pendingFolderCallbackId != null) {
+                if (Environment.isExternalStorageManager()) {
+                    launchDocumentTreePicker();
+                } else {
+                    String cbId = pendingFolderCallbackId;
+                    pendingFolderCallbackId = null;
+                    pendingFolderEndpoint = null;
+                    completeRpc(cbId, errJson("모든 파일 접근 권한이 허용되지 않았습니다."));
+                }
+            }
+            return;
+        }
+
+        if (req == REQ_PICK_FOLDER) {
+            String cbId = pendingFolderCallbackId;
+            String ep = pendingFolderEndpoint;
+            pendingFolderCallbackId = null;
+            pendingFolderEndpoint = null;
+            if (cbId == null) return;
+            if (res != RESULT_OK || data == null || data.getData() == null) {
+                pendingFolderCallbackId = cbId;
+                pendingFolderEndpoint = ep;
+                finishPendingFolderCancelled();
+                return;
+            }
+            String pickedPath = treeToPath(data.getData());
+            if (pickedPath == null) {
+                completeRpc(cbId, errJson("내부 저장소의 폴더를 골라 주세요."));
+                return;
+            }
+            bg.execute(() -> {
+                try {
+                    if ("sync/pick_folder".equals(ep)) {
+                        completeRpc(cbId, okJson(new JSONObject().put("path", pickedPath)));
+                    } else {
+                        String raw = Native.studioApi("/api/workspace/select_vault",
+                                new JSONObject().put("path", pickedPath).toString());
+                        JSONObject o = new JSONObject(raw);
+                        if (o.optBoolean("ok")) {
+                            JSONObject d = o.optJSONObject("data");
+                            if (d != null) d.put("picked", pickedPath);
+                        }
+                        completeRpc(cbId, o.toString());
+                    }
+                } catch (Exception e) {
+                    completeRpc(cbId, errJson(e.getMessage()));
+                }
+            });
+            return;
+        }
+
+        if (req == REQ_PICK_ATTACHMENT) {
+            String cbId = pendingAttachCallbackId;
+            String vault = pendingAttachVault;
+            boolean imageOnly = pendingAttachImageOnly;
+            pendingAttachCallbackId = null;
+            pendingAttachVault = null;
+            if (cbId == null) return;
+
+            if (res != RESULT_OK || data == null || data.getData() == null) {
+                completeRpc(cbId, Native.studioSavePickedAttachment(vault == null ? "" : vault, "", imageOnly));
+                return;
+            }
+            Uri uri = data.getData();
+            bg.execute(() -> {
+                File tmpDir = new File(getCacheDir(), "pick_" + UUID.randomUUID());
+                try {
+                    if (!tmpDir.mkdirs() && !tmpDir.isDirectory()) {
+                        throw new Exception("임시 캐시 폴더를 만들 수 없습니다.");
+                    }
+                    String name = queryDisplayName(uri);
+                    if (name == null || name.isEmpty()) {
+                        name = imageOnly ? "image.png" : "attachment.bin";
+                    }
+                    name = name.replaceAll("[\\\\/:*?\"<>|]", "_");
+                    File tmpFile = new File(tmpDir, name);
+                    try (InputStream in = getContentResolver().openInputStream(uri);
+                            OutputStream out = new FileOutputStream(tmpFile)) {
+                        if (in == null) throw new Exception("선택한 파일을 읽을 수 없습니다.");
+                        byte[] buf = new byte[32 * 1024];
+                        for (int n; (n = in.read(buf)) > 0; ) out.write(buf, 0, n);
+                    }
+                    completeRpc(cbId, Native.studioSavePickedAttachment(
+                            vault == null ? "" : vault, tmpFile.getAbsolutePath(), imageOnly));
+                } catch (Exception e) {
+                    completeRpc(cbId, errJson(e.getMessage()));
+                } finally {
+                    deleteRecursive(tmpDir);
+                }
+            });
+        }
+    }
+
+    private String queryDisplayName(Uri uri) {
+        try (Cursor c = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                int idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (idx >= 0) return c.getString(idx);
             }
         } catch (Exception ignored) { }
-        ui.postDelayed(this::tick, 1500);
+        return null;
     }
 
-    private void setStatus(int color, String title, String sub) {
-        statusDot.setBackground(round(color, color, 0, 7));
-        statusTitle.setText(title);
-        statusSub.setText(sub);
-    }
-
-    @Override protected void onActivityResult(int req, int res, Intent data) {
-        super.onActivityResult(req, res, data);
-        if (req == PICK_LOCAL && res == RESULT_OK && data != null && data.getData() != null && editing) {
-            String path = treeToPath(data.getData());
-            if (path == null) toast("이 위치는 선택할 수 없습니다. 내부 저장소의 폴더를 골라 주세요");
-            else {
-                localPath.setText(path);
-                if (nameEdit.getText().toString().trim().isEmpty()) nameEdit.setText(path.substring(path.lastIndexOf('/') + 1));
-            }
+    private static void deleteRecursive(File f) {
+        if (f == null || !f.exists()) return;
+        File[] children = f.listFiles();
+        if (children != null) {
+            for (File c : children) deleteRecursive(c);
         }
+        //noinspection ResultOfMethodCallIgnored
+        f.delete();
     }
 
     /** SAF 폴더 URI → 실제 경로 (예: primary:Documents/Vault → /storage/emulated/0/Documents/Vault) */
@@ -1147,140 +599,126 @@ public final class MainActivity extends Activity {
             int i = id.indexOf(':');
             if (i < 0) return null;
             String vol = id.substring(0, i), rel = id.substring(i + 1);
-            String base = vol.equalsIgnoreCase("primary") ? Environment.getExternalStorageDirectory().getAbsolutePath() : "/storage/" + vol;
+            String base = vol.equalsIgnoreCase("primary")
+                    ? Environment.getExternalStorageDirectory().getAbsolutePath()
+                    : "/storage/" + vol;
             return rel.isEmpty() ? base : base + "/" + rel;
         } catch (Exception e) {
             return null;
         }
     }
 
-    static String friendly(String raw) {
-        if (raw == null) return "";
-        String hint = "";
-        if (raw.contains("Synology:")) hint = "";
-        else if (raw.contains("HTTP 401") || raw.contains("HTTP 403") || raw.contains("SignatureDoesNotMatch") || raw.contains("InvalidAccessKeyId"))
-            hint = "아이디/비밀번호 또는 키가 맞지 않거나 권한이 없습니다. ";
-        else if (raw.contains("HTTP 404") || raw.contains("NoSuchBucket")) hint = "주소나 버킷/폴더 이름을 찾을 수 없습니다. ";
-        else if (raw.contains("네트워크 오류")) hint = "서버에 연결할 수 없습니다. 주소와 인터넷 연결을 확인하세요. ";
-        else if (raw.contains("다시 로그인") || raw.contains("invalid_grant")) hint = "로그인이 만료되었습니다. 다시 로그인해 주세요. ";
-        else if (raw.contains("ertificate")) hint = "NAS 인증서를 신뢰할 수 없습니다. 정식 인증서(Let's Encrypt)를 쓰거나 집에서는 http://NAS주소:5000 을 사용하세요. ";
-        String first = raw.split("\n")[0];
-        if (first.length() > 200) first = first.substring(0, 200) + "…";
-        return hint.isEmpty() ? first : hint + "(" + first + ")";
+    // ─────────────────────────── Print / PDF Export ───────────────────────────
+    private void startAndroidPrint(String cbId, String docTitle, boolean landscape) {
+        if (webView == null) {
+            completeRpc(cbId, errJson("WebView가 준비되지 않았습니다."));
+            return;
+        }
+        PrintManager pm = (PrintManager) getSystemService(PRINT_SERVICE);
+        if (pm == null) {
+            completeRpc(cbId, errJson("인쇄 서비스에 접근할 수 없습니다."));
+            return;
+        }
+        String cleanName = docTitle == null || docTitle.trim().isEmpty() ? "ObsidianSyncDocument" : docTitle.trim();
+        PrintAttributes.MediaSize mediaSize = landscape
+                ? PrintAttributes.MediaSize.ISO_A4.asLandscape()
+                : PrintAttributes.MediaSize.ISO_A4.asPortrait();
+        PrintAttributes attrs = new PrintAttributes.Builder()
+                .setMediaSize(mediaSize)
+                .setMinMargins(PrintAttributes.Margins.NO_MARGINS)
+                .build();
+
+        PrintDocumentAdapter base = webView.createPrintDocumentAdapter(cleanName);
+        PrintDocumentAdapter wrapped = new PrintDocumentAdapter() {
+            @Override public void onStart() { base.onStart(); }
+
+            @Override
+            public void onLayout(PrintAttributes oldA, PrintAttributes newA,
+                    CancellationSignal cancel, LayoutResultCallback cb, Bundle extras) {
+                base.onLayout(oldA, newA, cancel, cb, extras);
+            }
+
+            @Override
+            public void onWrite(PageRange[] pages, ParcelFileDescriptor dest,
+                    CancellationSignal cancel, WriteResultCallback cb) {
+                base.onWrite(pages, dest, cancel, cb);
+            }
+
+            @Override
+            public void onFinish() {
+                try {
+                    base.onFinish();
+                } finally {
+                    ui.post(() -> {
+                        if (webView != null) {
+                            webView.evaluateJavascript(
+                                    "var p=document.getElementById('print-root');if(p)p.innerHTML='';",
+                                    null);
+                        }
+                    });
+                }
+            }
+        };
+        pm.print(cleanName, wrapped, attrs);
+        try {
+            JSONObject d = new JSONObject()
+                    .put("exported", true)
+                    .put("path", JSONObject.NULL)
+                    .put("delegated_to_system_print", true);
+            completeRpc(cbId, okJson(d));
+        } catch (Exception e) {
+            completeRpc(cbId, errJson(e.getMessage()));
+        }
     }
 
-    // ─────────────────────────── 위젯 도우미 ───────────────────────────
-    private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
-
-    private GradientDrawable round(int fill, int stroke, int strokeDp, int radiusDp) {
-        GradientDrawable d = new GradientDrawable();
-        d.setColor(fill);
-        d.setCornerRadius(dp(radiusDp));
-        if (strokeDp > 0) d.setStroke(dp(strokeDp), stroke);
-        return d;
+    // ─────────────────────────── App Updater ───────────────────────────
+    private void scheduleUpdateCheck() {
+        WorkManager wm = WorkManager.getInstance(this);
+        if (!Updater.autoEnabled(this)) {
+            wm.cancelUniqueWork("app-update");
+            return;
+        }
+        Constraints net = new Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build();
+        wm.enqueueUniquePeriodicWork("app-update", ExistingPeriodicWorkPolicy.KEEP,
+                new PeriodicWorkRequest.Builder(UpdateWorker.class, 6, TimeUnit.HOURS)
+                        .setConstraints(net)
+                        .build());
     }
 
-    private LinearLayout vbox() { LinearLayout l = new LinearLayout(this); l.setOrientation(LinearLayout.VERTICAL); return l; }
-
-    private LinearLayout hbox() {
-        LinearLayout l = new LinearLayout(this);
-        l.setOrientation(LinearLayout.HORIZONTAL);
-        l.setGravity(Gravity.CENTER_VERTICAL);
-        return l;
+    private void checkUpdateQuietly() {
+        bg.execute(() -> {
+            try {
+                availableUpdate = Updater.check(this);
+            } catch (Exception ignored) { }
+        });
     }
 
-    private LinearLayout.LayoutParams weight() {
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
-        p.setMarginEnd(dp(6));
-        return p;
+    private void handleUpdateNowRpc(String cbId) {
+        if (!getPackageManager().canRequestPackageInstalls()) {
+            ui.post(() -> {
+                Toast.makeText(this, "'이 출처 허용'을 켠 뒤 돌아와서 다시 눌러 주세요", Toast.LENGTH_LONG).show();
+                try {
+                    startActivity(new Intent(
+                            Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                            Uri.parse("package:" + getPackageName())));
+                } catch (Exception ignored) { }
+            });
+            try {
+                completeRpc(cbId, okJson(new JSONObject().put("message", "'알 수 없는 앱 설치' 권한을 허용해 주세요.")));
+            } catch (Exception e) {
+                completeRpc(cbId, errJson(e.getMessage()));
+            }
+            return;
+        }
+        try {
+            String tag = Updater.run(this);
+            availableUpdate = null;
+            String msg = tag == null ? "이미 최신 버전입니다." : tag + " 업데이트 설치를 시작했습니다.";
+            completeRpc(cbId, okJson(new JSONObject().put("message", msg).put("tag", tag == null ? JSONObject.NULL : tag)));
+        } catch (Exception e) {
+            String errMsg = "업데이트 확인/설치 실패: " + e.getMessage();
+            Updater.setMessage(this, errMsg);
+            completeRpc(cbId, errJson(errMsg));
+        }
     }
-
-    private TextView text(String s, int sp, int color) {
-        TextView t = new TextView(this);
-        t.setText(s);
-        t.setTextSize(sp);
-        t.setTextColor(color);
-        t.setLineSpacing(0, 1.15f);
-        return t;
-    }
-
-    private TextView label(String s) {
-        TextView l = text(s, 13, MUTED);
-        l.setPadding(0, dp(8), 0, 0);
-        return l;
-    }
-
-    private EditText input(String value, String hint, boolean secret) {
-        EditText e = new EditText(this);
-        e.setSingleLine(true);
-        e.setHint(hint);
-        e.setTextSize(15);
-        e.setInputType(InputType.TYPE_CLASS_TEXT | (secret ? InputType.TYPE_TEXT_VARIATION_PASSWORD : InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS));
-        e.setText(value);
-        return e;
-    }
-
-    private RadioButton radio(String s) {
-        RadioButton r = new RadioButton(this);
-        r.setText(s);
-        r.setTextColor(TEXT);
-        r.setId(View.generateViewId());
-        return r;
-    }
-
-    private void space(LinearLayout parent, int dpv) { parent.addView(new View(this), new LinearLayout.LayoutParams(1, dp(dpv))); }
-
-    private LinearLayout card(LinearLayout parent) {
-        LinearLayout c = vbox();
-        c.setPadding(dp(16), dp(14), dp(16), dp(14));
-        c.setBackground(round(Color.WHITE, BORDER, 1, 12));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.bottomMargin = dp(10);
-        parent.addView(c, lp);
-        return c;
-    }
-
-    private LinearLayout step(LinearLayout parent, String n, String title) {
-        LinearLayout c = card(parent);
-        LinearLayout row = hbox();
-        TextView num = text(n, 13, Color.WHITE);
-        num.setGravity(Gravity.CENTER);
-        num.setBackground(round(ACCENT, ACCENT, 0, 12));
-        row.addView(num, new LinearLayout.LayoutParams(dp(24), dp(24)));
-        TextView t = text(title, 17, TEXT);
-        t.setTypeface(Typeface.DEFAULT_BOLD);
-        t.setPadding(dp(10), 0, 0, 0);
-        row.addView(t);
-        c.addView(row);
-        space(c, 6);
-        return c;
-    }
-
-    private Button primary(String s) {
-        Button b = new Button(this);
-        b.setText(s);
-        b.setAllCaps(false);
-        b.setTextColor(Color.WHITE);
-        b.setBackground(round(ACCENT, ACCENT, 0, 8));
-        return b;
-    }
-
-    private Button secondary(String s) {
-        Button b = new Button(this);
-        b.setText(s);
-        b.setAllCaps(false);
-        b.setTextColor(TEXT);
-        b.setBackground(round(Color.rgb(240, 241, 246), BORDER, 1, 8));
-        return b;
-    }
-
-    private CheckBox check(String s, boolean on) {
-        CheckBox c = new CheckBox(this);
-        c.setText(s);
-        c.setTextColor(TEXT);
-        c.setChecked(on);
-        return c;
-    }
-
-    private void toast(String s) { android.widget.Toast.makeText(this, s, android.widget.Toast.LENGTH_LONG).show(); }
 }

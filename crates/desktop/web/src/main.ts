@@ -1,5 +1,5 @@
 import './styles/notion.css';
-import { api, hydrateMarkdownMediaUrls } from './api';
+import { api, hydrateMarkdownMediaUrls, isAndroidApp } from './api';
 import { renderPrintableHtml, renderSplitViewer, StudioEditorController } from './editor';
 import { ForceGraphCanvas } from './graph';
 import {
@@ -25,6 +25,7 @@ import {
 import { SyncCenterController } from './syncCenter';
 import type {
   ActiveMainView,
+  AndroidAppInfoDto,
   NoteDocumentDto,
   NoteMetaDto,
   NotePropertyDto,
@@ -102,6 +103,7 @@ class ObsidianSyncStudioApp {
 
   // Persistent DOM containers
   private sidebarEl!: HTMLElement;
+  private sidebarBackdropEl: HTMLElement | null = null;
   private tabsStripEl!: HTMLElement;
   private topbarEl!: HTMLElement;
   private editorViewWrapEl!: HTMLElement;
@@ -113,11 +115,73 @@ class ObsidianSyncStudioApp {
   private toastStackEl!: HTMLElement;
   private printRootEl: HTMLElement | null = null;
   private resizeObserver: ResizeObserver | null = null;
+  private androidInfo: AndroidAppInfoDto | null = null;
 
   private pollTimer: number | null = null;
 
   constructor(root: HTMLElement) {
     this.root = root;
+  }
+
+  private isMobileViewport(): boolean {
+    return window.innerWidth <= 860;
+  }
+
+  private isCompactPhone(): boolean {
+    return window.innerWidth <= 680;
+  }
+
+  private syncSidebarBackdrop(): void {
+    if (this.sidebarEl) {
+      this.sidebarEl.classList.toggle('collapsed', this.sidebarCollapsed);
+    }
+    if (this.sidebarBackdropEl) {
+      this.sidebarBackdropEl.classList.toggle(
+        'visible',
+        !this.sidebarCollapsed && this.isMobileViewport()
+      );
+    }
+  }
+
+  private setSidebarCollapsed(collapsed: boolean): void {
+    this.sidebarCollapsed = collapsed;
+    this.syncSidebarBackdrop();
+  }
+
+  private handleAndroidBackPress(): boolean {
+    const backdrops = document.querySelectorAll('.modal-backdrop');
+    if (backdrops.length > 0) {
+      const topModal = backdrops[backdrops.length - 1] as HTMLElement;
+      const closeBtn = topModal.querySelector(
+        '.modal-header .icon-btn, [data-close], [data-nas-close], [data-cmd-close]'
+      ) as HTMLElement | null;
+      if (closeBtn) closeBtn.click();
+      else topModal.remove();
+      return true;
+    }
+    if (document.querySelector('.context-menu')) {
+      closeContextMenu();
+      return true;
+    }
+    if (this.isMobileViewport() && !this.sidebarCollapsed) {
+      this.setSidebarCollapsed(true);
+      return true;
+    }
+    if (window.innerWidth <= 960 && this.inspectorOpen) {
+      this.inspectorOpen = false;
+      this.renderInspector();
+      this.renderTopbar();
+      return true;
+    }
+    if (this.splitDoc) {
+      void this.closeSplitNote();
+      return true;
+    }
+    if (this.mainView !== 'editor') {
+      void this.switchMainView('editor');
+      return true;
+    }
+    return false;
   }
 
   public async init(): Promise<void> {
@@ -128,6 +192,25 @@ class ObsidianSyncStudioApp {
     window.addEventListener('afterprint', () => {
       if (this.printRootEl) this.printRootEl.innerHTML = '';
     });
+    window.addEventListener('resize', () => {
+      this.syncSidebarBackdrop();
+    });
+    if (isAndroidApp()) {
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+          void api
+            .androidInfo()
+            .then((info) => {
+              this.androidInfo = info;
+              if (this.workspace && !this.workspace.active_vault && this.mainView === 'editor') {
+                this.renderEditorMainArea(true);
+              }
+            })
+            .catch(() => {});
+        }
+      });
+    }
+    window.__handleAndroidBack = () => this.handleAndroidBackPress();
 
     try {
       const boot = await api.bootstrap();
@@ -135,6 +218,30 @@ class ObsidianSyncStudioApp {
       this.scan = boot.vault_scan;
       this.syncSnap = boot.sync;
       this.vaultRevision = boot.vault_revision;
+
+      if (this.isMobileViewport()) {
+        this.inspectorOpen = false;
+        if (this.workspace.active_vault) {
+          this.setSidebarCollapsed(true);
+        }
+      }
+
+      if (isAndroidApp()) {
+        void api
+          .androidInfo()
+          .then((info) => {
+            this.androidInfo = info;
+            if (info.available_update_tag) {
+              this.showToast(
+                `새 버전 ${info.available_update_tag} 출시! 동기화 센터 → 고급 설정에서 업데이트할 수 있습니다.`
+              );
+            }
+            if (!this.workspace.active_vault) {
+              this.renderEditorMainArea(true);
+            }
+          })
+          .catch(() => {});
+      }
 
       this.applyTheme(this.workspace.theme || 'light');
       this.applyPageLayoutVariables();
@@ -169,6 +276,7 @@ class ObsidianSyncStudioApp {
   private buildShellDom(): void {
     this.root.innerHTML = `
       <div class="app-shell">
+        <div class="sidebar-backdrop" data-sidebar-backdrop></div>
         <aside class="sidebar" id="app-sidebar"></aside>
         <div class="main-area">
           <div class="tabs-strip" id="app-tabs-strip"></div>
@@ -188,6 +296,10 @@ class ObsidianSyncStudioApp {
     `;
 
     this.sidebarEl = this.root.querySelector('#app-sidebar')!;
+    this.sidebarBackdropEl = this.root.querySelector('[data-sidebar-backdrop]');
+    this.sidebarBackdropEl?.addEventListener('click', () => {
+      this.setSidebarCollapsed(true);
+    });
     this.tabsStripEl = this.root.querySelector('#app-tabs-strip')!;
     this.topbarEl = this.root.querySelector('#app-topbar')!;
     this.editorViewWrapEl = this.root.querySelector('#view-editor')!;
@@ -287,8 +399,7 @@ class ObsidianSyncStudioApp {
       }
       if (mod && ev.key === '\\') {
         ev.preventDefault();
-        this.sidebarCollapsed = !this.sidebarCollapsed;
-        this.sidebarEl.classList.toggle('collapsed', this.sidebarCollapsed);
+        this.setSidebarCollapsed(!this.sidebarCollapsed);
         requestAnimationFrame(() => this.applyPageLayoutVariables());
       }
     });
@@ -341,6 +452,15 @@ class ObsidianSyncStudioApp {
     const zoomFactor = Math.min(1.5, Math.max(0.5, (this.workspace.editor_zoom || 100) / 100));
     const sheetEl = document.getElementById('a4-paper-sheet') as HTMLElement | null;
     const scaleOuter = document.getElementById('a4-scale-outer') as HTMLElement | null;
+
+    if (this.isCompactPhone()) {
+      rootStyle.setProperty('--a4-scale', '1');
+      if (scaleOuter) {
+        scaleOuter.style.width = '';
+        scaleOuter.style.height = '';
+      }
+      return;
+    }
 
     let finalScale = zoomFactor;
     if (
@@ -588,6 +708,10 @@ class ObsidianSyncStudioApp {
   }
 
   private async handlePrintNote(): Promise<void> {
+    if (isAndroidApp()) {
+      await this.handleExportPdf();
+      return;
+    }
     const ok = await this.preparePrintDom();
     if (!ok) return;
     requestAnimationFrame(() => {
@@ -598,6 +722,7 @@ class ObsidianSyncStudioApp {
   private async handleExportPdf(): Promise<void> {
     const ok = await this.preparePrintDom();
     if (!ok || !this.currentDoc) return;
+    let delegatedToSystemPrint = false;
     try {
       const safeName = `${this.currentDoc.title.replace(/[\\/:*?"<>|]/g, '_') || 'document'}.pdf`;
       const res = await api.exportPdf({
@@ -608,13 +733,16 @@ class ObsidianSyncStudioApp {
         margin_left_cm: this.workspace.margin_left_cm ?? 3.0,
         margin_right_cm: this.workspace.margin_right_cm ?? 3.0,
       });
+      delegatedToSystemPrint = Boolean(res.delegated_to_system_print);
       if (res.exported && res.path) {
         this.showToast(`PDF로 저장했습니다: ${res.path}`);
+      } else if (delegatedToSystemPrint) {
+        this.showToast('인쇄/PDF 저장 화면을 열었습니다.');
       }
     } catch (err: any) {
       this.showToast(err?.message || 'PDF 출력에 실패했습니다.', true);
     } finally {
-      if (this.printRootEl) {
+      if (!delegatedToSystemPrint && this.printRootEl) {
         this.printRootEl.innerHTML = '';
       }
     }
@@ -659,6 +787,9 @@ class ObsidianSyncStudioApp {
 
   // ───────────────────────── Main View Switching ─────────────────────────
   private async switchMainView(view: ActiveMainView): Promise<void> {
+    if (this.isMobileViewport()) {
+      this.setSidebarCollapsed(true);
+    }
     if (this.mainView === 'editor' && view !== 'editor') {
       await this.flushSave(false);
     }
@@ -732,7 +863,7 @@ class ObsidianSyncStudioApp {
   }
 
   private renderSidebar(): void {
-    this.sidebarEl.classList.toggle('collapsed', this.sidebarCollapsed);
+    this.syncSidebarBackdrop();
     const activeVaultPath = this.workspace.active_vault;
     const activeVaultRef = this.workspace.vaults.find((v) => v.path === activeVaultPath);
     const vaultName = activeVaultRef
@@ -1175,8 +1306,7 @@ class ObsidianSyncStudioApp {
     toggleSidebarBtn.title = '사이드바 접기/펼치기 (Ctrl+\\)';
     toggleSidebarBtn.textContent = '☰';
     toggleSidebarBtn.addEventListener('click', () => {
-      this.sidebarCollapsed = !this.sidebarCollapsed;
-      this.sidebarEl.classList.toggle('collapsed', this.sidebarCollapsed);
+      this.setSidebarCollapsed(!this.sidebarCollapsed);
       requestAnimationFrame(() => this.applyPageLayoutVariables());
     });
     this.tabsStripEl.appendChild(toggleSidebarBtn);
@@ -1518,6 +1648,9 @@ class ObsidianSyncStudioApp {
 
   public async openNote(relPath: string): Promise<void> {
     if (!this.workspace.active_vault) return;
+    if (this.isMobileViewport()) {
+      this.setSidebarCollapsed(true);
+    }
     if (this.mainView !== 'editor') {
       await this.switchMainView('editor');
     }
@@ -1697,6 +1830,9 @@ class ObsidianSyncStudioApp {
   }
 
   private async openTodayDailyNote(): Promise<void> {
+    if (this.isMobileViewport()) {
+      this.setSidebarCollapsed(true);
+    }
     if (!this.workspace.active_vault) {
       this.showToast('먼저 볼트 폴더를 열어 주세요.', true);
       return;
@@ -1910,6 +2046,8 @@ class ObsidianSyncStudioApp {
       this.editorCtrl?.destroy();
       this.editorCtrl = null;
       this.mountedNotePath = null;
+      const isAndroid = isAndroidApp();
+      const needsFilesPerm = isAndroid && this.androidInfo && !this.androidInfo.all_files_granted;
       this.editorPaneEl.innerHTML = `
         <div class="empty-vault-hero">
           <div style="font-size:48px;margin-bottom:10px;">📓</div>
@@ -1918,13 +2056,24 @@ class ObsidianSyncStudioApp {
             노션처럼 직관적인 위지윅 편집기, 마크다운 실시간 분할 프리뷰, 위키링크 &amp; 그래프 뷰,
             그리고 6종 클라우드/NAS 실시간 동기화를 한 곳에서 사용하세요.
           </p>
+          ${
+            needsFilesPerm
+              ? `<div style="margin:0 0 18px;padding:10px 14px;border-radius:8px;background:var(--warn-bg);color:var(--warn);font-size:13px;line-height:1.5;">
+                  ⚠ 기기 내 Obsidian 볼트 폴더를 읽고 쓰려면 <strong>'모든 파일 접근 권한'</strong> 허용이 필요합니다.<br/>
+                  <button type="button" class="btn btn-sm" style="margin-top:8px;" data-hero-files-perm>🔓 모든 파일 접근 권한 허용하기</button>
+                </div>`
+              : ''
+          }
           <div style="display:flex;justify-content:center;gap:10px;flex-wrap:wrap;">
             <button type="button" class="btn btn-primary" data-hero-sample>✨ 샘플 볼트 시작하기</button>
-            <button type="button" class="btn" data-hero-open>📂 내 PC 볼트 폴더 열기…</button>
+            <button type="button" class="btn" data-hero-open>${isAndroid ? '📂 휴대폰 볼트 폴더 열기…' : '📂 내 PC 볼트 폴더 열기…'}</button>
             <button type="button" class="btn" data-hero-sync>🔄 동기화 센터 설정</button>
           </div>
         </div>
       `;
+      this.editorPaneEl.querySelector('[data-hero-files-perm]')?.addEventListener('click', () => {
+        void api.androidGrantFilesAccess();
+      });
       this.editorPaneEl.querySelector('[data-hero-sample]')?.addEventListener('click', () => {
         void this.handleCreateSampleVault();
       });
@@ -3088,6 +3237,32 @@ class ObsidianSyncStudioApp {
         run: () => this.handleOpenVaultDialog(),
       },
     ];
+
+    if (isAndroidApp()) {
+      commands.push(
+        {
+          id: 'android_update',
+          icon: '📲',
+          label: 'Android 앱 업데이트 확인',
+          run: async () => {
+            try {
+              const res = await api.androidUpdateNow();
+              this.showToast(res.message);
+            } catch (err: any) {
+              this.showToast(err?.message || '업데이트 확인 실패', true);
+            }
+          },
+        },
+        {
+          id: 'android_files_perm',
+          icon: '🔓',
+          label: 'Android 모든 파일 접근 권한 설정',
+          run: () => {
+            void api.androidGrantFilesAccess();
+          },
+        }
+      );
+    }
 
     openCommandPaletteModal({
       vault: this.workspace.active_vault,

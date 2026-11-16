@@ -145,4 +145,38 @@ public final class NativeSyncTest {
             s.onActivity(act -> assertNotNull(act.findViewById(android.R.id.content)));
         }
     }
+
+    @Test public void studioBackendAndWebAssetsWorkOnAndroid() throws Exception {
+        File dataDir = new File(tmp(), "studio_data");
+        JSONObject initRes = new JSONObject(Native.studioInit(dataDir.getAbsolutePath(), ""));
+        assertTrue(initRes.toString(), initRes.getBoolean("ok"));
+
+        byte[] htmlAsset = Native.studioWebAsset("/index.html");
+        assertNotNull("Embedded Studio index.html should be bundled", htmlAsset);
+        String head = new String(htmlAsset, 0, Math.min(htmlAsset.length, 64), StandardCharsets.UTF_8);
+        assertTrue("Expected text/html mime prefix, got: " + head, head.startsWith("text/html"));
+
+        JSONObject sample = new JSONObject(Native.studioApi("/api/workspace/create_sample_vault", "{}"));
+        assertTrue(sample.toString(), sample.getBoolean("ok"));
+        String vaultPath = sample.getJSONObject("data").getString("path");
+
+        String createBody = new JSONObject()
+                .put("vault", vaultPath)
+                .put("folder", "")
+                .put("title", "모바일 테스트 노트")
+                .put("body", "Notion + TOAST UI + Android 통합 본문")
+                .toString();
+        JSONObject created = new JSONObject(Native.studioApi("/api/note/create", createBody));
+        assertTrue(created.toString(), created.getBoolean("ok"));
+        String notePath = created.getJSONObject("data").getString("path");
+
+        String encBody = new JSONObject()
+                .put("vault", vaultPath)
+                .put("path", notePath)
+                .put("password", "mobile-pw-1234")
+                .toString();
+        JSONObject encrypted = new JSONObject(Native.studioApi("/api/crypto/encrypt_note", encBody));
+        assertTrue(encrypted.toString(), encrypted.getBoolean("ok"));
+        assertTrue(encrypted.getJSONObject("data").getJSONObject("doc").getBoolean("encrypted"));
+    }
 }

@@ -40,4 +40,13 @@ public final class Native {
     public static native boolean isLoggedIn(String backend, String dataDir);
     public static native void logout(String backend, String dataDir);
     public static native String resetState(String config, String dataDir, String profileId);
+
+    // Studio 통합 백엔드 (Notion+TOAST UI 에디터 · 볼트 · AES-256 암호화 · 동기화)
+    public static native String studioInit(String dataDir, String initialConfigJson);
+    public static native String studioApi(String endpoint, String bodyJson);
+    public static native byte[] studioWebAsset(String path);
+    public static native byte[] studioVaultMedia(String encodedQuery);
+    public static native String studioSavePickedAttachment(String vault, String tempPath, boolean imageOnly);
+    public static native String studioSavedConfigJson();
+    public static native String studioSyncNotificationStatus();
 }
