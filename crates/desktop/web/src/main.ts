@@ -230,8 +230,10 @@ class ObsidianSyncStudioApp {
       this.syncSnap = boot.sync;
       this.vaultRevision = boot.vault_revision;
 
-      if (this.isMobileViewport()) {
+      if (window.innerWidth <= 960) {
         this.inspectorOpen = false;
+      }
+      if (this.isMobileViewport()) {
         this.setSidebarCollapsed(true);
       }
 
@@ -286,7 +288,7 @@ class ObsidianSyncStudioApp {
     this.root.innerHTML = `
       <div class="app-shell">
         <div class="sidebar-backdrop" data-sidebar-backdrop></div>
-        <aside class="sidebar" id="app-sidebar"></aside>
+        <aside class="sidebar${window.innerWidth <= 860 ? ' collapsed' : ''}" id="app-sidebar"></aside>
         <div class="main-area">
           <div class="tabs-strip" id="app-tabs-strip"></div>
           <div class="topbar" id="app-topbar"></div>
@@ -295,7 +297,7 @@ class ObsidianSyncStudioApp {
               <div class="editor-pane" id="app-editor-pane"></div>
               <div class="split-pane" id="app-split-pane" style="display:none;"></div>
             </div>
-            <aside class="inspector" id="app-inspector"></aside>
+            <aside class="inspector collapsed" id="app-inspector"></aside>
           </div>
           <div class="graph-view-screen" id="view-graph" style="display:none;"></div>
           <div style="flex:1;min-height:0;display:none;overflow:hidden;" id="view-sync"></div>
@@ -833,6 +835,7 @@ class ObsidianSyncStudioApp {
     this.renderSidebar();
     this.renderTabsStrip();
     this.renderTopbar();
+    this.renderInspector();
   }
 
   // ───────────────────────── Sidebar ─────────────────────────
@@ -2824,9 +2827,16 @@ class ObsidianSyncStudioApp {
         <button type="button" class="inspector-tab ${this.inspectorTab === 'backlinks' ? 'active' : ''}" data-itab="backlinks">🔗 백링크</button>
         <button type="button" class="inspector-tab ${this.inspectorTab === 'outline' ? 'active' : ''}" data-itab="outline">📑 목차</button>
         <button type="button" class="inspector-tab ${this.inspectorTab === 'local_graph' ? 'active' : ''}" data-itab="local_graph">🕸️ 로컬 그래프</button>
+        <button type="button" class="icon-btn" data-iclose title="인스펙터 닫기" style="width:24px;height:24px;font-size:12px;">✕</button>
       </div>
       <div class="inspector-body" data-ibody></div>
     `;
+
+    this.inspectorEl.querySelector('[data-iclose]')?.addEventListener('click', () => {
+      this.inspectorOpen = false;
+      this.renderInspector();
+      this.renderTopbar();
+    });
 
     this.inspectorEl.querySelectorAll('[data-itab]').forEach((btn) => {
       btn.addEventListener('click', () => {

@@ -213,11 +213,17 @@ public final class NativeSyncTest {
                 readyState = evalJs(s,
                         "(() => {"
                         + "const top = document.getElementById('app-topbar');"
+                        + "const insp = document.getElementById('app-inspector');"
+                        + "if (window.innerWidth <= 960 && insp && getComputedStyle(insp).display !== 'none') return 'inspector-visible';"
                         + "const hero = document.querySelector('[data-hero-sample]');"
                         + "const title = document.querySelector('.notion-title-input');"
                         + "const target = hero || title;"
                         + "if (!top || !target) return 'waiting';"
-                        + "return (top.getBoundingClientRect().height > 20 && target.getBoundingClientRect().height > 20) ? 'ready' : 'sizing';"
+                        + "const r = target.getBoundingClientRect();"
+                        + "if (top.getBoundingClientRect().height <= 20 || r.height <= 20) return 'sizing';"
+                        + "const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);"
+                        + "if (!hit || (hit !== target && !target.contains(hit))) return 'obscured-by-' + (hit ? hit.tagName + '#' + hit.id + '.' + hit.className : 'null');"
+                        + "return 'ready';"
                         + "})()");
                 if (readyState != null && readyState.contains("ready")) {
                     break;
@@ -244,7 +250,11 @@ public final class NativeSyncTest {
                         + "const ed = document.querySelector('.toastui-editor-defaultUI');"
                         + "const title = document.querySelector('.notion-title-input');"
                         + "if (!ed || !title) return 'waiting';"
-                        + "return ed.getBoundingClientRect().height > 120 ? 'mounted' : 'sizing';"
+                        + "const r = ed.getBoundingClientRect();"
+                        + "if (r.height <= 120) return 'sizing';"
+                        + "const hit = document.elementFromPoint(r.left + r.width / 2, Math.min(window.innerHeight - 8, r.top + Math.min(r.height / 2, 120)));"
+                        + "if (!hit || (hit !== ed && !ed.contains(hit))) return 'editor-obscured-by-' + (hit ? hit.tagName + '#' + hit.id + '.' + hit.className : 'null');"
+                        + "return 'mounted';"
                         + "})()");
                 if (editorState != null && editorState.contains("mounted")) {
                     break;
