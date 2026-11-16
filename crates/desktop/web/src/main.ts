@@ -271,6 +271,7 @@ class ObsidianSyncStudioApp {
         const initialPath =
           this.workspace.active_tab ||
           this.workspace.open_tabs[0] ||
+          this.scan.notes.find((n) => n.path.endsWith('환영합니다.md'))?.path ||
           this.scan.notes[0]?.path ||
           null;
         if (initialPath) {
@@ -1906,7 +1907,10 @@ class ObsidianSyncStudioApp {
       await this.switchMainView('editor');
 
       const first =
-        this.workspace.active_tab || this.scan?.notes[0]?.path || null;
+        this.workspace.active_tab ||
+        this.scan?.notes.find((n) => n.path.endsWith('환영합니다.md'))?.path ||
+        this.scan?.notes[0]?.path ||
+        null;
       if (first) {
         await this.openNote(first);
       } else {

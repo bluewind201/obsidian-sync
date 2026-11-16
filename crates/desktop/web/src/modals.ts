@@ -162,7 +162,7 @@ export function showContextMenu(x: number, y: number, entries: ContextMenuEntry[
   }, 0);
 }
 
-function createModalBase(widthPx = 560): {
+export function createModalBase(widthPx = 560): {
   backdrop: HTMLElement;
   card: HTMLElement;
   close: () => void;

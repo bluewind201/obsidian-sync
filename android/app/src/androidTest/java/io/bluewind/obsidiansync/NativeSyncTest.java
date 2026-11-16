@@ -267,6 +267,38 @@ public final class NativeSyncTest {
                     editorState != null && editorState.contains("mounted"));
             assertTrue("Unexpected WebView errors after mounting editor: " + errRef.get(),
                     errRef.get() == null || errRef.get().isEmpty());
+
+            evalJs(s,
+                    "(() => {"
+                    + "if (!document.querySelector('.onyx-flow-card svg.onyx-flow-svg')) {"
+                    + "  const row = document.querySelector('.tree-row[data-node-path=\"환영합니다.md\"]');"
+                    + "  if (row) { row.click(); return 'clicked-welcome'; }"
+                    + "}"
+                    + "return 'already-checking';"
+                    + "})()");
+
+            String flowState = "waiting-flow";
+            for (int i = 0; i < 40; i++) {
+                flowState = evalJs(s,
+                        "(() => {"
+                        + "const svg = document.querySelector('.onyx-flow-card svg.onyx-flow-svg');"
+                        + "if (!svg) return 'no-svg';"
+                        + "const r = svg.getBoundingClientRect();"
+                        + "const cnt = svg.querySelectorAll('.onyx-flow-node').length;"
+                        + "if (r.width < 80 || r.height < 60 || cnt < 4) return 'sizing-' + r.width + 'x' + r.height + '-n' + cnt;"
+                        + "return 'flow-ok-' + cnt;"
+                        + "})()");
+                if (flowState != null && flowState.contains("flow-ok")) {
+                    break;
+                }
+                Thread.sleep(200);
+            }
+            s.onActivity(act -> errRef.set(act.getWebErrorsForTest()));
+            assertTrue("Flowchart SVG did not render (state=" + flowState
+                    + ", errors=" + errRef.get() + ")",
+                    flowState != null && flowState.contains("flow-ok"));
+            assertTrue("Unexpected WebView errors after rendering flowchart: " + errRef.get(),
+                    errRef.get() == null || errRef.get().isEmpty());
         }
     }
 }

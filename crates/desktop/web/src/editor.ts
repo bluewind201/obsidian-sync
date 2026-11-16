@@ -28,6 +28,33 @@ import 'prismjs/components/prism-css';
 import 'prismjs/components/prism-markdown';
 
 import {
+  copyDiagramAsPngOrSvg,
+  cycleFlowchartTheme,
+  decodeFlowCode,
+  FLOWCHART_TEMPLATES,
+  isDiagramCodeBlock,
+  looksLikeBareFlowchartText,
+  openFlowchartStudioModal,
+  renderDiagramCardHtml,
+  toggleFlowchartCurve,
+  toggleFlowchartDirection,
+} from './flowchart';
+
+// Ensure @toast-ui/editor-plugin-code-syntax-highlight escapes & tokenizes diagram fences safely
+if (!(Prism.languages as any).mermaid) {
+  (Prism.languages as any).mermaid = {
+    comment: /%%[^\n]*/,
+    keyword:
+      /\b(?:flowchart|graph|subgraph|end|direction|sequenceDiagram|stateDiagram(?:-v2)?|mindmap|gantt|classDef|class|style|linkStyle)\b/i,
+    operator: /-->|--->|---|-\.->|-\.-|==>|===|<-->|<-.->|<==>|o--o|x--x/,
+    string: /"(?:\\.|[^"\\])*"/,
+  };
+}
+(Prism.languages as any).flowchart = (Prism.languages as any).mermaid;
+(Prism.languages as any).flow = (Prism.languages as any).mermaid;
+(Prism.languages as any).diagram = (Prism.languages as any).mermaid;
+
+import {
   api,
   blobToBase64,
   dehydrateMarkdownMediaUrls,
@@ -347,17 +374,154 @@ function normalizeCalloutClass(rawType: string): string {
   return CALLOUT_ICONS[k] ? k : 'note';
 }
 
+function decodeHtmlEntitiesToText(rawHtml: string): string {
+  const withNl = rawHtml.replace(/<br\s*\/?>/gi, '\n').replace(/<\/p>\s*<p[^>]*>/gi, '\n');
+  const noTags = withNl.replace(/<[^>]+>/g, '');
+  return noTags
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&#x27;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&');
+}
+
+function hashShort(str: string): string {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(36);
+}
+
+function getOnyxDiagramPluginKey(view: any): any | null {
+  const plugins = view?.state?.plugins;
+  if (!Array.isArray(plugins)) return null;
+  for (const p of plugins) {
+    if ((p as any).__onyxDiagramKey) return (p as any).__onyxDiagramKey;
+  }
+  return null;
+}
+
+interface MarkdownDiagramFence {
+  lang: string;
+  body: string;
+  bodyStart: number;
+  bodyEnd: number;
+}
+
+function findDiagramFencesInMarkdown(md: string): MarkdownDiagramFence[] {
+  const out: MarkdownDiagramFence[] = [];
+  const norm = md.replace(/\r\n?/g, '\n');
+  const lines = norm.split('\n');
+  let offset = 0;
+  let inFence = false;
+  let fenceChar = '`';
+  let fenceLen = 3;
+  let lang = '';
+  let bodyStart = 0;
+  let bodyLines: string[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const nextOffset = offset + line.length + 1;
+    const trimmed = line.trim();
+    if (!inFence) {
+      const openM = /^(`{3,}|~{3,})\s*([a-zA-Z0-9_-]*)/.exec(trimmed);
+      if (openM) {
+        inFence = true;
+        fenceChar = openM[1][0];
+        fenceLen = openM[1].length;
+        lang = openM[2] || '';
+        bodyStart = nextOffset;
+        bodyLines = [];
+      }
+    } else {
+      const closeRe = new RegExp(`^\\${fenceChar}{${fenceLen},}\\s*$`);
+      if (closeRe.test(trimmed)) {
+        const body = bodyLines.join('\n');
+        if (isDiagramCodeBlock(lang, body)) {
+          out.push({
+            lang,
+            body,
+            bodyStart,
+            bodyEnd: Math.max(bodyStart, offset - 1),
+          });
+        }
+        inFence = false;
+      } else {
+        bodyLines.push(line);
+      }
+    }
+    offset = nextOffset;
+  }
+  return out;
+}
+
 /**
  * Enhances rendered Preview / Split-View / Print HTML with:
+ * - Mermaid / Flowchart (`flowchart TB`, `LR`, `subgraph`, `sequenceDiagram`, `mindmap`, `gantt`) vector SVG cards
+ * - Bare pasted `flowchart TB` paragraphs auto-rendered as Flowchart cards
  * - `==텍스트==` -> `<mark>텍스트</mark>`
  * - `[[Target|Alias]]` / `[[Target]]` -> clickable `.wikilink-inline`
  * - `> [!note] 제목` -> styled `blockquote.callout.callout-note` with `.callout-title`
  * - `$$math$$` -> `.math-block`
  * - `[^ref]` -> styled footnote marker
  */
-export function enhanceRenderedHtml(html: string): string {
+export function enhanceRenderedHtml(html: string, opts?: { forPrint?: boolean }): string {
   if (!html) return html;
-  const parts = html.split(/(<pre[\s\S]*?<\/pre>|<code[\s\S]*?<\/code>)/gi);
+  const slots: string[] = [];
+  let diagramIdx = 0;
+
+  // Step 1: Extract diagram <pre><code> blocks into opaque slots (preserving data-nodeid for TOAST UI preview diffing)
+  let work = html.replace(
+    /<pre([^>]*)>\s*<code([^>]*)>([\s\S]*?)<\/code>\s*<\/pre>/gi,
+    (full, preAttrs: string, codeAttrs: string, innerHtml: string) => {
+      const langFromCode = /data-language=["']([^"']+)["']/i.exec(codeAttrs)?.[1];
+      const langFromPre = /class=["'][^"']*\blang-([a-zA-Z0-9_-]+)/i.exec(preAttrs)?.[1];
+      const lang = langFromCode || langFromPre || '';
+      const decoded = decodeHtmlEntitiesToText(innerHtml);
+      if (!isDiagramCodeBlock(lang, decoded)) {
+        return full;
+      }
+      const nodeId =
+        /data-nodeid=["']([^"']+)["']/i.exec(preAttrs)?.[1] ||
+        /data-nodeid=["']([^"']+)["']/i.exec(codeAttrs)?.[1];
+      const slotId = slots.length;
+      slots.push(
+        renderDiagramCardHtml(decoded, {
+          forPrint: opts?.forPrint,
+          editorActions: !opts?.forPrint,
+          diagramIndex: diagramIdx++,
+          nodeIdAttr: nodeId,
+          collapsedCode: true,
+        })
+      );
+      return `\n__ONYX_FLOW_SLOT_${slotId}__\n`;
+    }
+  );
+
+  // Step 2: Detect bare <p>flowchart TB ...</p> blocks outside <pre>/<code>
+  work = work.replace(/<p([^>]*)>([\s\S]*?)<\/p>/gi, (full, pAttrs: string, inner: string) => {
+    const plain = decodeHtmlEntitiesToText(inner);
+    if (!looksLikeBareFlowchartText(plain)) return full;
+    const nodeId = /data-nodeid=["']([^"']+)["']/i.exec(pAttrs)?.[1];
+    const slotId = slots.length;
+    slots.push(
+      renderDiagramCardHtml(plain, {
+        forPrint: opts?.forPrint,
+        editorActions: !opts?.forPrint,
+        diagramIndex: diagramIdx++,
+        nodeIdAttr: nodeId,
+        collapsedCode: true,
+      })
+    );
+    return `\n__ONYX_FLOW_SLOT_${slotId}__\n`;
+  });
+
+  // Step 3: Run inline Obsidian/Notion markdown enhancements outside remaining <pre>/<code>
+  const parts = work.split(/(<pre[\s\S]*?<\/pre>|<code[\s\S]*?<\/code>)/gi);
   for (let i = 0; i < parts.length; i += 2) {
     let seg = parts[i];
 
@@ -399,7 +563,14 @@ export function enhanceRenderedHtml(html: string): string {
 
     parts[i] = seg;
   }
-  return parts.join('');
+
+  let joined = parts.join('');
+  if (slots.length > 0) {
+    joined = joined.replace(/__ONYX_FLOW_SLOT_(\d+)__/g, (_m, idxStr: string) => {
+      return slots[Number(idxStr)] || '';
+    });
+  }
+  return joined;
 }
 
 function makeInlineMarkToggle(tagName: string, placeholder: string) {
@@ -438,7 +609,187 @@ function makeHtmlTagRenderer(tagName: string) {
  * safe HTML renderers for rich typography, callouts, toggles, columns, and page breaks.
  */
 function notionRichPlugin(context: PluginContext): PluginInfo {
-  const { pmState } = context;
+  const { pmState, pmView } = context;
+
+  const diagramPluginKey = new (pmState.PluginKey as any)('onyxDiagramLive');
+  const buildDiagramWysiwygPlugin = () => {
+    const plugin = new (pmState.Plugin as any)({
+      key: diagramPluginKey,
+      state: {
+        init: () => ({ expanded: [] }),
+        apply: (tr: any, prev: { expanded: number[] }) => {
+          let next = prev.expanded;
+          if (tr.docChanged && next.length > 0) {
+            const mapped: number[] = [];
+            for (const oldPos of next) {
+              const res = tr.mapping.mapResult(oldPos);
+              if (!res.deleted) mapped.push(res.pos);
+            }
+            next = mapped;
+          }
+          const meta = tr.getMeta(diagramPluginKey);
+          if (meta && typeof meta.togglePos === 'number') {
+            const p = meta.togglePos as number;
+            next = next.includes(p) ? next.filter((x) => x !== p) : [...next, p];
+          }
+          if (meta && typeof meta.openPos === 'number') {
+            const p = meta.openPos as number;
+            if (!next.includes(p)) next = [...next, p];
+          }
+          if (meta && typeof meta.closePos === 'number') {
+            const p = meta.closePos as number;
+            next = next.filter((x) => x !== p);
+          }
+          return { expanded: next };
+        },
+      },
+      props: {
+        decorations(state: any) {
+          const decos: any[] = [];
+          const pState = diagramPluginKey.getState(state) || { expanded: [] };
+          const selFrom = state.selection.from;
+          const selTo = state.selection.to;
+          let diagIndex = 0;
+
+          // 1) Render live Flowchart/Diagram cards directly above diagram codeBlocks
+          state.doc.descendants((node: any, pos: number) => {
+            if (node.type?.name !== 'codeBlock') return;
+            const lang = String(node.attrs?.language || '').trim().toLowerCase();
+            const code = node.textContent || '';
+            if (!isDiagramCodeBlock(lang, code)) return;
+
+            const curIdx = diagIndex++;
+            const cursorInside =
+              selFrom > pos &&
+              selFrom < pos + node.nodeSize &&
+              selTo >= pos &&
+              selTo <= pos + node.nodeSize;
+            const isOpen = cursorInside || pState.expanded.includes(pos);
+
+            decos.push(
+              pmView.Decoration.node(pos, pos + node.nodeSize, {
+                class: isOpen ? 'onyx-ww-diagram-source is-open' : 'onyx-ww-diagram-source is-collapsed',
+              })
+            );
+
+            const wKey = `onyx-ww-flow-${pos}-${isOpen ? 'o' : 'c'}-${hashShort(code)}`;
+            decos.push(
+              pmView.Decoration.widget(
+                pos,
+                () => {
+                  const wrap = document.createElement('div');
+                  wrap.className = 'onyx-ww-diagram-widget';
+                  wrap.setAttribute('contenteditable', 'false');
+                  wrap.setAttribute('data-pm-pos', String(pos));
+                  wrap.innerHTML = renderDiagramCardHtml(code, {
+                    editorActions: true,
+                    diagramIndex: curIdx,
+                    collapsedCode: !isOpen,
+                  });
+                  return wrap;
+                },
+                {
+                  side: -1,
+                  key: wKey,
+                  stopEvent: () => true,
+                  ignoreMutation: () => true,
+                } as any
+              )
+            );
+          });
+
+          // 2) Detect bare `flowchart TB ...` paragraph runs in WYSIWYG and show live card + 1-click convert chip
+          let childOffset = 0;
+          for (let i = 0; i < state.doc.childCount; i++) {
+            const child = state.doc.child(i);
+            const startPos = childOffset;
+            const firstTxt = (child.textContent || '').trim();
+            if (
+              child.type?.name === 'paragraph' &&
+              /^(?:flowchart|graph)\s+(?:TB|TD|BT|RL|LR)\b/i.test(firstTxt)
+            ) {
+              const collectedLines: string[] = [firstTxt];
+              let endPos = startPos + child.nodeSize;
+              let j = i + 1;
+              while (j < state.doc.childCount && collectedLines.length < 45) {
+                const nextNode = state.doc.child(j);
+                const nextTxt = (nextNode.textContent || '').trim();
+                if (nextNode.type?.name !== 'paragraph' || !nextTxt) break;
+                collectedLines.push(nextTxt);
+                endPos += nextNode.nodeSize;
+                j++;
+              }
+              const joined = collectedLines.join('\n');
+              if (looksLikeBareFlowchartText(joined)) {
+                const bKey = `onyx-ww-bare-${startPos}-${endPos}-${hashShort(joined)}`;
+                decos.push(
+                  pmView.Decoration.widget(
+                    startPos,
+                    () => {
+                      const box = document.createElement('div');
+                      box.className = 'onyx-ww-bare-flow-wrap';
+                      box.setAttribute('contenteditable', 'false');
+                      box.innerHTML = `<div class="onyx-flow-convert-bar">
+                        <span>🔀 플로우차트 텍스트 감지됨 — 블록으로 변환하면 방향/테마/빌더를 바로 편집할 수 있습니다.</span>
+                        <button type="button" class="btn btn-sm btn-primary" data-flow-convert-start="${startPos}" data-flow-convert-end="${endPos}">✨ 플로우차트 블록으로 변환</button>
+                      </div>${renderDiagramCardHtml(joined, { editorActions: false })}`;
+                      return box;
+                    },
+                    {
+                      side: -1,
+                      key: bKey,
+                      stopEvent: () => true,
+                      ignoreMutation: () => true,
+                    } as any
+                  )
+                );
+                childOffset = endPos;
+                i = j - 1;
+                continue;
+              }
+            }
+            childOffset += child.nodeSize;
+          }
+
+          return pmView.DecorationSet.create(state.doc, decos);
+        },
+        handlePaste(view: any, ev: ClipboardEvent) {
+          const text = ev.clipboardData?.getData('text/plain') || '';
+          if (!text.trim()) return false;
+          const parentType = view.state.selection.$from.parent?.type?.name;
+          if (parentType === 'codeBlock') return false;
+
+          const trimmed = text.replace(/\r\n?/g, '\n').trim();
+          let lang: string | null = null;
+          let body = '';
+
+          const fenced =
+            /^```(mermaid|flowchart|flow|diagram|graph)\s*\n([\s\S]*?)\n```\s*$/i.exec(trimmed);
+          if (fenced) {
+            const rawLang = fenced[1].toLowerCase();
+            lang = rawLang === 'diagram' ? 'mermaid' : rawLang;
+            body = fenced[2];
+          } else if (looksLikeBareFlowchartText(trimmed)) {
+            lang = 'mermaid';
+            body = trimmed;
+          }
+
+          if (!lang) return false;
+          const codeBlockType = view.state.schema.nodes.codeBlock;
+          if (!codeBlockType) return false;
+          ev.preventDefault();
+          const cbNode = codeBlockType.create(
+            { language: lang },
+            body ? view.state.schema.text(body) : undefined
+          );
+          view.dispatch(view.state.tr.replaceSelectionWith(cbNode).scrollIntoView());
+          return true;
+        },
+      },
+    });
+    (plugin as any).__onyxDiagramKey = diagramPluginKey;
+    return plugin;
+  };
 
   const wrapSelectionMd = (
     state: any,
@@ -693,6 +1044,7 @@ function notionRichPlugin(context: PluginContext): PluginInfo {
         return true;
       },
     },
+    wysiwygPlugins: [buildDiagramWysiwygPlugin],
     toHTMLRenderers: {
       htmlInline: {
         u: makeHtmlTagRenderer('u'),
@@ -708,7 +1060,7 @@ function notionRichPlugin(context: PluginContext): PluginInfo {
         summary: makeHtmlTagRenderer('summary'),
       },
     },
-  };
+  } as PluginInfo;
 }
 
 export interface StudioEditorCallbacks {
@@ -1082,35 +1434,33 @@ export class StudioEditorController {
 
     const diagramBody = document.createElement('div');
     diagramBody.className = 'tui-custom-popup-menu';
-    for (const tpl of [
-      {
-        label: '🔀 순서도 (Mermaid Flowchart)',
-        code: '```mermaid\nflowchart TD\n  A[요구사항 정의] --> B{검토 승인}\n  B -->|승인| C[개발 진행]\n  B -->|보류| D[수정 보완]\n```',
-      },
-      {
-        label: '🔁 시퀀스 다이어그램 (Sequence)',
-        code: '```mermaid\nsequenceDiagram\n  사용자->>앱: 노트 저장 요청\n  앱->>암호화모듈: AES-256-GCM 암호화\n  암호화모듈-->>동기화: 볼트 파일 반영\n```',
-      },
-      {
-        label: '📅 간트 일정표 (Gantt)',
-        code: '```mermaid\ngantt\n  title 프로젝트 일정\n  dateFormat YYYY-MM-DD\n  section 기획\n  설계 확정 :done, 2026-11-01, 5d\n  section 구현\n  핵심 개발 :active, 2026-11-06, 10d\n```',
-      },
-      {
-        label: '🧠 마인드맵 (Mindmap)',
-        code: '```mermaid\nmindmap\n  root((핵심 주제))\n    목표\n      단기 과제\n      장기 로드맵\n    실행\n      일일 점검\n```',
-      },
-      {
-        label: '⚖️ 장단점 비교표 (2열 표)',
-        code: '| 항목 | 장점 | 단점 / 리스크 | 비고 |\n| --- | --- | --- | --- |\n| 대안 A | 빠른 적용 | 확장성 제한 | 우선 검토 |\n| 대안 B | 높은 안정성 | 초기 비용 | 장기 추천 |',
-      },
-    ]) {
+    diagramBody.appendChild(
+      this.createPopupItem('✨ 시각적 플로우차트 빌더 열기…', () => {
+        this.openFlowchartBuilderModal();
+      })
+    );
+    for (const tpl of FLOWCHART_TEMPLATES) {
       diagramBody.appendChild(
         this.createPopupItem(tpl.label, () => {
-          this.insertBlockSnippet(tpl.code);
+          this.insertBlockSnippet(`\`\`\`mermaid\n${tpl.code}\n\`\`\``);
         })
       );
     }
-    const diagramBtn = this.makeBtn('📊도표▾', '다이어그램 & 비교표 템플릿');
+    diagramBody.appendChild(
+      this.createPopupItem('📅 간트 일정표 (Gantt)', () => {
+        this.insertBlockSnippet(
+          '```mermaid\ngantt\n  title 프로젝트 일정\n  dateFormat YYYY-MM-DD\n  section 기획\n  설계 확정 :done, 2026-11-01, 5d\n  section 구현\n  핵심 개발 :active, 2026-11-06, 10d\n```'
+        );
+      })
+    );
+    diagramBody.appendChild(
+      this.createPopupItem('⚖️ 장단점 비교표 (2열 표)', () => {
+        this.insertBlockSnippet(
+          '| 항목 | 장점 | 단점 / 리스크 | 비고 |\n| --- | --- | --- | --- |\n| 대안 A | 빠른 적용 | 확장성 제한 | 우선 검토 |\n| 대안 B | 높은 안정성 | 초기 비용 | 장기 추천 |'
+        );
+      })
+    );
+    const diagramBtn = this.makeBtn('🔀플로우▾', '고급 플로우차트(TB/LR/Subgraph) · 빌더 · 다이어그램');
 
     // ─── Group 8: Date/Time / Status Badges / Symbols / Text Ops / Snippets / Zoom ───
     const dateBody = document.createElement('div');
@@ -1344,9 +1694,9 @@ export class StudioEditorController {
           },
           {
             name: 'diagramTemplates',
-            tooltip: 'Mermaid 다이어그램 & 비교표',
+            tooltip: '고급 플로우차트 빌더 & 다이어그램',
             el: diagramBtn,
-            popup: { body: diagramBody, style: { width: '240px' } },
+            popup: { body: diagramBody, style: { width: '255px' } },
           },
         ],
         [
@@ -1886,9 +2236,220 @@ export class StudioEditorController {
     }
   }
 
+  private openFlowchartBuilderModal(
+    existingCode?: string,
+    applyExisting?: (nextCode: string) => void
+  ): void {
+    openFlowchartStudioModal({
+      initialCode: existingCode || FLOWCHART_TEMPLATES[0].code,
+      onToast: (m, err) => this.callbacks.onToast(m, err),
+      onApply: (nextCode) => {
+        if (applyExisting) {
+          applyExisting(nextCode);
+        } else {
+          this.insertBlockSnippet(`\`\`\`mermaid\n${nextCode}\n\`\`\``);
+        }
+      },
+    });
+  }
+
+  private replaceDiagramFenceInMarkdown(
+    prevCode: string,
+    diagramIdx: number,
+    nextCode: string
+  ): void {
+    if (!this.editor) return;
+    const rawMd = this.editor.getMarkdown();
+    const fences = findDiagramFencesInMarkdown(rawMd);
+    if (fences.length === 0) return;
+
+    const trimmedPrev = prevCode.trim();
+    const matched =
+      fences.find((f) => f.body.trim() === trimmedPrev) ||
+      fences[diagramIdx] ||
+      fences[0];
+    if (!matched) return;
+
+    const normMd = rawMd.replace(/\r\n?/g, '\n');
+    const updatedMd = `${normMd.slice(0, matched.bodyStart)}${nextCode}${normMd.slice(matched.bodyEnd)}`;
+    this.suppressChange = true;
+    try {
+      this.editor.setMarkdown(updatedMd, false);
+    } finally {
+      this.suppressChange = false;
+    }
+    this.callbacks.onMarkdownChange(dehydrateMarkdownMediaUrls(updatedMd));
+  }
+
+  private applyCodeUpdateToDiagramCard(
+    cardEl: HTMLElement,
+    nextCode: string
+  ): void {
+    if (!this.editor) return;
+    const wwWidget = cardEl.closest('.onyx-ww-diagram-widget') as HTMLElement | null;
+    if (this.editor.isWysiwygMode() && wwWidget) {
+      const pmPos = Number(wwWidget.getAttribute('data-pm-pos'));
+      const view = this.getActiveProseMirrorView();
+      if (view && !Number.isNaN(pmPos)) {
+        const node = view.state.doc.nodeAt(pmPos);
+        if (node && node.type?.name === 'codeBlock') {
+          const textNode = nextCode ? view.state.schema.text(nextCode) : null;
+          let tr = view.state.tr.replaceWith(
+            pmPos + 1,
+            pmPos + node.nodeSize - 1,
+            textNode ? [textNode] : []
+          );
+          if (!node.attrs?.language) {
+            tr = tr.setNodeMarkup(pmPos, undefined, { ...node.attrs, language: 'mermaid' });
+          }
+          view.dispatch(tr);
+          return;
+        }
+      }
+    }
+
+    const prevCode = decodeFlowCode(cardEl.getAttribute('data-flow-code') || '');
+    const diagIdx = Number(cardEl.getAttribute('data-diagram-index') || '0') || 0;
+    this.replaceDiagramFenceInMarkdown(prevCode, diagIdx, nextCode);
+  }
+
   private handleHostClick = (ev: MouseEvent): void => {
     const target = ev.target as HTMLElement | null;
     if (!target) return;
+
+    // 1) One-click convert bare `flowchart TB ...` paragraphs in WYSIWYG into a mermaid codeBlock
+    const convertBtn = target.closest('[data-flow-convert-start]') as HTMLElement | null;
+    if (convertBtn && this.editor?.isWysiwygMode()) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const startPos = Number(convertBtn.getAttribute('data-flow-convert-start'));
+      const endPos = Number(convertBtn.getAttribute('data-flow-convert-end'));
+      const view = this.getActiveProseMirrorView();
+      if (view && !Number.isNaN(startPos) && !Number.isNaN(endPos) && endPos > startPos) {
+        const lines: string[] = [];
+        view.state.doc.nodesBetween(startPos, endPos, (node: any) => {
+          if (node.type?.name === 'paragraph') {
+            lines.push((node.textContent || '').trim());
+          }
+        });
+        const joined = lines.filter(Boolean).join('\n');
+        const cbType = view.state.schema.nodes.codeBlock;
+        if (joined && cbType) {
+          const cbNode = cbType.create({ language: 'mermaid' }, view.state.schema.text(joined));
+          view.dispatch(view.state.tr.replaceWith(startPos, endPos, cbNode));
+          this.callbacks.onToast('플로우차트 코드 블록으로 변환했습니다.');
+        }
+      }
+      return;
+    }
+
+    // 2) Flowchart / Diagram interactive card toolbar actions
+    const flowBtn = target.closest('[data-flow-action]') as HTMLElement | null;
+    if (flowBtn) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const cardEl = flowBtn.closest('.onyx-flow-card') as HTMLElement | null;
+      if (!cardEl) return;
+      const action = flowBtn.getAttribute('data-flow-action');
+      const curCode = decodeFlowCode(cardEl.getAttribute('data-flow-code') || '');
+
+      if (action === 'zoom-in' || action === 'zoom-out' || action === 'zoom-reset') {
+        const curZoom = Number(cardEl.getAttribute('data-flow-zoom') || '100') || 100;
+        const nextZoom =
+          action === 'zoom-reset'
+            ? 100
+            : Math.max(50, Math.min(200, curZoom + (action === 'zoom-in' ? 15 : -15)));
+        cardEl.setAttribute('data-flow-zoom', String(nextZoom));
+        const lbl = cardEl.querySelector('.onyx-flow-zoom-label');
+        if (lbl) lbl.textContent = `${nextZoom}%`;
+        const stage = cardEl.querySelector('.onyx-flow-stage') as HTMLElement | null;
+        if (stage) {
+          (stage.style as any).zoom = nextZoom === 100 ? '' : (nextZoom / 100).toFixed(2);
+        }
+        return;
+      }
+
+      if (action === 'copy-img') {
+        void copyDiagramAsPngOrSvg(cardEl, this.callbacks.onToast);
+        return;
+      }
+
+      if (action === 'dir') {
+        const nextCode = toggleFlowchartDirection(curCode);
+        if (nextCode !== curCode) {
+          this.applyCodeUpdateToDiagramCard(cardEl, nextCode);
+        }
+        return;
+      }
+
+      if (action === 'curve') {
+        const { nextCode } = toggleFlowchartCurve(curCode);
+        this.applyCodeUpdateToDiagramCard(cardEl, nextCode);
+        return;
+      }
+
+      if (action === 'theme') {
+        const { nextCode } = cycleFlowchartTheme(curCode);
+        this.applyCodeUpdateToDiagramCard(cardEl, nextCode);
+        return;
+      }
+
+      if (action === 'toggle-code') {
+        const wwWidget = cardEl.closest('.onyx-ww-diagram-widget') as HTMLElement | null;
+        const view = this.getActiveProseMirrorView();
+        if (this.editor?.isWysiwygMode() && wwWidget && view) {
+          const pmPos = Number(wwWidget.getAttribute('data-pm-pos'));
+          const pKey = getOnyxDiagramPluginKey(view);
+          if (pKey && !Number.isNaN(pmPos)) {
+            const node = view.state.doc.nodeAt(pmPos);
+            const pState = pKey.getState(view.state) || { expanded: [] };
+            const selFrom = view.state.selection.from;
+            const selTo = view.state.selection.to;
+            const cursorInside =
+              node &&
+              selFrom > pmPos &&
+              selFrom < pmPos + node.nodeSize &&
+              selTo >= pmPos &&
+              selTo <= pmPos + node.nodeSize;
+            const wasOpen = Boolean(cursorInside || pState.expanded.includes(pmPos));
+
+            let tr = view.state.tr;
+            if (wasOpen) {
+              tr = tr.setMeta(pKey, { closePos: pmPos });
+              if (cursorInside && node) {
+                const afterPos = Math.min(tr.doc.content.size, pmPos + node.nodeSize);
+                const SelCls = view.state.selection.constructor as any;
+                if (typeof SelCls?.near === 'function') {
+                  tr = tr.setSelection(SelCls.near(tr.doc.resolve(afterPos)));
+                }
+              }
+              view.dispatch(tr);
+            } else {
+              tr = tr.setMeta(pKey, { openPos: pmPos });
+              if (node && node.nodeSize >= 2) {
+                const SelCls = view.state.selection.constructor as any;
+                if (typeof SelCls?.near === 'function') {
+                  tr = tr.setSelection(SelCls.near(tr.doc.resolve(pmPos + 1)));
+                }
+              }
+              view.dispatch(tr);
+              view.focus();
+            }
+            return;
+          }
+        }
+        this.editor?.focus();
+        return;
+      }
+
+      if (action === 'builder') {
+        this.openFlowchartBuilderModal(curCode, (updated) => {
+          this.applyCodeUpdateToDiagramCard(cardEl, updated);
+          this.callbacks.onToast('플로우차트 변경사항을 문서에 반영했습니다.');
+        });
+        return;
+      }
+    }
 
     const wikiAnchor = target.closest('.wikilink-inline') as HTMLElement | null;
     if (wikiAnchor) {
@@ -2158,6 +2719,31 @@ export class StudioEditorController {
       }
     });
     addItem('💻', '코드 블록', () => this.execEditorCommand('codeBlock'));
+    addItem('🔀', '시각적 플로우차트 빌더 / 삽입…', () => {
+      const selTxt = window.getSelection()?.toString() || '';
+      const init = looksLikeBareFlowchartText(selTxt) ? selTxt.trim() : undefined;
+      this.openFlowchartBuilderModal(init);
+    });
+    if (hasSelection && looksLikeBareFlowchartText(window.getSelection()?.toString() || '')) {
+      addItem('✨', '선택 텍스트 → 플로우차트 블록 변환', () => {
+        const view = this.getActiveProseMirrorView();
+        const selTxt = (window.getSelection()?.toString() || '').trim();
+        if (!view || !selTxt) return;
+        const { from, to } = view.state.selection;
+        const cbType = view.state.schema.nodes.codeBlock;
+        if (this.editor?.isWysiwygMode() && cbType) {
+          view.dispatch(
+            view.state.tr.replaceRangeWith(
+              from,
+              to,
+              cbType.create({ language: 'mermaid' }, view.state.schema.text(selTxt))
+            )
+          );
+        } else {
+          this.insertBlockSnippet(`\`\`\`mermaid\n${selTxt}\n\`\`\``);
+        }
+      });
+    }
     addItem('🔗', '[[위키링크]] 연결…', () => {
       this.bracketTriggeredFromTyping = false;
       this.callbacks.onRequestWikiLinkPicker(false);
@@ -2343,6 +2929,32 @@ export function renderSplitViewer(params: {
 
   const onClick = (ev: MouseEvent) => {
     const target = ev.target as HTMLElement | null;
+    const flowBtn = target?.closest('[data-flow-action]') as HTMLElement | null;
+    if (flowBtn) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const cardEl = flowBtn.closest('.onyx-flow-card') as HTMLElement | null;
+      if (!cardEl) return;
+      const action = flowBtn.getAttribute('data-flow-action');
+      if (action === 'zoom-in' || action === 'zoom-out' || action === 'zoom-reset') {
+        const curZoom = Number(cardEl.getAttribute('data-flow-zoom') || '100') || 100;
+        const nextZoom =
+          action === 'zoom-reset'
+            ? 100
+            : Math.max(50, Math.min(200, curZoom + (action === 'zoom-in' ? 15 : -15)));
+        cardEl.setAttribute('data-flow-zoom', String(nextZoom));
+        const lbl = cardEl.querySelector('.onyx-flow-zoom-label');
+        if (lbl) lbl.textContent = `${nextZoom}%`;
+        const stage = cardEl.querySelector('.onyx-flow-stage') as HTMLElement | null;
+        if (stage) {
+          (stage.style as any).zoom = nextZoom === 100 ? '' : (nextZoom / 100).toFixed(2);
+        }
+      } else if (action === 'copy-img') {
+        void copyDiagramAsPngOrSvg(cardEl, () => {});
+      }
+      return;
+    }
+
     const link = target?.closest('.wikilink-inline') as HTMLElement | null;
     if (link) {
       ev.preventDefault();
@@ -2394,7 +3006,7 @@ export function renderPrintableHtml(markdown: string, vault: string | null): str
       ],
     });
     const contentsEl = host.querySelector('.toastui-editor-contents');
-    inner = enhanceRenderedHtml(contentsEl?.innerHTML || '');
+    inner = enhanceRenderedHtml(contentsEl?.innerHTML || '', { forPrint: true });
 
     // Ensure <details> toggles are expanded and tables have explicit print-safe DOM attributes
     const cleanBox = document.createElement('div');

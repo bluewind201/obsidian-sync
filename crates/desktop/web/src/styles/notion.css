@@ -2957,6 +2957,52 @@ details.notion-toggle[open] > summary::before {
   #print-root .page-break::after {
     display: none !important;
   }
+
+  #print-root .onyx-flow-toolbar {
+    display: none !important;
+  }
+  #print-root .onyx-flow-card {
+    --flow-canvas-bg: transparent;
+    --flow-surface: #ffffff;
+    --flow-border: #94a3b8;
+    --flow-text: #0f172a;
+    --flow-muted: #475569;
+    --flow-edge: #475569;
+    --flow-accent: #1d4ed8;
+    --flow-accent-fill: #f8fafc;
+    --flow-ok-fill: #ecfdf5;
+    --flow-ok-stroke: #0f7b6c;
+    --flow-ok-pill: #dcfce7;
+    --flow-ok-text: #065f46;
+    --flow-warn-fill: #fffbeb;
+    --flow-warn-stroke: #b45309;
+    --flow-warn-pill: #fef3c7;
+    --flow-warn-text: #92400e;
+    --flow-db-fill: #ecfeff;
+    --flow-db-stroke: #0e7490;
+    --flow-sub-fill: #f5f3ff;
+    --flow-sub-stroke: #6d28d9;
+    --flow-subg-bg: rgba(241, 245, 249, 0.72);
+    --flow-subg-border: #94a3b8;
+    --flow-subg-pill: #e2e8f0;
+    --flow-subg-text: #1e293b;
+    --flow-pill-bg: #ffffff;
+    border: 0.75pt solid #cbd5e1 !important;
+    background: #ffffff !important;
+    box-shadow: none !important;
+    break-inside: avoid;
+    page-break-inside: avoid;
+    margin: 12px 0 !important;
+  }
+  #print-root .onyx-flow-viewport {
+    overflow: visible !important;
+    padding: 8px !important;
+    background: #ffffff !important;
+  }
+  #print-root svg.onyx-flow-svg {
+    max-width: 100% !important;
+    height: auto !important;
+  }
 }
 
 /* ───────────────────────── v0.8.0 Drag-and-Drop, Editor Context Menu & Graph HUD ───────────────────────── */
@@ -3136,4 +3182,327 @@ details.notion-toggle[open] > summary::before {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+/* ───────────────────────── v0.9.0 Studio Flowchart & Visual Diagram Engine ───────────────────────── */
+.onyx-flow-card {
+  --flow-canvas-bg: transparent;
+  --flow-surface: #ffffff;
+  --flow-border: #cbd5e1;
+  --flow-text: #0f172a;
+  --flow-muted: #64748b;
+  --flow-edge: #64748b;
+  --flow-accent: #2563eb;
+  --flow-accent-fill: #ffffff;
+  --flow-ok-fill: #ecfdf5;
+  --flow-ok-stroke: #0f7b6c;
+  --flow-ok-pill: #dcfce7;
+  --flow-ok-text: #065f46;
+  --flow-warn-fill: #fffbeb;
+  --flow-warn-stroke: #d97706;
+  --flow-warn-pill: #fef3c7;
+  --flow-warn-text: #92400e;
+  --flow-db-fill: #ecfeff;
+  --flow-db-stroke: #0891b2;
+  --flow-sub-fill: #f5f3ff;
+  --flow-sub-stroke: #7c3aed;
+  --flow-subg-bg: rgba(241, 245, 249, 0.72);
+  --flow-subg-border: #cbd5e1;
+  --flow-subg-pill: #e2e8f0;
+  --flow-subg-text: #334155;
+  --flow-pill-bg: #ffffff;
+
+  margin: 12px 0;
+  border-radius: 12px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.onyx-flow-card[data-flow-theme='ocean'] {
+  --flow-accent: #0284c7;
+  --flow-accent-fill: #f0f9ff;
+  --flow-ok-fill: #ecfeff;
+  --flow-ok-stroke: #0891b2;
+  --flow-edge: #0369a1;
+  --flow-subg-bg: rgba(224, 242, 254, 0.55);
+  --flow-subg-border: #7dd3fc;
+  --flow-subg-pill: #bae6fd;
+  --flow-subg-text: #0c4a6e;
+}
+.onyx-flow-card[data-flow-theme='emerald'] {
+  --flow-accent: #059669;
+  --flow-accent-fill: #ecfdf5;
+  --flow-ok-fill: #d1fae5;
+  --flow-ok-stroke: #047857;
+  --flow-edge: #047857;
+  --flow-subg-bg: rgba(209, 250, 229, 0.48);
+  --flow-subg-border: #6ee7b7;
+  --flow-subg-pill: #a7f3d0;
+  --flow-subg-text: #064e3b;
+}
+.onyx-flow-card[data-flow-theme='sunset'] {
+  --flow-accent: #ea580c;
+  --flow-accent-fill: #fff7ed;
+  --flow-warn-fill: #fef3c7;
+  --flow-warn-stroke: #c2410c;
+  --flow-edge: #c2410c;
+  --flow-subg-bg: rgba(255, 237, 213, 0.62);
+  --flow-subg-border: #fdba74;
+  --flow-subg-pill: #fed7aa;
+  --flow-subg-text: #7c2d12;
+}
+.onyx-flow-card[data-flow-theme='mono'] {
+  --flow-accent: #334155;
+  --flow-accent-fill: #f8fafc;
+  --flow-ok-fill: #f1f5f9;
+  --flow-ok-stroke: #1e293b;
+  --flow-ok-pill: #e2e8f0;
+  --flow-ok-text: #0f172a;
+  --flow-warn-fill: #f8fafc;
+  --flow-warn-stroke: #475569;
+  --flow-warn-pill: #e2e8f0;
+  --flow-warn-text: #1e293b;
+  --flow-db-fill: #f1f5f9;
+  --flow-db-stroke: #334155;
+  --flow-sub-fill: #f1f5f9;
+  --flow-sub-stroke: #334155;
+  --flow-edge: #334155;
+  --flow-subg-bg: rgba(241, 245, 249, 0.72);
+  --flow-subg-border: #94a3b8;
+  --flow-subg-pill: #e2e8f0;
+  --flow-subg-text: #0f172a;
+}
+
+html[data-theme='dark'] .onyx-flow-card {
+  --flow-surface: #1f2430;
+  --flow-border: #475569;
+  --flow-text: #e2e8f0;
+  --flow-muted: #94a3b8;
+  --flow-edge: #94a3b8;
+  --flow-accent: #60a5fa;
+  --flow-accent-fill: #1e293b;
+  --flow-ok-fill: #0f2f2b;
+  --flow-ok-stroke: #34d399;
+  --flow-ok-pill: #064e3b;
+  --flow-ok-text: #a7f3d0;
+  --flow-warn-fill: #332510;
+  --flow-warn-stroke: #fbbf24;
+  --flow-warn-pill: #451a03;
+  --flow-warn-text: #fde68a;
+  --flow-db-fill: #0e2a38;
+  --flow-db-stroke: #38bdf8;
+  --flow-sub-fill: #261e3c;
+  --flow-sub-stroke: #a78bfa;
+  --flow-subg-bg: rgba(30, 41, 59, 0.58);
+  --flow-subg-border: #475569;
+  --flow-subg-pill: #334155;
+  --flow-subg-text: #cbd5e1;
+  --flow-pill-bg: #1e293b;
+}
+
+.onyx-flow-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-sidebar);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-wrap: wrap;
+}
+.onyx-flow-toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.onyx-flow-badge {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--accent);
+  background: var(--accent-soft);
+  padding: 2px 7px;
+  border-radius: 6px;
+}
+.onyx-flow-stat {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.onyx-flow-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.onyx-flow-btn {
+  height: 24px;
+  padding: 0 7px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.onyx-flow-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.onyx-flow-btn.primary {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.onyx-flow-viewport {
+  padding: 14px;
+  overflow: auto;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  background-color: var(--bg-secondary);
+  background-image: radial-gradient(var(--border-subtle) 1px, transparent 1px);
+  background-size: 16px 16px;
+}
+.onyx-flow-stage {
+  display: inline-flex;
+  justify-content: center;
+  max-width: 100%;
+}
+svg.onyx-flow-svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.onyx-ww-diagram-widget {
+  user-select: none;
+  margin: 8px 0 4px;
+}
+.toastui-editor-ww-code-block.onyx-ww-diagram-source.is-collapsed {
+  max-height: 0 !important;
+  min-height: 0 !important;
+  height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  overflow: hidden !important;
+  opacity: 0;
+  pointer-events: none;
+}
+.toastui-editor-ww-code-block.onyx-ww-diagram-source.is-collapsed::after {
+  display: none !important;
+}
+.toastui-editor-ww-code-block.onyx-ww-diagram-source.is-open {
+  margin-top: 4px;
+  border: 1px dashed var(--accent);
+  border-radius: 8px;
+}
+
+.onyx-ww-bare-flow-wrap {
+  margin: 8px 0;
+  padding: 8px;
+  border-radius: 10px;
+  border: 1px dashed var(--accent);
+  background: rgba(35, 131, 226, 0.04);
+}
+.onyx-flow-convert-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+/* Studio Visual Flowchart Modal */
+.onyx-flow-studio-modal {
+  max-width: 95vw !important;
+  max-height: 90vh !important;
+  display: flex;
+  flex-direction: column;
+}
+.onyx-flow-studio-body {
+  display: grid;
+  grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
+  gap: 14px;
+  padding: 14px 16px;
+  overflow: auto;
+  flex: 1;
+  min-height: 460px;
+}
+.onyx-flow-studio-left {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+.onyx-flow-studio-right {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+.onyx-flow-studio-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.onyx-flow-studio-label {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+.onyx-flow-tpl-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.onyx-flow-quick-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px;
+}
+.onyx-flow-code-area {
+  width: 100%;
+  flex: 1;
+  min-height: 150px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-inset);
+  color: var(--text-primary);
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.48;
+  resize: vertical;
+}
+.onyx-flow-studio-preview {
+  flex: 1;
+  min-height: 320px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--bg-secondary);
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+@media (max-width: 820px) {
+  .onyx-flow-studio-body {
+    grid-template-columns: 1fr;
+    min-height: 0;
+  }
+  .onyx-flow-studio-preview {
+    min-height: 240px;
+  }
 }
