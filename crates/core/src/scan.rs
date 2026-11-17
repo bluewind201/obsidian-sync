@@ -84,6 +84,37 @@ pub fn rel_of(root: &Path, p: &Path) -> Option<String> {
     }
 }
 
+fn is_recursive_self_nested_dir(root: &Path, dir_path: &Path, root_has_obsidian: bool) -> bool {
+    let Some(root_name) = root.file_name().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    let Some(dir_name) = dir_path.file_name().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    if !dir_name.eq_ignore_ascii_case(root_name) {
+        return false;
+    }
+    let Ok(rel) = dir_path.strip_prefix(root) else {
+        return false;
+    };
+    let mut depth = 0usize;
+    let mut prev_matches_root = false;
+    for comp in rel.components() {
+        depth += 1;
+        let is_same = comp
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(root_name);
+        if prev_matches_root && is_same {
+            return true;
+        }
+        prev_matches_root = is_same;
+    }
+    depth == 1
+        && ((root_has_obsidian && dir_path.join(".obsidian").is_dir())
+            || dir_path.join(root_name).is_dir())
+}
+
 pub fn scan(root: &Path, ignore: &Ignore) -> Result<HashMap<String, LocalFile>> {
     // 폴더 자체를 읽을 수 없으면(없음, 드라이브 분리, 권한 없음) 빈 폴더로 취급하지 않고 실패.
     // 빈 폴더로 보면 "모두 지워졌다"고 판단해 저장소 파일을 지울 수 있습니다.
@@ -93,6 +124,7 @@ pub fn scan(root: &Path, ignore: &Ignore) -> Result<HashMap<String, LocalFile>> 
             root.display()
         );
     }
+    let root_has_obsidian = root.join(".obsidian").is_dir();
     let mut out = HashMap::new();
     let mut it = walkdir::WalkDir::new(root).follow_links(true).into_iter();
     while let Some(entry) = it.next() {
@@ -110,7 +142,9 @@ pub fn scan(root: &Path, ignore: &Ignore) -> Result<HashMap<String, LocalFile>> 
             continue;
         };
         if entry.file_type().is_dir() {
-            if ignore.is_ignored(&format!("{rel}/x")) {
+            if ignore.is_ignored(&format!("{rel}/x"))
+                || is_recursive_self_nested_dir(root, entry.path(), root_has_obsidian)
+            {
                 it.skip_current_dir();
             }
             continue;
@@ -164,5 +198,24 @@ mod tests {
         let ig = Ignore::new(&cfg).unwrap();
         assert!(!ig.is_ignored(".obsidian/app.json"));
         assert!(ig.is_ignored("사진/@eaDir/x.jpg"));
+    }
+
+    #[test]
+    fn skips_recursive_self_nested_vault_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = tmp.path().join("Obsidian");
+        std::fs::create_dir_all(vault.join(".obsidian")).unwrap();
+        std::fs::write(vault.join("ok.md"), b"# ok").unwrap();
+        // 자기 복제된 중첩 폴더 (Obsidian/Obsidian/.obsidian & Obsidian/Obsidian/Obsidian)
+        let nested = vault.join("Obsidian").join("Obsidian");
+        std::fs::create_dir_all(nested.join(".obsidian")).unwrap();
+        std::fs::write(vault.join("Obsidian").join("dup1.md"), b"dup").unwrap();
+        std::fs::write(nested.join("dup2.md"), b"dup2").unwrap();
+
+        let ig = Ignore::new(&Profile::default()).unwrap();
+        let files = scan(&vault, &ig).unwrap();
+        assert!(files.contains_key("ok.md"));
+        assert!(!files.contains_key("Obsidian/dup1.md"));
+        assert!(!files.contains_key("Obsidian/Obsidian/dup2.md"));
     }
 }

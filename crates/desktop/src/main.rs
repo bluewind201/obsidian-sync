@@ -10,56 +10,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[cfg(windows)]
-fn main() {
-    if !platform::single_instance() {
-        return;
-    }
-
-    let hide = std::env::args().any(|a| a == "--minimized");
-    let event_loop = tao::event_loop::EventLoopBuilder::<AppUserEvent>::with_user_event().build();
-    let event_proxy = event_loop.create_proxy();
-    let trigger: platform::SharedTrigger = Arc::new(Mutex::new(None));
-    let backend_state = Arc::new(Mutex::new(api::BackendState::new_with_proxy(
-        trigger.clone(),
-        Some(event_proxy),
-    )));
-    let data_dir = backend_state.lock().unwrap().sync.data_dir.clone();
-
-    // 창이 트레이에 숨겨진 동안에도 서비스 중지/재시작/초기화 상태 머신이 멈추지 않도록 주기 폴링
-    {
-        let st = backend_state.clone();
-        let _ = std::thread::Builder::new()
-            .name("obsidian-sync-lifecycle".into())
-            .spawn(move || loop {
-                std::thread::sleep(Duration::from_millis(200));
-                if let Ok(mut guard) = st.lock() {
-                    guard.sync.poll_lifecycle();
-                }
-            });
-    }
-
-    let window_icon = tao::window::Icon::from_rgba(platform::icon_rgba(64), 64, 64).ok();
-
-    let window = tao::window::WindowBuilder::new()
-        .with_title("Onyx Studio")
-        .with_inner_size(tao::dpi::LogicalSize::new(1400.0, 900.0))
-        .with_min_inner_size(tao::dpi::LogicalSize::new(900.0, 600.0))
-        .with_window_icon(window_icon)
-        .with_visible(!hide)
-        .build(&event_loop)
-        .expect("애플리케이션 창을 생성할 수 없습니다");
-
-    let hwnd = tao::platform::windows::WindowExtWindows::hwnd(&window) as isize;
-    let tray = platform::create_tray(hwnd, trigger);
-    let has_tray = tray.is_some();
-    if hide && !has_tray {
-        window.set_visible(true);
-    }
-
-    let mut web_context = wry::WebContext::new(Some(data_dir.join("webview")));
-    let api_state = backend_state.clone();
-
-    let webview = wry::WebViewBuilder::new_with_web_context(&mut web_context)
+fn build_main_webview(
+    window: &tao::window::Window,
+    web_context: &mut wry::WebContext,
+    api_state: Arc<Mutex<api::BackendState>>,
+) -> wry::Result<wry::WebView> {
+    wry::WebViewBuilder::new_with_web_context(web_context)
         .with_asynchronous_custom_protocol("app".into(), move |_id, request, responder| {
             let raw_path = request.uri().path().to_string();
             let path = percent_encoding::percent_decode_str(&raw_path)
@@ -139,8 +95,97 @@ fn main() {
             wry::NewWindowResponse::Allow
         })
         .with_url("app://localhost/")
-        .build(&window)
-        .expect("WebView2를 초기화할 수 없습니다");
+        .build(window)
+}
+
+#[cfg(windows)]
+fn main() {
+    if !platform::single_instance() {
+        return;
+    }
+
+    let hide = std::env::args().any(|a| a == "--minimized");
+    let event_loop = tao::event_loop::EventLoopBuilder::<AppUserEvent>::with_user_event().build();
+    let event_proxy = event_loop.create_proxy();
+    platform::spawn_activation_listener(event_proxy.clone());
+
+    let window_icon = tao::window::Icon::from_rgba(platform::icon_rgba(64), 64, 64).ok();
+
+    let window = match tao::window::WindowBuilder::new()
+        .with_title("Onyx Studio")
+        .with_inner_size(tao::dpi::LogicalSize::new(1400.0, 900.0))
+        .with_min_inner_size(tao::dpi::LogicalSize::new(900.0, 600.0))
+        .with_window_icon(window_icon)
+        .with_visible(!hide)
+        .build(&event_loop)
+    {
+        Ok(w) => w,
+        Err(e) => {
+            platform::show_error_box(
+                "Onyx Studio 시작 오류",
+                &format!("애플리케이션 창을 생성할 수 없습니다:\n{e}"),
+            );
+            return;
+        }
+    };
+
+    let hwnd = tao::platform::windows::WindowExtWindows::hwnd(&window) as isize;
+    if !hide {
+        window.set_visible(true);
+        window.set_focus();
+        platform::present_hwnd(hwnd);
+    }
+
+    let trigger: platform::SharedTrigger = Arc::new(Mutex::new(None));
+    let backend_state = Arc::new(Mutex::new(api::BackendState::new_with_proxy(
+        trigger.clone(),
+        Some(event_proxy),
+    )));
+    let data_dir = backend_state.lock().unwrap().sync.data_dir.clone();
+
+    // 창이 트레이에 숨겨진 동안에도 서비스 중지/재시작/초기화 상태 머신이 멈추지 않도록 주기 폴링
+    {
+        let st = backend_state.clone();
+        let _ = std::thread::Builder::new()
+            .name("obsidian-sync-lifecycle".into())
+            .spawn(move || loop {
+                std::thread::sleep(Duration::from_millis(200));
+                if let Ok(mut guard) = st.lock() {
+                    guard.sync.poll_lifecycle();
+                }
+            });
+    }
+
+    let tray = platform::create_tray(hwnd, trigger);
+    let has_tray = tray.is_some();
+    if hide && !has_tray {
+        window.set_visible(true);
+        window.set_focus();
+        platform::present_hwnd(hwnd);
+    }
+
+    let primary_wv_dir = data_dir.join("webview");
+    let mut web_context = wry::WebContext::new(Some(primary_wv_dir));
+    let webview = match build_main_webview(&window, &mut web_context, backend_state.clone()) {
+        Ok(wv) => wv,
+        Err(primary_err) => {
+            let fallback_wv_dir =
+                std::env::temp_dir().join(format!("onyx-studio-webview-{}", std::process::id()));
+            web_context = wry::WebContext::new(Some(fallback_wv_dir));
+            match build_main_webview(&window, &mut web_context, backend_state.clone()) {
+                Ok(wv) => wv,
+                Err(fallback_err) => {
+                    platform::show_error_box(
+                        "Onyx Studio WebView2 오류",
+                        &format!(
+                            "WebView2 화면을 초기화할 수 없습니다.\nMicrosoft Edge WebView2 런타임이 설치되어 있는지 확인해 주세요.\n\n1차 오류: {primary_err}\n재시도 오류: {fallback_err}"
+                        ),
+                    );
+                    return;
+                }
+            }
+        }
+    };
 
     event_loop.run(move |event, _, control_flow| {
         let _keep_alive = (&window, &web_context, &tray);
@@ -155,6 +200,16 @@ fn main() {
                     platform::hide_window(hwnd);
                 } else {
                     *control_flow = tao::event_loop::ControlFlow::Exit;
+                }
+            }
+            tao::event::Event::UserEvent(AppUserEvent::ShowMainWindow) => {
+                use wry::WebViewExtWindows;
+                window.set_visible(true);
+                window.set_minimized(false);
+                window.set_focus();
+                platform::present_hwnd(hwnd);
+                unsafe {
+                    let _ = webview.controller().SetIsVisible(true);
                 }
             }
             tao::event::Event::UserEvent(AppUserEvent::ExportPdf {

@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
 
@@ -26,6 +26,19 @@ const SKIP_SYSTEM_DIRS: &[&str] = &[
     "#snapshot",
     ".SynologyWorkingDirectory",
     "node_modules",
+    "target",
+    "dist",
+    "build",
+    "out",
+    ".gradle",
+    ".idea",
+    ".vscode",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "vendor",
+    "bin",
+    "obj",
 ];
 
 const MEDIA_EXTENSIONS: &[&str] = &[
@@ -442,7 +455,8 @@ impl WorkspaceState {
 pub struct VaultWatcherState {
     watched_vault: Option<String>,
     revision: Arc<AtomicU64>,
-    _watcher: Option<notify::RecommendedWatcher>,
+    watch_gen: Arc<AtomicU64>,
+    _watcher: Arc<Mutex<Option<notify::RecommendedWatcher>>>,
 }
 
 impl VaultWatcherState {
@@ -450,7 +464,8 @@ impl VaultWatcherState {
         Self {
             watched_vault: None,
             revision: Arc::new(AtomicU64::new(1)),
-            _watcher: None,
+            watch_gen: Arc::new(AtomicU64::new(0)),
+            _watcher: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -470,49 +485,64 @@ impl VaultWatcherState {
         if self.watched_vault == target {
             return;
         }
-        self._watcher = None;
         self.watched_vault = target.clone();
         self.bump();
 
-        let Some(vp) = target else { return };
-        let root = PathBuf::from(&vp);
-        if !root.is_dir() {
-            return;
-        }
+        let my_gen = self.watch_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        let gen_ref = self.watch_gen.clone();
+        let watcher_slot = self._watcher.clone();
         let rev = self.revision.clone();
-        let watch_root = root.clone();
-        let Ok(mut watcher) =
-            notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-                let Ok(ev) = res else { return };
-                if matches!(ev.kind, EventKind::Access(_)) {
+
+        let _ = std::thread::Builder::new()
+            .name("obsidian-vault-watcher".into())
+            .spawn(move || {
+                if let Ok(mut guard) = watcher_slot.lock() {
+                    *guard = None;
+                }
+                let Some(vp) = target else { return };
+                let root = PathBuf::from(&vp);
+                if !root.is_dir() || gen_ref.load(Ordering::SeqCst) != my_gen {
                     return;
                 }
-                let relevant = ev.paths.iter().any(|p| {
-                    let rel = p
-                        .strip_prefix(&watch_root)
-                        .unwrap_or(p)
-                        .to_string_lossy()
-                        .replace('\\', "/");
-                    if rel.starts_with(".git/")
-                        || rel == ".git"
-                        || rel.starts_with(".trash/")
-                        || rel == ".trash"
-                        || rel.starts_with(".obsidian/workspace")
-                    {
-                        return false;
+                let watch_root = root.clone();
+                let rev_cb = rev.clone();
+                let Ok(mut watcher) =
+                    notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                        let Ok(ev) = res else { return };
+                        if matches!(ev.kind, EventKind::Access(_)) {
+                            return;
+                        }
+                        let relevant = ev.paths.iter().any(|p| {
+                            let rel = p
+                                .strip_prefix(&watch_root)
+                                .unwrap_or(p)
+                                .to_string_lossy()
+                                .replace('\\', "/");
+                            if rel.starts_with(".git/")
+                                || rel == ".git"
+                                || rel.starts_with(".trash/")
+                                || rel == ".trash"
+                                || rel.starts_with(".obsidian/workspace")
+                            {
+                                return false;
+                            }
+                            true
+                        });
+                        if relevant {
+                            rev_cb.fetch_add(1, Ordering::Relaxed);
+                        }
+                    })
+                else {
+                    return;
+                };
+                if watcher.watch(&root, RecursiveMode::Recursive).is_ok() {
+                    if let Ok(mut guard) = watcher_slot.lock() {
+                        if gen_ref.load(Ordering::SeqCst) == my_gen {
+                            *guard = Some(watcher);
+                        }
                     }
-                    true
-                });
-                if relevant {
-                    rev.fetch_add(1, Ordering::Relaxed);
                 }
-            })
-        else {
-            return;
-        };
-        if watcher.watch(&root, RecursiveMode::Recursive).is_ok() {
-            self._watcher = Some(watcher);
-        }
+            });
     }
 }
 
@@ -1450,6 +1480,7 @@ fn payload_from_note_fields(
 
 // ───────────────────────────── 볼트 인덱싱 및 백링크 ─────────────────────────────
 
+#[derive(Clone)]
 struct IndexedNote {
     rel_path: String,
     stem: String,
@@ -1464,6 +1495,85 @@ struct IndexedNote {
     locked: bool,
 }
 
+#[derive(Clone)]
+struct CachedNoteEntry {
+    mtime_nanos: u128,
+    file_len: u64,
+    crypto_fp: u64,
+    note: IndexedNote,
+}
+
+#[derive(Default)]
+struct VaultNoteCache {
+    entries: HashMap<String, CachedNoteEntry>,
+}
+
+static VAULT_NOTE_CACHE: OnceLock<Mutex<HashMap<PathBuf, VaultNoteCache>>> = OnceLock::new();
+
+fn vault_note_cache() -> &'static Mutex<HashMap<PathBuf, VaultNoteCache>> {
+    VAULT_NOTE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cache_vault_key(vault_root: &Path) -> PathBuf {
+    fs::canonicalize(vault_root).unwrap_or_else(|_| vault_root.to_path_buf())
+}
+
+fn metadata_stamp(meta: Option<&fs::Metadata>) -> (u128, u64) {
+    let Some(m) = meta else {
+        return (0, 0);
+    };
+    let nanos = m
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    (nanos, m.len())
+}
+
+fn is_racy_mtime(mtime_nanos: u128, now_nanos: u128) -> bool {
+    mtime_nanos == 0 || now_nanos.saturating_sub(mtime_nanos) < 2_000_000_000
+}
+
+fn is_recursive_self_vault_dir(vault_root: &Path, candidate_dir: &Path) -> bool {
+    let Some(vault_name) = vault_root.file_name().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    let Some(dir_name) = candidate_dir.file_name().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    if !dir_name.eq_ignore_ascii_case(vault_name) {
+        return false;
+    }
+    let depth = candidate_dir
+        .strip_prefix(vault_root)
+        .map(|p| p.components().count())
+        .unwrap_or(0);
+    depth > 12
+        || candidate_dir.join(".obsidian").is_dir()
+        || candidate_dir.join(vault_name).is_dir()
+}
+
+fn is_cloud_unhydrated(meta: Option<&fs::Metadata>) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
+        const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x0004_0000;
+        const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+        if let Some(m) = meta {
+            let attrs = m.file_attributes();
+            return (attrs
+                & (FILE_ATTRIBUTE_OFFLINE
+                    | FILE_ATTRIBUTE_RECALL_ON_OPEN
+                    | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS))
+                != 0;
+        }
+    }
+    let _ = meta;
+    false
+}
+
 fn collect_indexed_notes_with_session(
     vault_root: &Path,
     session: Option<&VaultCryptoSession>,
@@ -1473,13 +1583,30 @@ fn collect_indexed_notes_with_session(
         return notes;
     }
 
+    let key = cache_vault_key(vault_root);
+    let crypto_fp = session
+        .map(|s| s.vault_fingerprint(vault_root))
+        .unwrap_or(0);
+    let prev_entries = vault_note_cache()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&key).map(|c| c.entries.clone()))
+        .unwrap_or_default();
+    let now_nanos = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut next_entries: HashMap<String, CachedNoteEntry> =
+        HashMap::with_capacity(prev_entries.len().max(64));
+
     let walker = WalkDir::new(vault_root).into_iter().filter_entry(|e| {
         if e.depth() == 0 {
             return true;
         }
         if e.file_type().is_dir() {
             let name = e.file_name().to_string_lossy();
-            return !is_ignored_dir_name(&name);
+            return !is_ignored_dir_name(&name)
+                && !is_recursive_self_vault_dir(vault_root, e.path());
         }
         true
     });
@@ -1500,15 +1627,61 @@ fn collect_indexed_notes_with_session(
             continue;
         };
         let rel_path = rel.to_string_lossy().replace('\\', "/");
-        let Ok(raw) = fs::read_to_string(path) else {
-            continue;
-        };
         let meta = entry.metadata().ok();
+        let (mtime_nanos, file_len) = metadata_stamp(meta.as_ref());
+
+        if !is_racy_mtime(mtime_nanos, now_nanos) {
+            if let Some(cached) = prev_entries.get(&rel_path) {
+                if cached.mtime_nanos == mtime_nanos
+                    && cached.file_len == file_len
+                    && (!cached.note.encrypted || cached.crypto_fp == crypto_fp)
+                {
+                    let cloned = cached.note.clone();
+                    next_entries.insert(rel_path, cached.clone());
+                    notes.push(cloned);
+                    continue;
+                }
+            }
+        }
+
         let (_, updated_at) = format_mtime(meta.as_ref());
         let stem = note_title_from_rel(&rel_path);
         let rel_no_ext = strip_md_ext(&rel_path).to_string();
 
-        if crypto::is_encrypted_markdown(&raw).is_some() {
+        if is_cloud_unhydrated(meta.as_ref()) {
+            let note = IndexedNote {
+                rel_path: rel_path.clone(),
+                stem,
+                rel_no_ext,
+                icon: None,
+                tags: Vec::new(),
+                outgoing: Vec::new(),
+                body: String::new(),
+                updated_at,
+                word_count: 0,
+                encrypted: false,
+                locked: false,
+            };
+            if !is_racy_mtime(mtime_nanos, now_nanos) {
+                next_entries.insert(
+                    rel_path,
+                    CachedNoteEntry {
+                        mtime_nanos,
+                        file_len,
+                        crypto_fp,
+                        note: note.clone(),
+                    },
+                );
+            }
+            notes.push(note);
+            continue;
+        }
+
+        let Ok(raw) = fs::read_to_string(path) else {
+            continue;
+        };
+
+        let note = if crypto::is_encrypted_markdown(&raw).is_some() {
             if let Some((payload, _, _)) =
                 session.and_then(|s| s.try_decrypt_with_session(vault_root, &rel_path, &raw))
             {
@@ -1516,8 +1689,8 @@ fn collect_indexed_notes_with_session(
                 let tags = extract_tags_from_properties(&props, &payload.body);
                 let outgoing = extract_outgoing_links(&payload.body);
                 let word_count = count_words(&payload.body);
-                notes.push(IndexedNote {
-                    rel_path,
+                IndexedNote {
+                    rel_path: rel_path.clone(),
                     stem,
                     rel_no_ext,
                     icon: payload.icon,
@@ -1528,11 +1701,11 @@ fn collect_indexed_notes_with_session(
                     word_count,
                     encrypted: true,
                     locked: false,
-                });
+                }
             } else {
                 // 잠긴 암호화 노트는 복호화 전까지 본문/태그/링크를 인덱스에 노출하지 않음
-                notes.push(IndexedNote {
-                    rel_path,
+                IndexedNote {
+                    rel_path: rel_path.clone(),
                     stem,
                     rel_no_ext,
                     icon: Some("🔒".into()),
@@ -1543,29 +1716,50 @@ fn collect_indexed_notes_with_session(
                     word_count: 0,
                     encrypted: true,
                     locked: true,
-                });
+                }
             }
-            continue;
+        } else {
+            let (fm, body) = parse_frontmatter_and_body(&raw);
+            let tags = extract_tags(&fm, &body);
+            let outgoing = extract_outgoing_links(&body);
+            let word_count = count_words(&body);
+
+            IndexedNote {
+                rel_path: rel_path.clone(),
+                stem,
+                rel_no_ext,
+                icon: fm.icon,
+                tags,
+                outgoing,
+                body,
+                updated_at,
+                word_count,
+                encrypted: false,
+                locked: false,
+            }
+        };
+
+        if !is_racy_mtime(mtime_nanos, now_nanos) {
+            next_entries.insert(
+                rel_path,
+                CachedNoteEntry {
+                    mtime_nanos,
+                    file_len,
+                    crypto_fp,
+                    note: note.clone(),
+                },
+            );
         }
+        notes.push(note);
+    }
 
-        let (fm, body) = parse_frontmatter_and_body(&raw);
-        let tags = extract_tags(&fm, &body);
-        let outgoing = extract_outgoing_links(&body);
-        let word_count = count_words(&body);
-
-        notes.push(IndexedNote {
-            rel_path,
-            stem,
-            rel_no_ext,
-            icon: fm.icon,
-            tags,
-            outgoing,
-            body,
-            updated_at,
-            word_count,
-            encrypted: false,
-            locked: false,
-        });
+    if let Ok(mut map) = vault_note_cache().lock() {
+        map.insert(
+            key,
+            VaultNoteCache {
+                entries: next_entries,
+            },
+        );
     }
 
     notes.sort_by(|a, b| a.rel_path.to_lowercase().cmp(&b.rel_path.to_lowercase()));
@@ -1770,7 +1964,10 @@ fn build_tree_recursive(
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
         if path.is_dir() {
-            if is_ignored_dir_name(&name) || name == "attachments" {
+            if is_ignored_dir_name(&name)
+                || name == "attachments"
+                || is_recursive_self_vault_dir(vault_root, &path)
+            {
                 continue;
             }
             dirs.push((name, path, entry.metadata().ok()));
@@ -4460,5 +4657,34 @@ mod tests {
         custom.save(data_dir).unwrap();
         let reloaded = WorkspaceState::load(data_dir);
         assert!((reloaded.margin_left_cm - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn scan_vault_skips_recursive_self_vault_and_build_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = tmp.path().join("Obsidian");
+        fs::create_dir_all(vault.join(".obsidian")).unwrap();
+        fs::create_dir_all(vault.join("Obsidian").join(".obsidian")).unwrap();
+        fs::create_dir_all(vault.join("Obsidian").join("Obsidian")).unwrap();
+        fs::create_dir_all(vault.join("target").join("debug")).unwrap();
+        fs::create_dir_all(vault.join("node_modules").join("pkg")).unwrap();
+
+        create_note(&vault, "", "normal", Some("# Normal\nbody"), None, &[]).unwrap();
+        fs::write(vault.join("Obsidian").join("dup1.md"), "dup1").unwrap();
+        fs::write(
+            vault.join("Obsidian").join("Obsidian").join("dup2.md"),
+            "dup2",
+        )
+        .unwrap();
+        fs::write(vault.join("target").join("debug").join("ignored.md"), "ig").unwrap();
+        fs::write(
+            vault.join("node_modules").join("pkg").join("ignored2.md"),
+            "ig2",
+        )
+        .unwrap();
+
+        let scanned = scan_vault(&vault, 1).unwrap();
+        assert_eq!(scanned.total_notes, 1);
+        assert_eq!(scanned.notes[0].path, "normal.md");
     }
 }

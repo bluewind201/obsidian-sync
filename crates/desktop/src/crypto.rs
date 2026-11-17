@@ -10,8 +10,10 @@ use ring::aead::{self, Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_L
 use ring::pbkdf2;
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::num::NonZeroU32;
 use std::path::Path;
 use zeroize::Zeroizing;
@@ -261,6 +263,38 @@ impl VaultCryptoSession {
             return Some((pw.clone(), None));
         }
         None
+    }
+
+    pub fn vault_fingerprint(&self, vault_root: &Path) -> u64 {
+        let vk = norm_vault_key(vault_root);
+        let mut hasher = DefaultHasher::new();
+        if let Some(vpw) = self.vault_passwords.get(&vk) {
+            true.hash(&mut hasher);
+            vpw.as_str().hash(&mut hasher);
+        } else {
+            false.hash(&mut hasher);
+        }
+        let mut notes: Vec<(&str, &str)> = self
+            .note_passwords
+            .iter()
+            .filter_map(|((v, r), pw)| {
+                if v == &vk {
+                    Some((r.as_str(), pw.as_str()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        notes.sort_unstable();
+        notes.hash(&mut hasher);
+        let mut locked: Vec<&str> = self
+            .manually_locked_notes
+            .iter()
+            .filter_map(|(v, r)| if v == &vk { Some(r.as_str()) } else { None })
+            .collect();
+        locked.sort_unstable();
+        locked.hash(&mut hasher);
+        hasher.finish()
     }
 
     pub fn try_decrypt_with_session(

@@ -8,6 +8,7 @@ pub mod vault;
 
 #[derive(Debug)]
 pub enum AppUserEvent {
+    ShowMainWindow,
     ExportPdf {
         output_path: std::path::PathBuf,
         landscape: bool,

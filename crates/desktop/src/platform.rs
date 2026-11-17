@@ -91,34 +91,163 @@ pub fn icon_rgba(size: u32) -> Vec<u8> {
 #[cfg(windows)]
 mod imp {
     use super::SharedTrigger;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicIsize, Ordering};
+    use std::time::Duration;
     use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{
         Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
     };
-    use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
-    use windows_sys::Win32::System::Threading::CreateMutexW;
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HWND, WAIT_OBJECT_0,
+    };
+    use windows_sys::Win32::System::Threading::{
+        CreateEventW, CreateMutexW, OpenEventW, OpenProcess, QueryFullProcessImageNameW, SetEvent,
+        TerminateProcess, WaitForSingleObject, EVENT_MODIFY_STATE, INFINITE,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, SetForegroundWindow, ShowWindow, SW_HIDE, SW_RESTORE, SW_SHOW,
+        AllowSetForegroundWindow, BringWindowToTop, FindWindowExW, GetWindowThreadProcessId,
+        IsIconic, MessageBoxW, SendMessageTimeoutW, SetForegroundWindow, ShowWindow, MB_ICONERROR,
+        MB_OK, SMTO_ABORTIFHUNG, SW_HIDE, SW_RESTORE, SW_SHOW, WM_NULL,
     };
 
     const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
     const APP_NAME: &str = "OnyxStudio";
+    const SINGLE_INSTANCE_MUTEX_NAME: &str = "Local\\OnyxStudioSingleInstance";
+    const ACTIVATE_EVENT_NAME: &str = "Local\\OnyxStudioActivateEvent";
+
+    static INSTANCE_MUTEX_HANDLE: AtomicIsize = AtomicIsize::new(0);
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    pub fn show_window(hwnd: isize) {
+    fn pid_file_path() -> PathBuf {
+        std::env::temp_dir().join("onyx-studio-instance.pid")
+    }
+
+    fn write_current_pid_file() {
+        let _ = std::fs::write(pid_file_path(), std::process::id().to_string());
+    }
+
+    fn read_saved_pid_file() -> Option<u32> {
+        let raw = std::fs::read_to_string(pid_file_path()).ok()?;
+        raw.trim().parse::<u32>().ok().filter(|&p| p != 0)
+    }
+
+    fn norm_exe_key(p: &Path) -> String {
+        let resolved = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let mut s = resolved.to_string_lossy().replace('/', "\\");
+        if let Some(stripped) = s.strip_prefix("\\\\?\\") {
+            s = stripped.to_string();
+        }
+        s.to_lowercase()
+    }
+
+    unsafe fn query_process_exe(pid: u32) -> Option<PathBuf> {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return None;
+        }
+        let mut buf = vec![0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut len);
+        CloseHandle(h);
+        if ok != 0 && len > 0 {
+            let s = String::from_utf16_lossy(&buf[..len as usize]);
+            Some(PathBuf::from(s))
+        } else {
+            None
+        }
+    }
+
+    unsafe fn is_onyx_process(pid: u32) -> bool {
+        let Some(exe) = query_process_exe(pid) else {
+            return false;
+        };
+        let lower = exe
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        lower.contains("onyxstudio") || lower.contains("obsidiansync")
+    }
+
+    unsafe fn is_same_running_binary(pid: u32) -> bool {
+        let Some(other_exe) = query_process_exe(pid) else {
+            return false;
+        };
+        let Ok(self_exe) = std::env::current_exe() else {
+            return false;
+        };
+        norm_exe_key(&other_exe) == norm_exe_key(&self_exe)
+    }
+
+    unsafe fn is_window_responsive(hwnd: HWND) -> bool {
+        let mut res: usize = 0;
+        SendMessageTimeoutW(hwnd, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 1500, &mut res) != 0
+    }
+
+    unsafe fn terminate_stale_process(pid: u32) {
+        if pid == 0 || pid == std::process::id() {
+            return;
+        }
+        let h = OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, pid);
+        if h.is_null() {
+            return;
+        }
+        let _ = TerminateProcess(h, 1);
+        let _ = WaitForSingleObject(h, 1500);
+        CloseHandle(h);
+    }
+
+    unsafe fn find_onyx_window() -> Option<(HWND, u32)> {
+        let title = wide("Onyx Studio");
+        let mut prev: HWND = std::ptr::null_mut();
+        loop {
+            let h = FindWindowExW(std::ptr::null_mut(), prev, std::ptr::null(), title.as_ptr());
+            if h.is_null() {
+                return None;
+            }
+            let mut pid: u32 = 0;
+            GetWindowThreadProcessId(h, &mut pid);
+            if pid != 0 && pid != std::process::id() && is_onyx_process(pid) {
+                return Some((h, pid));
+            }
+            prev = h;
+        }
+    }
+
+    pub fn present_hwnd(hwnd: isize) {
         if hwnd == 0 {
             return;
         }
         unsafe {
-            let h = hwnd as *mut core::ffi::c_void;
+            let h = hwnd as HWND;
             ShowWindow(h, SW_SHOW);
-            ShowWindow(h, SW_RESTORE);
+            if IsIconic(h) != 0 {
+                ShowWindow(h, SW_RESTORE);
+            }
+            BringWindowToTop(h);
             SetForegroundWindow(h);
         }
+    }
+
+    pub fn signal_activate_event() {
+        let name = wide(ACTIVATE_EVENT_NAME);
+        unsafe {
+            let h = OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr());
+            if !h.is_null() {
+                SetEvent(h);
+                CloseHandle(h);
+            }
+        }
+    }
+
+    pub fn show_window(hwnd: isize) {
+        present_hwnd(hwnd);
+        signal_activate_event();
     }
 
     pub fn hide_window(hwnd: isize) -> bool {
@@ -126,24 +255,89 @@ mod imp {
             return false;
         }
         unsafe {
-            ShowWindow(hwnd as *mut core::ffi::c_void, SW_HIDE);
+            ShowWindow(hwnd as HWND, SW_HIDE);
         }
         true
     }
 
-    /// 이미 실행 중이면 기존 창을 앞으로 가져오고 `false` 반환
+    pub fn show_error_box(title: &str, message: &str) {
+        let t = wide(title);
+        let m = wide(message);
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                m.as_ptr(),
+                t.as_ptr(),
+                MB_OK | MB_ICONERROR,
+            );
+        }
+    }
+
+    pub fn spawn_activation_listener(
+        event_proxy: tao::event_loop::EventLoopProxy<crate::AppUserEvent>,
+    ) {
+        let name = wide(ACTIVATE_EVENT_NAME);
+        let h_raw: isize = unsafe {
+            let h: HANDLE = CreateEventW(std::ptr::null(), 0, 0, name.as_ptr());
+            if h.is_null() {
+                return;
+            }
+            h as isize
+        };
+        let _ = std::thread::Builder::new()
+            .name("onyx-activate-listener".into())
+            .spawn(move || unsafe {
+                let h = h_raw as HANDLE;
+                loop {
+                    let wait = WaitForSingleObject(h, INFINITE);
+                    if wait != WAIT_OBJECT_0 {
+                        break;
+                    }
+                    if event_proxy
+                        .send_event(crate::AppUserEvent::ShowMainWindow)
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                CloseHandle(h);
+            });
+    }
+
+    /// 이미 실행 중이면 기존 창을 앞으로 가져오고 `false` 반환.
+    /// 구버전/다른 경로 바이너리거나 응답 없는 좀비 인스턴스면 정리 후 `true` 반환.
     pub fn single_instance() -> bool {
-        let name = wide("Local\\OnyxStudioSingleInstance");
+        let name = wide(SINGLE_INSTANCE_MUTEX_NAME);
         unsafe {
             let h = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
-            if h.is_null() || GetLastError() == ERROR_ALREADY_EXISTS {
-                let title = wide("Onyx Studio");
-                let existing = FindWindowW(std::ptr::null(), title.as_ptr());
-                if !existing.is_null() {
-                    show_window(existing as isize);
+            if !h.is_null() && GetLastError() == ERROR_ALREADY_EXISTS {
+                let mut existing = find_onyx_window();
+                if existing.is_none() {
+                    std::thread::sleep(Duration::from_millis(250));
+                    existing = find_onyx_window();
                 }
-                return false;
+                if let Some((hwnd, pid)) = existing {
+                    if is_same_running_binary(pid) && is_window_responsive(hwnd) {
+                        AllowSetForegroundWindow(pid);
+                        signal_activate_event();
+                        present_hwnd(hwnd as isize);
+                        CloseHandle(h);
+                        return false;
+                    }
+                    // 다른 경로(구버전) 바이너리이거나 응답 없는 창이면 기존 프로세스를 종료하고 새로 시작
+                    terminate_stale_process(pid);
+                    std::thread::sleep(Duration::from_millis(120));
+                } else if let Some(stale_pid) = read_saved_pid_file() {
+                    if stale_pid != std::process::id() && is_onyx_process(stale_pid) {
+                        terminate_stale_process(stale_pid);
+                        std::thread::sleep(Duration::from_millis(120));
+                    }
+                }
             }
+            if !h.is_null() {
+                INSTANCE_MUTEX_HANDLE.store(h as isize, Ordering::SeqCst);
+            }
+            write_current_pid_file();
             true
         }
     }
@@ -246,12 +440,21 @@ mod imp {
     pub type Tray = ();
 
     #[allow(dead_code)]
+    pub fn present_hwnd(_: isize) {}
+
+    #[allow(dead_code)]
+    pub fn signal_activate_event() {}
+
+    #[allow(dead_code)]
     pub fn show_window(_: isize) {}
 
     #[allow(dead_code)]
     pub fn hide_window(_: isize) -> bool {
         false
     }
+
+    #[allow(dead_code)]
+    pub fn show_error_box(_: &str, _: &str) {}
 
     #[allow(dead_code)]
     pub fn single_instance() -> bool {

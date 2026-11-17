@@ -280,6 +280,7 @@ class ObsidianSyncStudioApp {
       this.expandInitialFolders();
 
       this.renderChrome();
+      this.renderEditorMainArea(true);
 
       if (this.workspace.active_vault && this.scan) {
         const initialPath =
@@ -290,19 +291,25 @@ class ObsidianSyncStudioApp {
           null;
         if (initialPath) {
           await this.openNote(initialPath);
-        } else {
-          this.renderEditorMainArea(true);
         }
         if (this.workspace.split_tab) {
           await this.openSplitNote(this.workspace.split_tab);
         }
-      } else {
-        this.renderEditorMainArea(true);
       }
 
       this.scheduleNextPoll();
     } catch (err: any) {
-      this.showToast(err?.message || '초기화 중 오류가 발생했습니다.', true);
+      const msg = err?.message || '초기화 중 오류가 발생했습니다.';
+      if (this.editorPaneEl) {
+        this.editorPaneEl.innerHTML = `
+          <div class="empty-vault-hero">
+            <div style="font-size:40px;margin-bottom:8px;">⚠️</div>
+            <h3 style="margin:0 0 8px;">워크스페이스를 불러오지 못했습니다</h3>
+            <p style="color:var(--text-secondary);font-size:13px;margin:0;line-height:1.6;">${escapeHtml(msg)}</p>
+          </div>
+        `;
+      }
+      this.showToast(msg, true);
     }
   }
 
@@ -318,7 +325,15 @@ class ObsidianSyncStudioApp {
             <div class="editor-column">
               <div class="editor-mount-wrap editor-toolbar-dock" id="app-editor-toolbar-dock" style="display:none;"></div>
               <div class="panes-container">
-                <div class="editor-pane" id="app-editor-pane"></div>
+                <div class="editor-pane" id="app-editor-pane">
+                  <div class="empty-vault-hero">
+                    <div style="font-size:44px;margin-bottom:10px;">💎</div>
+                    <h2 style="margin:0 0 8px;font-size:20px;">Onyx Studio</h2>
+                    <p style="color:var(--text-secondary);font-size:14px;margin:0;line-height:1.6;">
+                      Onyx Studio 워크스페이스 불러오는 중...
+                    </p>
+                  </div>
+                </div>
                 <div class="split-pane" id="app-split-pane" style="display:none;"></div>
               </div>
             </div>
