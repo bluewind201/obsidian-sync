@@ -94,7 +94,7 @@ mod imp {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicIsize, Ordering};
     use std::time::Duration;
-    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+    use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{
         Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
     };
@@ -108,12 +108,13 @@ mod imp {
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         AllowSetForegroundWindow, BringWindowToTop, FindWindowExW, GetWindowThreadProcessId,
-        IsIconic, MessageBoxW, SendMessageTimeoutW, SetForegroundWindow, ShowWindow, MB_ICONERROR,
-        MB_OK, SMTO_ABORTIFHUNG, SW_HIDE, SW_RESTORE, SW_SHOW, WM_NULL,
+        IsIconic, IsWindowVisible, MessageBoxW, SendMessageTimeoutW, SetForegroundWindow,
+        ShowWindow, MB_ICONERROR, MB_OK, SMTO_ABORTIFHUNG, SW_HIDE, SW_RESTORE, SW_SHOW, WM_NULL,
     };
 
     const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
     const APP_NAME: &str = "OnyxStudio";
+    const LEGACY_APP_NAME: &str = "ObsidianSync";
     const SINGLE_INSTANCE_MUTEX_NAME: &str = "Local\\OnyxStudioSingleInstance";
     const ACTIVATE_EVENT_NAME: &str = "Local\\OnyxStudioActivateEvent";
 
@@ -260,6 +261,13 @@ mod imp {
         true
     }
 
+    pub fn is_window_visible_hwnd(hwnd: isize) -> bool {
+        if hwnd == 0 {
+            return false;
+        }
+        unsafe { IsWindowVisible(hwnd as HWND) != 0 }
+    }
+
     pub fn show_error_box(title: &str, message: &str) {
         let t = wide(title);
         let m = wide(message);
@@ -304,9 +312,38 @@ mod imp {
             });
     }
 
+    fn wait_for_replacing_pid() {
+        for arg in std::env::args() {
+            if let Some(pid_str) = arg.strip_prefix("--replacing-pid=") {
+                if let Ok(old_pid) = pid_str.trim().parse::<u32>() {
+                    if old_pid != 0 && old_pid != std::process::id() {
+                        unsafe {
+                            let h = OpenProcess(PROCESS_SYNCHRONIZE, 0, old_pid);
+                            if !h.is_null() {
+                                let _ = WaitForSingleObject(h, 5000);
+                                CloseHandle(h);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn release_single_instance_for_restart() {
+        let raw = INSTANCE_MUTEX_HANDLE.swap(0, Ordering::SeqCst);
+        if raw != 0 {
+            unsafe {
+                CloseHandle(raw as HANDLE);
+            }
+        }
+        let _ = std::fs::remove_file(pid_file_path());
+    }
+
     /// 이미 실행 중이면 기존 창을 앞으로 가져오고 `false` 반환.
     /// 구버전/다른 경로 바이너리거나 응답 없는 좀비 인스턴스면 정리 후 `true` 반환.
     pub fn single_instance() -> bool {
+        wait_for_replacing_pid();
         let name = wide(SINGLE_INSTANCE_MUTEX_NAME);
         unsafe {
             let h = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
@@ -342,14 +379,27 @@ mod imp {
         }
     }
 
-    pub fn create_tray(hwnd: isize, trigger: SharedTrigger) -> Option<TrayIcon> {
+    pub fn create_tray(hwnd: isize, trigger: SharedTrigger) -> Option<Tray> {
         let menu = Menu::new();
-        let open = MenuItem::new("열기", true, None);
+        let open = MenuItem::new("창 열기", true, None);
         let sync = MenuItem::new("지금 동기화", true, None);
+        let autostart_chk =
+            CheckMenuItem::new("PC 재시작 시 자동 실행", true, autostart_enabled(), None);
         let quit = MenuItem::new("종료", true, None);
-        menu.append_items(&[&open, &sync, &PredefinedMenuItem::separator(), &quit])
-            .ok()?;
-        let (open_id, sync_id, quit_id) = (open.id().clone(), sync.id().clone(), quit.id().clone());
+        menu.append_items(&[
+            &open,
+            &sync,
+            &autostart_chk,
+            &PredefinedMenuItem::separator(),
+            &quit,
+        ])
+        .ok()?;
+        let (open_id, sync_id, auto_id, quit_id) = (
+            open.id().clone(),
+            sync.id().clone(),
+            autostart_chk.id().clone(),
+            quit.id().clone(),
+        );
         MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
             if e.id == open_id {
                 show_window(hwnd);
@@ -357,6 +407,9 @@ mod imp {
                 if let Some(t) = trigger.lock().unwrap().as_ref() {
                     t.sync_now();
                 }
+            } else if e.id == auto_id {
+                let next = !autostart_enabled();
+                let _ = set_autostart(next);
             } else if e.id == quit_id {
                 std::process::exit(0);
             }
@@ -375,20 +428,53 @@ mod imp {
             }
         }));
         let icon = Icon::from_rgba(super::icon_rgba(32), 32, 32).ok()?;
-        TrayIconBuilder::new()
+        let built = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_tooltip("Onyx Studio")
             .with_icon(icon)
             .with_menu_on_left_click(false)
             .build()
-            .ok()
+            .ok()?;
+        Some(Tray {
+            _icon: built,
+            autostart_item: autostart_chk,
+        })
     }
 
     pub fn autostart_enabled() -> bool {
         let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
-        hkcu.open_subkey(RUN_KEY)
-            .and_then(|k| k.get_value::<String, _>(APP_NAME))
-            .is_ok()
+        let Ok(key) = hkcu.open_subkey(RUN_KEY) else {
+            return false;
+        };
+        key.get_value::<String, _>(APP_NAME).is_ok()
+            || key.get_value::<String, _>(LEGACY_APP_NAME).is_ok()
+    }
+
+    pub fn ensure_autostart_current_exe() {
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
+        let fname = exe
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if !fname.contains("onyxstudio") && !fname.contains("obsidiansync") {
+            return;
+        }
+        let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+        let Ok((key, _)) = hkcu.create_subkey(RUN_KEY) else {
+            return;
+        };
+        let has_current = key.get_value::<String, _>(APP_NAME).is_ok();
+        let has_legacy = key.get_value::<String, _>(LEGACY_APP_NAME).is_ok();
+        if has_current || has_legacy {
+            let desired = format!("\"{}\" --minimized", exe.display());
+            let _ = key.set_value(APP_NAME, &desired);
+            if has_legacy {
+                let _ = key.delete_value(LEGACY_APP_NAME);
+            }
+        }
     }
 
     pub fn set_autostart(enable: bool) -> anyhow::Result<()> {
@@ -397,8 +483,10 @@ mod imp {
         if enable {
             let exe = std::env::current_exe()?;
             key.set_value(APP_NAME, &format!("\"{}\" --minimized", exe.display()))?;
+            let _ = key.delete_value(LEGACY_APP_NAME);
         } else {
             let _ = key.delete_value(APP_NAME);
+            let _ = key.delete_value(LEGACY_APP_NAME);
         }
         Ok(())
     }
@@ -429,7 +517,19 @@ mod imp {
             .save_file()
     }
 
-    pub type Tray = TrayIcon;
+    pub struct Tray {
+        _icon: TrayIcon,
+        autostart_item: CheckMenuItem,
+    }
+
+    impl Tray {
+        pub fn sync_checked(&self) {
+            let cur = autostart_enabled();
+            if self.autostart_item.is_checked() != cur {
+                self.autostart_item.set_checked(cur);
+            }
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -437,7 +537,12 @@ mod imp {
     use super::SharedTrigger;
     use std::path::PathBuf;
 
-    pub type Tray = ();
+    pub struct Tray;
+
+    impl Tray {
+        #[allow(dead_code)]
+        pub fn sync_checked(&self) {}
+    }
 
     #[allow(dead_code)]
     pub fn present_hwnd(_: isize) {}
@@ -452,6 +557,17 @@ mod imp {
     pub fn hide_window(_: isize) -> bool {
         false
     }
+
+    #[allow(dead_code)]
+    pub fn is_window_visible_hwnd(_: isize) -> bool {
+        false
+    }
+
+    #[allow(dead_code)]
+    pub fn release_single_instance_for_restart() {}
+
+    #[allow(dead_code)]
+    pub fn ensure_autostart_current_exe() {}
 
     #[allow(dead_code)]
     pub fn show_error_box(_: &str, _: &str) {}

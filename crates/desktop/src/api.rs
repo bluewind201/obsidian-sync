@@ -2,6 +2,7 @@
 
 use crate::platform::{self, SharedTrigger};
 use crate::sync_controller::{self, App, SyncSnapshotDto};
+use crate::updater::AppUpdater;
 use crate::vault::{self, NotePropertyDto, WorkspaceManager};
 use anyhow::{bail, Context, Result};
 use obsidian_sync_core::{AppConfig, BackendConfig, ProfileKind};
@@ -21,6 +22,7 @@ pub struct BackendState {
     pub sync: App,
     pub workspace: WorkspaceManager,
     pub crypto: crate::crypto::VaultCryptoSession,
+    pub updater: Arc<AppUpdater>,
     pub event_proxy: SharedEventProxy,
 }
 
@@ -32,11 +34,13 @@ impl BackendState {
     pub fn new_with_proxy(trigger: SharedTrigger, event_proxy: SharedEventProxy) -> Self {
         let (config_path, data_dir) = sync_controller::app_dirs();
         let sync = App::new(config_path, data_dir.clone(), trigger);
+        let updater = Arc::new(AppUpdater::new(data_dir.clone()));
         let workspace = WorkspaceManager::new(data_dir, &sync.cfg);
         Self {
             sync,
             workspace,
             crypto: crate::crypto::VaultCryptoSession::new(),
+            updater,
             event_proxy,
         }
     }
@@ -59,11 +63,13 @@ impl BackendState {
             }
         }
         let sync = App::new(config_path, data_dir.clone(), trigger);
+        let updater = Arc::new(AppUpdater::new(data_dir.clone()));
         let workspace = WorkspaceManager::new(data_dir, &sync.cfg);
         Self {
             sync,
             workspace,
             crypto: crate::crypto::VaultCryptoSession::new(),
+            updater,
             event_proxy: None,
         }
     }
@@ -343,6 +349,21 @@ struct SetAutostartReq {
     enable: bool,
 }
 
+#[derive(Deserialize)]
+struct SetFolderStyleReq {
+    vault: String,
+    path: String,
+    #[serde(default)]
+    icon: Option<String>,
+    #[serde(default)]
+    color: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SetAutoUpdateReq {
+    enabled: bool,
+}
+
 // ───────────────────────────── 엔드포인트 라우터 ─────────────────────────────
 
 fn bump_revision(state: &Arc<Mutex<BackendState>>) -> u64 {
@@ -371,19 +392,21 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
     match endpoint {
         // ── 워크스페이스 & 볼트 관리 ──
         "/api/bootstrap" => {
-            let (ws_state, rev, sync_snap, crypto_snap) = {
+            let (ws_state, rev, sync_snap, crypto_snap, update_status) = {
                 let mut st = state.lock().unwrap();
                 let BackendState {
                     sync,
                     workspace,
                     crypto,
+                    updater,
                     ..
                 } = &mut *st;
                 workspace.state.sync_vaults_with_config(&sync.cfg);
                 let _ = workspace.save_and_refresh_watcher();
                 let rev = workspace.watcher.revision();
                 let snap = sync.snapshot();
-                (workspace.state.clone(), rev, snap, crypto.clone())
+                let upd = updater.status();
+                (workspace.state.clone(), rev, snap, crypto.clone(), upd)
             };
             let vault_scan = ws_state
                 .active_vault
@@ -397,6 +420,7 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
                 "vault_scan": vault_scan,
                 "sync": sync_snap,
                 "vault_revision": rev,
+                "update": update_status,
             }))
         }
 
@@ -530,9 +554,11 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
             }
             let rev = st.workspace.watcher.revision();
             let sync: SyncSnapshotDto = st.sync.snapshot();
+            let update = st.updater.status();
             Ok(json!({
                 "vault_revision": rev,
                 "sync": sync,
+                "update": update,
             }))
         }
 
@@ -698,6 +724,15 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
                 "path": path,
                 "scan": scan,
             }))
+        }
+
+        "/api/folder/style" => {
+            let req: SetFolderStyleReq = parse_body(body)?;
+            let root = Path::new(req.vault.trim());
+            vault::set_folder_style(root, &req.path, req.icon.as_deref(), req.color.as_deref())?;
+            let (rev, crypto_after) = bump_revision_and_crypto(state);
+            let scan = vault::scan_vault_with_session(root, rev, Some(&crypto_after))?;
+            Ok(json!({ "scan": scan }))
         }
 
         "/api/vault/rename" => {
@@ -1128,7 +1163,58 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
             let req: SetAutostartReq = parse_body(body)?;
             let mut st = state.lock().unwrap();
             st.sync.set_autostart(req.enable);
+            if req.enable && st.sync.autostart {
+                if !st.sync.cfg.start_on_launch {
+                    st.sync.cfg.start_on_launch = true;
+                    if st.sync.cfg.save(&st.sync.config_path).is_ok() {
+                        st.sync.saved.start_on_launch = true;
+                    }
+                }
+                if st.sync.service.is_none()
+                    && !st.sync.transitioning()
+                    && st.sync.cfg.validate().is_ok()
+                {
+                    st.sync.start_service();
+                }
+            }
             ok_json(st.sync.snapshot())
+        }
+
+        // ── GitHub 자동 업데이트 (Windows) ──
+        "/api/update/status" => {
+            let st = state.lock().unwrap();
+            ok_json(st.updater.status())
+        }
+
+        "/api/update/check" => {
+            let updater = state.lock().unwrap().updater.clone();
+            let status = updater.check_and_maybe_download_sync(true)?;
+            ok_json(status)
+        }
+
+        "/api/update/set_auto" => {
+            let req: SetAutoUpdateReq = parse_body(body)?;
+            let updater = state.lock().unwrap().updater.clone();
+            ok_json(updater.set_auto_update(req.enabled))
+        }
+
+        "/api/update/apply" => {
+            let updater = state.lock().unwrap().updater.clone();
+            let staged = updater.prepare_staged_for_apply()?;
+            let stop_join = {
+                let mut st = state.lock().unwrap();
+                st.sync.stop_service();
+                st.sync.stopping.take()
+            };
+            if let Some(h) = stop_join {
+                let _ = h.join();
+            }
+            updater.swap_and_restart(&staged)?;
+            std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(180));
+                std::process::exit(0);
+            });
+            Ok(json!({ "restarting": true }))
         }
 
         "/api/sync/pick_folder" => {
@@ -1306,11 +1392,13 @@ mod tests {
 
         let trigger: SharedTrigger = Arc::new(Mutex::new(None));
         let sync = App::new(data_dir.join("config.json"), data_dir.clone(), trigger);
+        let updater = Arc::new(AppUpdater::new(data_dir.clone()));
         let workspace = WorkspaceManager::new(data_dir, &sync.cfg);
         let state = Arc::new(Mutex::new(BackendState {
             sync,
             workspace,
             crypto: crate::crypto::VaultCryptoSession::new(),
+            updater,
             event_proxy: None,
         }));
 
@@ -1387,11 +1475,13 @@ mod tests {
 
         let trigger: SharedTrigger = Arc::new(Mutex::new(None));
         let sync = App::new(data_dir.join("config.json"), data_dir.clone(), trigger);
+        let updater = Arc::new(AppUpdater::new(data_dir.clone()));
         let workspace = WorkspaceManager::new(data_dir, &sync.cfg);
         let state = Arc::new(Mutex::new(BackendState {
             sync,
             workspace,
             crypto: crate::crypto::VaultCryptoSession::new(),
+            updater,
             event_proxy: None,
         }));
 
@@ -1526,11 +1616,13 @@ mod tests {
 
         let trigger: SharedTrigger = Arc::new(Mutex::new(None));
         let sync = App::new(data_dir.join("config.json"), data_dir.clone(), trigger);
+        let updater = Arc::new(AppUpdater::new(data_dir.clone()));
         let workspace = WorkspaceManager::new(data_dir, &sync.cfg);
         let state = Arc::new(Mutex::new(BackendState {
             sync,
             workspace,
             crypto: crate::crypto::VaultCryptoSession::new(),
+            updater,
             event_proxy: None,
         }));
 
@@ -1614,5 +1706,42 @@ mod tests {
             0
         );
         assert!(vault_b.is_dir());
+
+        // 4) folder/style 및 update/status, update/set_auto API 검증
+        let folder_mk = serde_json::to_vec(&json!({
+            "vault": vault_b.to_string_lossy(),
+            "parent": "",
+            "name": "업무자료"
+        }))
+        .unwrap();
+        let mk_resp: Value =
+            serde_json::from_slice(&handle_api(&state, "/api/vault/create_folder", &folder_mk))
+                .unwrap();
+        assert_eq!(mk_resp["ok"], true);
+
+        let style_req = serde_json::to_vec(&json!({
+            "vault": vault_b.to_string_lossy(),
+            "path": "업무자료",
+            "icon": "💼",
+            "color": "#2563eb"
+        }))
+        .unwrap();
+        let style_resp: Value =
+            serde_json::from_slice(&handle_api(&state, "/api/folder/style", &style_req)).unwrap();
+        assert_eq!(style_resp["ok"], true);
+        let fnode = style_resp["data"]["scan"]["tree"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["path"] == "업무자료")
+            .unwrap();
+        assert_eq!(fnode["icon"], "💼");
+        assert_eq!(fnode["color"], "#2563eb");
+
+        let upd_set = serde_json::to_vec(&json!({ "enabled": false })).unwrap();
+        let upd_resp: Value =
+            serde_json::from_slice(&handle_api(&state, "/api/update/set_auto", &upd_set)).unwrap();
+        assert_eq!(upd_resp["ok"], true);
+        assert_eq!(upd_resp["data"]["auto_update"], false);
     }
 }

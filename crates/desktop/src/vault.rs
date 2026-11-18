@@ -583,12 +583,180 @@ pub struct TreeNodeDto {
     pub path: String,
     pub kind: String,
     pub icon: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
     pub children: Vec<TreeNodeDto>,
     pub modified: i64,
     #[serde(default)]
     pub encrypted: bool,
     #[serde(default)]
     pub locked: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct FolderStyleDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct FolderStylesFile {
+    #[serde(default)]
+    folders: BTreeMap<String, FolderStyleDto>,
+}
+
+fn folder_styles_path(vault_root: &Path) -> PathBuf {
+    vault_root.join(".obsidian").join("onyx-folder-styles.json")
+}
+
+pub fn normalize_folder_color(raw: Option<&str>) -> Option<String> {
+    let s = raw.map(str::trim).unwrap_or("");
+    if s.is_empty() {
+        return None;
+    }
+    let hex = s.strip_prefix('#')?;
+    if hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Some(format!("#{}", hex.to_ascii_lowercase()));
+    }
+    if hex.len() == 3 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        let mut expanded = String::from("#");
+        for c in hex.chars() {
+            let lc = c.to_ascii_lowercase();
+            expanded.push(lc);
+            expanded.push(lc);
+        }
+        return Some(expanded);
+    }
+    None
+}
+
+pub fn normalize_folder_icon(raw: Option<&str>) -> Option<String> {
+    let s = raw.map(str::trim).unwrap_or("");
+    if s.is_empty() {
+        return None;
+    }
+    let trimmed: String = s.chars().take(8).collect();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+pub fn load_folder_styles(vault_root: &Path) -> BTreeMap<String, FolderStyleDto> {
+    let path = folder_styles_path(vault_root);
+    let Ok(raw) = fs::read_to_string(path) else {
+        return BTreeMap::new();
+    };
+    let Ok(parsed) = serde_json::from_str::<FolderStylesFile>(&raw) else {
+        return BTreeMap::new();
+    };
+    parsed
+        .folders
+        .into_iter()
+        .filter_map(|(k, st)| {
+            let norm = normalize_rel_path(&k).ok().filter(|n| !n.is_empty())?;
+            let icon = normalize_folder_icon(st.icon.as_deref());
+            let color = normalize_folder_color(st.color.as_deref());
+            if icon.is_none() && color.is_none() {
+                None
+            } else {
+                Some((norm, FolderStyleDto { icon, color }))
+            }
+        })
+        .collect()
+}
+
+fn save_folder_styles(vault_root: &Path, map: &BTreeMap<String, FolderStyleDto>) -> Result<()> {
+    let path = folder_styles_path(vault_root);
+    if map.is_empty() {
+        if path.exists() {
+            let _ = fs::remove_file(&path);
+        }
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = FolderStylesFile {
+        folders: map.clone(),
+    };
+    let json = serde_json::to_string_pretty(&file)?;
+    crypto::atomic_write_string(&path, &json)?;
+    Ok(())
+}
+
+pub fn set_folder_style(
+    vault_root: &Path,
+    rel_path: &str,
+    icon: Option<&str>,
+    color: Option<&str>,
+) -> Result<()> {
+    let norm = normalize_rel_path(rel_path)?;
+    if norm.is_empty() {
+        bail!("스타일을 변경할 폴더가 지정되지 않았습니다");
+    }
+    let abs = resolve_safe_path(vault_root, &norm)?;
+    if !abs.is_dir() {
+        bail!("대상 폴더를 찾을 수 없습니다: {norm}");
+    }
+    let mut map = load_folder_styles(vault_root);
+    let clean_icon = normalize_folder_icon(icon);
+    let clean_color = normalize_folder_color(color);
+    if clean_icon.is_none() && clean_color.is_none() {
+        map.remove(&norm);
+    } else {
+        map.insert(
+            norm,
+            FolderStyleDto {
+                icon: clean_icon,
+                color: clean_color,
+            },
+        );
+    }
+    save_folder_styles(vault_root, &map)
+}
+
+fn remap_folder_styles_prefix(vault_root: &Path, old_prefix: &str, new_prefix: &str) {
+    let mut map = load_folder_styles(vault_root);
+    if map.is_empty() {
+        return;
+    }
+    let sub_prefix = format!("{old_prefix}/");
+    let mut changed = false;
+    let next: BTreeMap<String, FolderStyleDto> = map
+        .into_iter()
+        .map(|(k, v)| {
+            if k == old_prefix {
+                changed = true;
+                (new_prefix.to_string(), v)
+            } else if let Some(rest) = k.strip_prefix(&sub_prefix) {
+                changed = true;
+                (format!("{new_prefix}/{rest}"), v)
+            } else {
+                (k, v)
+            }
+        })
+        .collect();
+    if changed {
+        map = next;
+        let _ = save_folder_styles(vault_root, &map);
+    }
+}
+
+fn remove_folder_styles_prefix(vault_root: &Path, prefix: &str) {
+    let mut map = load_folder_styles(vault_root);
+    if map.is_empty() {
+        return;
+    }
+    let sub_prefix = format!("{prefix}/");
+    let before = map.len();
+    map.retain(|k, _| k != prefix && !k.starts_with(&sub_prefix));
+    if map.len() != before {
+        let _ = save_folder_styles(vault_root, &map);
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -1952,6 +2120,7 @@ fn build_tree_recursive(
     vault_root: &Path,
     dir: &Path,
     note_map: &HashMap<String, (Option<String>, bool, bool)>,
+    folder_styles: &BTreeMap<String, FolderStyleDto>,
     folder_count: &mut usize,
 ) -> Vec<TreeNodeDto> {
     let Ok(read_dir) = fs::read_dir(dir) else {
@@ -1992,12 +2161,15 @@ fn build_tree_recursive(
         *folder_count += 1;
         let rel_str = rel.to_string_lossy().replace('\\', "/");
         let (modified, _) = format_mtime(meta.as_ref());
-        let children = build_tree_recursive(vault_root, &path, note_map, folder_count);
+        let style = folder_styles.get(&rel_str);
+        let children =
+            build_tree_recursive(vault_root, &path, note_map, folder_styles, folder_count);
         nodes.push(TreeNodeDto {
             name,
             path: rel_str,
             kind: "folder".into(),
-            icon: None,
+            icon: style.and_then(|s| s.icon.clone()),
+            color: style.and_then(|s| s.color.clone()),
             children,
             modified,
             encrypted: false,
@@ -2021,6 +2193,7 @@ fn build_tree_recursive(
             path: rel_str,
             kind: "note".into(),
             icon,
+            color: None,
             children: Vec::new(),
             modified,
             encrypted,
@@ -2068,8 +2241,15 @@ pub fn scan_vault_with_session(
         });
     }
 
+    let folder_styles = load_folder_styles(vault_root);
     let mut total_folders = 0usize;
-    let tree = build_tree_recursive(vault_root, vault_root, &note_map, &mut total_folders);
+    let tree = build_tree_recursive(
+        vault_root,
+        vault_root,
+        &note_map,
+        &folder_styles,
+        &mut total_folders,
+    );
 
     let mut tags: Vec<TagCountDto> = tag_counts
         .into_values()
@@ -2521,6 +2701,9 @@ pub fn rename_entry_with_session(
     }
 
     fs::rename(&abs, &new_abs)?;
+    if is_dir {
+        remap_folder_styles_prefix(vault_root, &norm, &new_rel);
+    }
 
     if let Some(sess) = session.as_deref_mut() {
         if is_dir {
@@ -2648,6 +2831,9 @@ pub fn move_entry_with_session(
         fs::create_dir_all(parent)?;
     }
     fs::rename(&abs, &new_abs)?;
+    if is_dir {
+        remap_folder_styles_prefix(vault_root, &norm, &new_rel);
+    }
     if let Some(sess) = session {
         if is_dir {
             sess.rename_folder_prefix(vault_root, &norm, &new_rel);
@@ -2799,6 +2985,7 @@ pub fn delete_to_trash_with_session(
     if !abs.exists() {
         bail!("삭제할 파일을 찾을 수 없습니다: {norm}");
     }
+    let is_dir = abs.is_dir();
     let trash_dir = vault_root.join(".trash");
     fs::create_dir_all(&trash_dir)?;
 
@@ -2815,6 +3002,9 @@ pub fn delete_to_trash_with_session(
     }
 
     fs::rename(&abs, trash_dir.join(&trash_name))?;
+    if is_dir {
+        remove_folder_styles_prefix(vault_root, &norm);
+    }
     if let Some(sess) = session {
         sess.remove_note_key(vault_root, &norm);
     }
@@ -4686,5 +4876,68 @@ mod tests {
         let scanned = scan_vault(&vault, 1).unwrap();
         assert_eq!(scanned.total_notes, 1);
         assert_eq!(scanned.notes[0].path, "normal.md");
+    }
+
+    #[test]
+    fn folder_custom_icon_and_color_persist_and_remap_on_rename_and_move() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = tmp.path().join("vault");
+        fs::create_dir_all(&vault).unwrap();
+
+        create_folder(&vault, "", "프로젝트").unwrap();
+        create_folder(&vault, "프로젝트", "하위업무").unwrap();
+        create_folder(&vault, "", "보관함").unwrap();
+
+        set_folder_style(&vault, "프로젝트", Some("🚀"), Some("#3B82F6")).unwrap();
+        set_folder_style(&vault, "프로젝트/하위업무", None, Some("#0F8")).unwrap();
+
+        let scan1 = scan_vault(&vault, 1).unwrap();
+        let proj = scan1.tree.iter().find(|n| n.path == "프로젝트").unwrap();
+        assert_eq!(proj.icon.as_deref(), Some("🚀"));
+        assert_eq!(proj.color.as_deref(), Some("#3b82f6"));
+        let sub = proj
+            .children
+            .iter()
+            .find(|n| n.path == "프로젝트/하위업무")
+            .unwrap();
+        assert_eq!(sub.icon, None);
+        assert_eq!(sub.color.as_deref(), Some("#00ff88"));
+
+        // 폴더 이름 변경 -> 상위·하위 스타일 자동 이전
+        rename_entry(&vault, "프로젝트", "개발").unwrap();
+        let scan2 = scan_vault(&vault, 2).unwrap();
+        let renamed = scan2.tree.iter().find(|n| n.path == "개발").unwrap();
+        assert_eq!(renamed.icon.as_deref(), Some("🚀"));
+        assert_eq!(renamed.color.as_deref(), Some("#3b82f6"));
+        let renamed_sub = renamed
+            .children
+            .iter()
+            .find(|n| n.path == "개발/하위업무")
+            .unwrap();
+        assert_eq!(renamed_sub.color.as_deref(), Some("#00ff88"));
+
+        // 폴더 이동 -> 스타일 유지
+        move_entry(&vault, "개발", "보관함").unwrap();
+        let scan3 = scan_vault(&vault, 3).unwrap();
+        let archive = scan3.tree.iter().find(|n| n.path == "보관함").unwrap();
+        let moved = archive
+            .children
+            .iter()
+            .find(|n| n.path == "보관함/개발")
+            .unwrap();
+        assert_eq!(moved.icon.as_deref(), Some("🚀"));
+        assert_eq!(moved.color.as_deref(), Some("#3b82f6"));
+
+        // 스타일 초기화
+        set_folder_style(&vault, "보관함/개발", None, None).unwrap();
+        let scan4 = scan_vault(&vault, 4).unwrap();
+        let archive4 = scan4.tree.iter().find(|n| n.path == "보관함").unwrap();
+        let cleared = archive4
+            .children
+            .iter()
+            .find(|n| n.path == "보관함/개발")
+            .unwrap();
+        assert_eq!(cleared.icon, None);
+        assert_eq!(cleared.color, None);
     }
 }

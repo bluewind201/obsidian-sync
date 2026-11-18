@@ -15,6 +15,7 @@ import {
   openCoverPickerModal,
   openDailyNoteFolderModal,
   openEmojiPickerModal,
+  openFolderStyleModal,
   openNoteCryptoModal,
   openPageSetupModal,
   openTemplatesModal,
@@ -23,6 +24,7 @@ import {
   openWikiLinkPickerModal,
   PageSetupValues,
   QuickCommandItem,
+  renderFolderSvgIcon,
   showContextMenu,
   showFolderMoveModal,
   showTextPromptModal,
@@ -39,6 +41,7 @@ import type {
   SaveStatus,
   SyncSnapshotDto,
   TreeNodeDto,
+  UpdateStatusDto,
   VaultScanDto,
   WorkspaceState,
 } from './types';
@@ -134,6 +137,9 @@ class ObsidianSyncStudioApp {
   private resizeObserver: ResizeObserver | null = null;
   private layoutRafPending = false;
   private androidInfo: AndroidAppInfoDto | null = null;
+  private updateStatus: UpdateStatusDto | null = null;
+  private lastInspectorTabRendered: RightInspectorTab | null = null;
+  private lastInspectorNoteRendered: string | null = null;
 
   private pollTimer: number | null = null;
 
@@ -250,6 +256,7 @@ class ObsidianSyncStudioApp {
       this.scan = boot.vault_scan;
       this.syncSnap = boot.sync;
       this.vaultRevision = boot.vault_revision;
+      this.updateStatus = boot.update ?? null;
 
       if (window.innerWidth <= 960) {
         this.inspectorOpen = false;
@@ -263,16 +270,22 @@ class ObsidianSyncStudioApp {
           .androidInfo()
           .then((info) => {
             this.androidInfo = info;
-            if (info.available_update_tag) {
-              this.showToast(
-                `새 버전 ${info.available_update_tag} 출시! 동기화 센터 → 고급 설정에서 업데이트할 수 있습니다.`
-              );
-            }
+            this.renderTopbar();
             if (!this.workspace.active_vault) {
               this.renderEditorMainArea(true);
             }
           })
           .catch(() => {});
+        // Startup quiet check completes ~2-4s after launch; re-fetch androidInfo once to surface banner
+        window.setTimeout(() => {
+          void api
+            .androidInfo()
+            .then((info) => {
+              this.androidInfo = info;
+              this.renderTopbar();
+            })
+            .catch(() => {});
+        }, 4500);
       }
 
       this.applyTheme(this.workspace.theme || 'light');
@@ -290,7 +303,7 @@ class ObsidianSyncStudioApp {
           this.scan.notes[0]?.path ||
           null;
         if (initialPath) {
-          await this.openNote(initialPath);
+          await this.openNote(initialPath, { expandAncestors: false });
         }
         if (this.workspace.split_tab) {
           await this.openSplitNote(this.workspace.split_tab);
@@ -382,15 +395,28 @@ class ObsidianSyncStudioApp {
   }
 
   private expandInitialFolders(): void {
-    if (!this.scan) return;
-    for (const n of this.scan.tree.slice(0, 6)) {
+    this.expandedFolders.clear();
+  }
+
+  private collectAllFolderPaths(nodes: TreeNodeDto[], acc: string[] = []): string[] {
+    for (const n of nodes) {
       if (n.kind === 'folder') {
-        this.expandedFolders.add(n.path);
+        acc.push(n.path);
+        this.collectAllFolderPaths(n.children, acc);
       }
     }
-    if (this.workspace.active_tab) {
-      this.expandAncestorsOf(this.workspace.active_tab);
+    return acc;
+  }
+
+  private findTreeNodeByPath(nodes: TreeNodeDto[], targetPath: string): TreeNodeDto | null {
+    for (const n of nodes) {
+      if (n.path === targetPath) return n;
+      if (n.kind === 'folder') {
+        const hit = this.findTreeNodeByPath(n.children, targetPath);
+        if (hit) return hit;
+      }
     }
+    return null;
   }
 
   private expandAncestorsOf(relPath: string): void {
@@ -578,19 +604,25 @@ class ObsidianSyncStudioApp {
 
     rootStyle.setProperty('--a4-scale', finalScale.toFixed(4));
 
+    const isUnity = Math.abs(finalScale - 1) < 0.002;
     if (sheetEl) {
       // Avoid a scale(1) transform layer at 100% zoom so hit-testing & text stay pixel-sharp.
-      sheetEl.style.transform = Math.abs(finalScale - 1) < 0.002 ? 'none' : '';
+      sheetEl.style.transform = isUnity ? 'none' : '';
     }
 
     if (sheetEl && scaleOuter) {
-      const naturalW = sheetEl.offsetWidth;
-      const naturalH = sheetEl.offsetHeight;
-      if (naturalW > 0) {
-        const nextW = `${Math.round(naturalW * finalScale)}px`;
-        const nextH = `${Math.round(naturalH * finalScale)}px`;
-        if (scaleOuter.style.width !== nextW) scaleOuter.style.width = nextW;
-        if (scaleOuter.style.height !== nextH) scaleOuter.style.height = nextH;
+      if (isUnity) {
+        if (scaleOuter.style.width) scaleOuter.style.width = '';
+        if (scaleOuter.style.height) scaleOuter.style.height = '';
+      } else {
+        const naturalW = sheetEl.offsetWidth;
+        const naturalH = sheetEl.offsetHeight;
+        if (naturalW > 0) {
+          const nextW = `${Math.round(naturalW * finalScale)}px`;
+          const nextH = `${Math.ceil(naturalH * finalScale)}px`;
+          if (scaleOuter.style.width !== nextW) scaleOuter.style.width = nextW;
+          if (scaleOuter.style.height !== nextH) scaleOuter.style.height = nextH;
+        }
       }
     }
   }
@@ -910,6 +942,15 @@ class ObsidianSyncStudioApp {
       try {
         const res = await api.vaultPoll(this.workspace.active_vault);
         this.syncSnap = res.sync;
+        if (res.update) {
+          const prevUpdSig = JSON.stringify(this.updateStatus);
+          const nextUpdSig = JSON.stringify(res.update);
+          this.updateStatus = res.update;
+          if (prevUpdSig !== nextUpdSig) {
+            this.renderTopbar();
+            this.syncCtrl?.receiveUpdateStatus(res.update);
+          }
+        }
         this.updateSidebarSyncIndicators();
         if (this.mainView === 'sync' && this.syncCtrl) {
           this.syncCtrl.receiveSnapshot(res.sync);
@@ -1011,6 +1052,8 @@ class ObsidianSyncStudioApp {
   }
 
   private renderSidebar(): void {
+    const prevSidebarScroll =
+      this.sidebarEl.querySelector<HTMLElement>('[data-sidebar-scroll]')?.scrollTop ?? 0;
     this.syncSidebarBackdrop();
     const activeVaultPath = this.workspace.active_vault;
     const activeVaultRef = this.workspace.vaults.find((v) => v.path === activeVaultPath);
@@ -1260,16 +1303,32 @@ class ObsidianSyncStudioApp {
     // 2. Pages Hierarchical Tree
     const pagesSec = document.createElement('div');
     pagesSec.className = 'sidebar-section';
+    const hasAnyExpanded = this.expandedFolders.size > 0;
     pagesSec.innerHTML = `
       <div class="sidebar-section-header">
         <span>📄 페이지 (${this.scan.total_notes})</span>
         <div class="sidebar-section-actions">
+          ${
+            this.scan.total_folders > 0
+              ? `<button type="button" class="mini-icon-btn" data-toggle-all-folders title="${hasAnyExpanded ? '모든 폴더 접기' : '모든 폴더 펼치기'}">${hasAnyExpanded ? '⊟' : '⊞'}</button>`
+              : ''
+          }
           <button type="button" class="mini-icon-btn" data-root-new-note title="새 노트">＋</button>
           <button type="button" class="mini-icon-btn" data-root-new-folder title="새 폴더">📁</button>
         </div>
       </div>
       <div data-tree-root></div>
     `;
+    pagesSec.querySelector('[data-toggle-all-folders]')?.addEventListener('click', () => {
+      if (this.expandedFolders.size > 0) {
+        this.expandedFolders.clear();
+      } else if (this.scan) {
+        for (const fp of this.collectAllFolderPaths(this.scan.tree)) {
+          this.expandedFolders.add(fp);
+        }
+      }
+      this.renderSidebar();
+    });
     pagesSec.querySelector('[data-root-new-note]')?.addEventListener('click', () => {
       void this.promptCreateNote('');
     });
@@ -1320,6 +1379,10 @@ class ObsidianSyncStudioApp {
       }
       scrollEl.appendChild(tagsSec);
     }
+
+    if (prevSidebarScroll > 0) {
+      scrollEl.scrollTop = prevSidebarScroll;
+    }
   }
 
   private appendTreeNodeDom(parentEl: HTMLElement, node: TreeNodeDto, depth: number): void {
@@ -1329,18 +1392,26 @@ class ObsidianSyncStudioApp {
       !isFolder && this.mainView === 'editor' && this.currentDoc?.path === node.path;
 
     const row = document.createElement('div');
-    row.className = `tree-row${isActive ? ' active' : ''}`;
+    row.className = `tree-row${isActive ? ' active' : ''}${isFolder && node.color ? ' has-folder-color' : ''}`;
     row.style.paddingLeft = `${6 + depth * 14}px`;
+    if (isFolder && node.color) {
+      row.style.setProperty('--folder-color', node.color);
+    }
     row.dataset.nodePath = node.path;
     row.dataset.nodeKind = node.kind;
 
     const displayLabel = isFolder ? node.name : stripMdExt(node.name);
     const lockPrefix = !isFolder && node.encrypted ? (node.locked ? '🔒 ' : '🔓 ') : '';
-    const icon = isFolder ? (isExpanded ? '📂' : '📁') : node.icon || '📄';
+    const iconHtml = isFolder
+      ? node.icon
+        ? escapeHtml(node.icon)
+        : renderFolderSvgIcon(node.color, isExpanded)
+      : escapeHtml(node.icon || '📄');
+    const dragIcon = isFolder ? node.icon || '📁' : node.icon || '📄';
 
     row.innerHTML = `
       <span class="tree-chevron ${isFolder ? (isExpanded ? 'expanded' : '') : 'spacer'}">▶</span>
-      <span class="tree-icon">${escapeHtml(icon)}</span>
+      <span class="tree-icon${isFolder && node.icon && node.color ? ' has-custom-badge' : ''}">${iconHtml}</span>
       <span class="tree-label">${escapeHtml(lockPrefix + displayLabel)}</span>
       <span class="tree-hover-actions">
         ${isFolder ? `<button type="button" class="mini-icon-btn" data-add-child title="이 폴더에 새 노트">＋</button>` : ''}
@@ -1409,7 +1480,7 @@ class ObsidianSyncStudioApp {
           row.classList.add('dragging');
           ghostEl = document.createElement('div');
           ghostEl.className = 'tree-drag-ghost';
-          ghostEl.textContent = `${isFolder ? '📁' : '📄'} ${displayLabel}`;
+          ghostEl.textContent = `${dragIcon} ${displayLabel}`;
           document.body.appendChild(ghostEl);
         }
 
@@ -1481,8 +1552,8 @@ class ObsidianSyncStudioApp {
         if (ghostEl) {
           ghostEl.textContent =
             dropTargetFolder !== null
-              ? `${isFolder ? '📁' : '📄'} ${displayLabel} → ${dropTargetFolder || '루트'}`
-              : `${isFolder ? '📁' : '📄'} ${displayLabel}`;
+              ? `${dragIcon} ${displayLabel} → ${dropTargetFolder || '루트'}`
+              : `${dragIcon} ${displayLabel}`;
         }
       };
 
@@ -1539,12 +1610,49 @@ class ObsidianSyncStudioApp {
     }
   }
 
+  private openFolderStyleDialog(node: TreeNodeDto): void {
+    const vault = this.workspace.active_vault;
+    if (!vault) return;
+    openFolderStyleModal({
+      folderName: node.name,
+      currentIcon: node.icon ?? null,
+      currentColor: node.color ?? null,
+      onSave: async (icon, color) => {
+        try {
+          const res = await api.setFolderStyle(vault, node.path, icon, color);
+          this.scan = res.scan;
+          this.vaultRevision = res.scan.revision;
+          this.renderSidebar();
+          this.renderTopbar();
+          this.showToast(`"${node.name}" 폴더 스타일을 저장했습니다.`);
+        } catch (err: any) {
+          this.showToast(err?.message || '폴더 아이콘·색상 변경 실패', true);
+        }
+      },
+    });
+  }
+
+  private async resetFolderStyle(node: TreeNodeDto): Promise<void> {
+    const vault = this.workspace.active_vault;
+    if (!vault) return;
+    try {
+      const res = await api.setFolderStyle(vault, node.path, null, null);
+      this.scan = res.scan;
+      this.vaultRevision = res.scan.revision;
+      this.renderSidebar();
+      this.renderTopbar();
+      this.showToast(`"${node.name}" 폴더 스타일을 기본으로 되돌렸습니다.`);
+    } catch (err: any) {
+      this.showToast(err?.message || '폴더 스타일 초기화 실패', true);
+    }
+  }
+
   private openTreeNodeContextMenu(x: number, y: number, node: TreeNodeDto): void {
     const isFolder = node.kind === 'folder';
     const isFav = this.workspace.favorites.includes(node.path);
 
     if (isFolder) {
-      showContextMenu(x, y, [
+      const folderMenu: ContextMenuEntry[] = [
         {
           icon: '📝',
           label: '새 노트 만들기',
@@ -1556,6 +1664,20 @@ class ObsidianSyncStudioApp {
           onClick: () => this.promptCreateFolder(node.path),
         },
         { separator: true },
+        {
+          icon: '🎨',
+          label: '아이콘 · 색상 변경…',
+          onClick: () => this.openFolderStyleDialog(node),
+        },
+        ...(node.icon || node.color
+          ? [
+              {
+                icon: '↺',
+                label: '아이콘 · 색상 초기화',
+                onClick: () => this.resetFolderStyle(node),
+              },
+            ]
+          : []),
         {
           icon: '✏️',
           label: '이름 변경',
@@ -1573,7 +1695,8 @@ class ObsidianSyncStudioApp {
           danger: true,
           onClick: () => this.deleteVaultItem(node.path),
         },
-      ]);
+      ];
+      showContextMenu(x, y, folderMenu);
     } else {
       const baseTitle = stripMdExt(node.name);
       showContextMenu(x, y, [
@@ -1685,6 +1808,16 @@ class ObsidianSyncStudioApp {
     this.tabsStripEl.append(scroll, newTabBtn);
   }
 
+  private async applyDesktopUpdateAndRestart(): Promise<void> {
+    try {
+      await this.flushSave(false);
+      this.showToast('새 버전을 적용하고 Onyx Studio를 다시 시작합니다…');
+      await api.updateApply();
+    } catch (err: any) {
+      this.showToast(err?.message || '업데이트 적용 실패', true);
+    }
+  }
+
   private renderTopbar(): void {
     this.topbarEl.innerHTML = '';
 
@@ -1697,6 +1830,7 @@ class ObsidianSyncStudioApp {
       bc.innerHTML = `<span class="breadcrumb-seg current">🔄 실시간 동기화 센터</span>`;
     } else if (this.currentDoc) {
       const segs = this.currentDoc.path.split('/');
+      let folderAcc = '';
       segs.forEach((seg, idx) => {
         if (idx > 0) {
           const sep = document.createElement('span');
@@ -1707,9 +1841,16 @@ class ObsidianSyncStudioApp {
         const span = document.createElement('span');
         const isLast = idx === segs.length - 1;
         span.className = `breadcrumb-seg${isLast ? ' current' : ''}`;
-        span.textContent = isLast
-          ? `${this.draftIcon || '📄'} ${stripMdExt(seg)}`
-          : `📁 ${seg}`;
+        if (isLast) {
+          span.textContent = `${this.draftIcon || '📄'} ${stripMdExt(seg)}`;
+        } else {
+          folderAcc = folderAcc ? `${folderAcc}/${seg}` : seg;
+          const folderNode = this.scan ? this.findTreeNodeByPath(this.scan.tree, folderAcc) : null;
+          span.textContent = `${folderNode?.icon || '📁'} ${seg}`;
+          if (folderNode?.color) {
+            span.style.color = folderNode.color;
+          }
+        }
         bc.appendChild(span);
       });
     } else {
@@ -1721,6 +1862,47 @@ class ObsidianSyncStudioApp {
     const right = document.createElement('div');
     right.className = 'topbar-right';
     const isMobile = this.isMobileViewport();
+
+    if (!isAndroidApp() && this.updateStatus?.available_tag) {
+      const u = this.updateStatus;
+      const pct =
+        u.total_bytes > 0
+          ? Math.min(100, Math.round((u.downloaded_bytes / u.total_bytes) * 100))
+          : 0;
+      const updBtn = document.createElement('button');
+      updBtn.type = 'button';
+      updBtn.className = 'topbar-update-pill';
+      if (u.applying) {
+        updBtn.disabled = true;
+        updBtn.textContent = '⟳ 재시작 중…';
+      } else if (u.downloading) {
+        updBtn.textContent = `⬇ ${u.available_tag} (${pct}%)`;
+        updBtn.title = '백그라운드에서 새 버전 다운로드 중… 클릭하면 완료 후 바로 업데이트합니다.';
+      } else {
+        updBtn.textContent = `🚀 ${u.available_tag} 업데이트`;
+        updBtn.title = '새 버전으로 즉시 업데이트하고 재시작합니다';
+      }
+      updBtn.addEventListener('click', () => {
+        void this.applyDesktopUpdateAndRestart();
+      });
+      right.appendChild(updBtn);
+    } else if (isAndroidApp() && this.androidInfo?.available_update_tag) {
+      const tag = this.androidInfo.available_update_tag;
+      const updBtn = document.createElement('button');
+      updBtn.type = 'button';
+      updBtn.className = 'topbar-update-pill';
+      updBtn.textContent = `📲 ${tag}`;
+      updBtn.title = `새 버전 ${tag} 지금 업데이트`;
+      updBtn.addEventListener('click', async () => {
+        try {
+          const res = await api.androidUpdateNow();
+          this.showToast(res.message);
+        } catch (err: any) {
+          this.showToast(err?.message || '업데이트 실패', true);
+        }
+      });
+      right.appendChild(updBtn);
+    }
 
     if (this.mainView === 'editor' && this.currentDoc) {
       // Save status badge
@@ -2089,7 +2271,7 @@ class ObsidianSyncStudioApp {
         this.scan?.notes[0]?.path ||
         null;
       if (first) {
-        await this.openNote(first);
+        await this.openNote(first, { expandAncestors: false });
       } else {
         this.renderEditorMainArea(true);
       }
@@ -2113,7 +2295,7 @@ class ObsidianSyncStudioApp {
 
       const first = this.scan?.notes[0]?.path || null;
       if (first) {
-        await this.openNote(first);
+        await this.openNote(first, { expandAncestors: false });
       } else {
         this.renderEditorMainArea(true);
       }
@@ -2141,7 +2323,7 @@ class ObsidianSyncStudioApp {
         this.scan?.notes[0]?.path ||
         null;
       if (first) {
-        await this.openNote(first);
+        await this.openNote(first, { expandAncestors: false });
       } else {
         this.renderEditorMainArea(true);
       }
@@ -2151,7 +2333,10 @@ class ObsidianSyncStudioApp {
     }
   }
 
-  public async openNote(relPath: string, opts?: { forceWrite?: boolean }): Promise<void> {
+  public async openNote(
+    relPath: string,
+    opts?: { forceWrite?: boolean; expandAncestors?: boolean }
+  ): Promise<void> {
     if (!this.workspace.active_vault) return;
     if (this.isMobileViewport()) {
       this.setSidebarCollapsed(true);
@@ -2167,6 +2352,7 @@ class ObsidianSyncStudioApp {
       return;
     }
 
+    const switchingToDifferentNote = this.currentDoc?.path !== relPath;
     await this.flushSave(false);
 
     try {
@@ -2185,7 +2371,9 @@ class ObsidianSyncStudioApp {
         : 'write';
       this.mountedNotePath = null;
 
-      this.expandAncestorsOf(relPath);
+      if (opts?.expandAncestors !== false) {
+        this.expandAncestorsOf(relPath);
+      }
 
       const openTabs = [...this.workspace.open_tabs];
       if (!openTabs.includes(relPath)) {
@@ -2203,6 +2391,9 @@ class ObsidianSyncStudioApp {
 
       this.renderChrome();
       this.renderEditorMainArea(true);
+      if (switchingToDifferentNote && this.editorPaneEl) {
+        this.editorPaneEl.scrollTop = 0;
+      }
       this.renderInspector();
     } catch (err: any) {
       this.showToast(err?.message || `노트를 열 수 없습니다: ${relPath}`, true);
@@ -2272,6 +2463,12 @@ class ObsidianSyncStudioApp {
 
     this.updateSaveStatus('saving');
 
+    const prevInspSig = JSON.stringify([
+      this.currentDoc.headings,
+      this.currentDoc.outgoing_links,
+      this.currentDoc.backlinks,
+    ]);
+
     this.savingPromise = (async () => {
       try {
         const updatedDoc = await api.noteSave({
@@ -2288,13 +2485,20 @@ class ObsidianSyncStudioApp {
           if (this.showRawYaml) {
             this.renderRawYamlPreview();
           }
-          // Refresh scan tags/icons subtly & update inspector without remounting editor!
+          // Refresh scan tags/icons subtly without resetting sidebar scroll or unnecessarily rebuilding inspector!
           const freshScan = await api.vaultScan(vault);
           this.scan = freshScan;
           this.vaultRevision = freshScan.revision;
           this.renderSidebar();
           this.renderTabsStrip();
-          this.renderInspector();
+          const nextInspSig = JSON.stringify([
+            updatedDoc.headings,
+            updatedDoc.outgoing_links,
+            updatedDoc.backlinks,
+          ]);
+          if (nextInspSig !== prevInspSig) {
+            this.renderInspector();
+          }
         }
         this.updateSaveStatus('saved');
         if (manualToast) {
@@ -3052,10 +3256,17 @@ class ObsidianSyncStudioApp {
       }
       requestAnimationFrame(() => this.applyPageLayoutVariables());
     } else {
+      const savedPaneScroll = this.editorPaneEl.scrollTop;
       this.renderNotionCoverZone();
       this.renderNotionHeaderZone();
       this.updatePageFooterStats();
-      requestAnimationFrame(() => this.applyPageLayoutVariables());
+      this.editorPaneEl.scrollTop = savedPaneScroll;
+      requestAnimationFrame(() => {
+        this.applyPageLayoutVariables();
+        if (Math.abs(this.editorPaneEl.scrollTop - savedPaneScroll) > 4) {
+          this.editorPaneEl.scrollTop = savedPaneScroll;
+        }
+      });
     }
   }
 
@@ -3557,6 +3768,16 @@ class ObsidianSyncStudioApp {
 
   // ───────────────────────── Right Inspector Panel ─────────────────────────
   private renderInspector(): void {
+    const curPath = this.currentDoc?.path ?? null;
+    const sameContext =
+      this.lastInspectorTabRendered === this.inspectorTab &&
+      this.lastInspectorNoteRendered === curPath;
+    const prevInspScroll = sameContext
+      ? this.inspectorEl.querySelector<HTMLElement>('[data-ibody]')?.scrollTop ?? 0
+      : 0;
+    this.lastInspectorTabRendered = this.inspectorTab;
+    this.lastInspectorNoteRendered = curPath;
+
     this.localGraphCtrl?.destroy();
     this.localGraphCtrl = null;
 
@@ -3765,6 +3986,12 @@ class ObsidianSyncStudioApp {
           });
         })
         .catch(() => {});
+    }
+
+    if (prevInspScroll > 0 && this.inspectorTab !== 'local_graph') {
+      requestAnimationFrame(() => {
+        if (body.isConnected) body.scrollTop = prevInspScroll;
+      });
     }
   }
 
@@ -4022,19 +4249,30 @@ class ObsidianSyncStudioApp {
   // ───────────────────────── Sync Center View ─────────────────────────
   private mountSyncCenterView(): void {
     if (!this.syncCtrl) {
-      this.syncCtrl = new SyncCenterController(this.syncViewWrapEl, this.syncSnap, {
-        onSnapshotUpdated: (snap) => {
-          this.syncSnap = snap;
-          this.updateSidebarSyncIndicators();
+      this.syncCtrl = new SyncCenterController(
+        this.syncViewWrapEl,
+        this.syncSnap,
+        {
+          onSnapshotUpdated: (snap) => {
+            this.syncSnap = snap;
+            this.updateSidebarSyncIndicators();
+          },
+          onOpenVaultInEditor: async (vaultPath) => {
+            await this.selectVaultPath(vaultPath);
+          },
+          onGetActiveVault: () => this.workspace?.active_vault || null,
+          onUpdateStatusChanged: (st) => {
+            this.updateStatus = st;
+            this.renderTopbar();
+          },
+          onApplyUpdate: () => this.applyDesktopUpdateAndRestart(),
+          onToast: (msg, err) => this.showToast(msg, err),
         },
-        onOpenVaultInEditor: async (vaultPath) => {
-          await this.selectVaultPath(vaultPath);
-        },
-        onGetActiveVault: () => this.workspace?.active_vault || null,
-        onToast: (msg, err) => this.showToast(msg, err),
-      });
+        this.updateStatus
+      );
     } else {
       this.syncCtrl.receiveSnapshot(this.syncSnap);
+      this.syncCtrl.receiveUpdateStatus(this.updateStatus);
     }
     this.syncCtrl.renderFull();
   }
@@ -4183,6 +4421,46 @@ class ObsidianSyncStudioApp {
           label: 'Android 모든 파일 접근 권한 설정',
           run: () => {
             void api.androidGrantFilesAccess();
+          },
+        }
+      );
+    } else {
+      commands.push(
+        {
+          id: 'desktop_autostart_toggle',
+          icon: '🔄',
+          label: this.syncSnap.autostart
+            ? 'PC 재시작 시 자동 실행 끄기'
+            : 'PC 재시작 시 자동 실행 켜기 (동기화 자동 시작)',
+          run: async () => {
+            try {
+              const snap = await api.syncSetAutostart(!this.syncSnap.autostart);
+              this.syncSnap = snap;
+              this.syncCtrl?.receiveSnapshot(snap);
+              this.showToast(
+                snap.autostart
+                  ? 'PC 재시작 시 자동 실행을 켰습니다.'
+                  : 'PC 재시작 시 자동 실행을 껐습니다.'
+              );
+            } catch (err: any) {
+              this.showToast(err?.message || '자동 실행 설정 변경 실패', true);
+            }
+          },
+        },
+        {
+          id: 'desktop_check_update',
+          icon: '🚀',
+          label: 'GitHub 새 버전 업데이트 확인 및 적용',
+          run: async () => {
+            try {
+              const st = await api.updateCheck();
+              this.updateStatus = st;
+              this.renderTopbar();
+              this.syncCtrl?.receiveUpdateStatus(st);
+              this.showToast(st.message || '업데이트 확인 완료');
+            } catch (err: any) {
+              this.showToast(err?.message || '업데이트 확인 실패', true);
+            }
           },
         }
       );

@@ -104,6 +104,13 @@ fn main() {
         return;
     }
 
+    // 이전 업데이트 후 남은 .old / .tmp 정리 및 자동 실행 레지스트리 경로 최신화
+    platform::ensure_autostart_current_exe();
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_millis(1500));
+        obsidian_sync_desktop::updater::cleanup_old_exe_on_startup();
+    });
+
     let hide = std::env::args().any(|a| a == "--minimized");
     let event_loop = tao::event_loop::EventLoopBuilder::<AppUserEvent>::with_user_event().build();
     let event_proxy = event_loop.create_proxy();
@@ -141,6 +148,7 @@ fn main() {
         trigger.clone(),
         Some(event_proxy),
     )));
+    backend_state.lock().unwrap().updater.set_main_hwnd(hwnd);
     let data_dir = backend_state.lock().unwrap().sync.data_dir.clone();
 
     // 창이 트레이에 숨겨진 동안에도 서비스 중지/재시작/초기화 상태 머신이 멈추지 않도록 주기 폴링
@@ -152,6 +160,50 @@ fn main() {
                 std::thread::sleep(Duration::from_millis(200));
                 if let Ok(mut guard) = st.lock() {
                     guard.sync.poll_lifecycle();
+                }
+            });
+    }
+
+    // 백그라운드 GitHub 릴리즈 자동 업데이트 확인 및 다운로드 (창이 트레이에 숨겨져 있으면 조용히 자동 적용)
+    {
+        let st = backend_state.clone();
+        let updater = st.lock().unwrap().updater.clone();
+        let _ = std::thread::Builder::new()
+            .name("onyx-auto-updater".into())
+            .spawn(move || {
+                std::thread::sleep(Duration::from_secs(6));
+                loop {
+                    let auto = updater.is_auto_update_enabled();
+                    let _ = updater.check_and_maybe_download_sync(auto);
+                    let status = updater.status();
+                    if status.auto_update && status.ready_to_install && !status.applying {
+                        let h = updater.main_hwnd();
+                        let hidden_in_tray = h != 0 && !platform::is_window_visible_hwnd(h);
+                        if hidden_in_tray {
+                            let is_syncing = st
+                                .lock()
+                                .ok()
+                                .and_then(|mut g| g.sync.snapshot().status.map(|s| s.syncing))
+                                .unwrap_or(false);
+                            if !is_syncing {
+                                if let Ok(staged) = updater.prepare_staged_for_apply() {
+                                    let stop_join = {
+                                        let mut g = st.lock().unwrap();
+                                        g.sync.stop_service();
+                                        g.sync.stopping.take()
+                                    };
+                                    if let Some(j) = stop_join {
+                                        let _ = j.join();
+                                    }
+                                    if updater.swap_and_restart(&staged).is_ok() {
+                                        std::thread::sleep(Duration::from_millis(120));
+                                        std::process::exit(0);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    std::thread::sleep(Duration::from_secs(3 * 60 * 60));
                 }
             });
     }
@@ -190,6 +242,9 @@ fn main() {
     event_loop.run(move |event, _, control_flow| {
         let _keep_alive = (&window, &web_context, &tray);
         *control_flow = tao::event_loop::ControlFlow::Wait;
+        if let Some(ref t) = tray {
+            t.sync_checked();
+        }
 
         match event {
             tao::event::Event::WindowEvent {

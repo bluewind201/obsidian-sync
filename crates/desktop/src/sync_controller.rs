@@ -808,7 +808,11 @@ impl App {
             dirty: self.dirty(),
             cfg: self.cfg.clone(),
             saved: self.saved.clone(),
-            autostart: self.autostart,
+            autostart: if cfg!(windows) {
+                platform::autostart_enabled()
+            } else {
+                self.autostart
+            },
             service_running: self.service.is_some(),
             transitioning: self.transitioning(),
             status,

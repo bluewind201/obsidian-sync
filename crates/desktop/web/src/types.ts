@@ -40,6 +40,7 @@ export interface TreeNodeDto {
   path: string;
   kind: 'folder' | 'note';
   icon: string | null;
+  color?: string | null;
   children: TreeNodeDto[];
   modified: number;
   encrypted?: boolean;
@@ -338,16 +339,36 @@ export interface SyncSnapshotDto {
   default_device_name: string;
 }
 
+export interface UpdateStatusDto {
+  supported: boolean;
+  current_version: string;
+  auto_update: boolean;
+  checking: boolean;
+  downloading: boolean;
+  ready_to_install: boolean;
+  applying: boolean;
+  available_tag: string | null;
+  release_url: string | null;
+  release_notes: string | null;
+  downloaded_bytes: number;
+  total_bytes: number;
+  last_checked_at: string | null;
+  message: string;
+  error: string | null;
+}
+
 export interface BootstrapDto {
   workspace: WorkspaceState;
   vault_scan: VaultScanDto | null;
   sync: SyncSnapshotDto;
   vault_revision: number;
+  update?: UpdateStatusDto;
 }
 
 export interface PollDto {
   vault_revision: number;
   sync: SyncSnapshotDto;
+  update?: UpdateStatusDto;
 }
 
 export type SaveStatus = 'saved' | 'saving' | 'dirty' | 'error';

@@ -32,6 +32,207 @@ const EMOJI_PRESETS = [
   '🏠', '✈️', '📷', '🎁', '⚡', '🌈', '🍀', '📎',
 ];
 
+const FOLDER_ICON_PRESETS = [
+  '📁', '📂', '🗂️', '📚', '💼', '🚀', '🎯', '💡',
+  '📌', '📝', '🔬', '💻', '⚙️', '📊', '🎨', '🔒',
+  '⭐', '🏠', '🌱', '📅', '🏆', '🧭', '💬', '🎵',
+  '📷', '🧪', '📖', '🛠️', '🌐', '🧾', '🛡️', '📦',
+  '✈️', '☕', '🎁', '🌈',
+];
+
+const FOLDER_COLOR_PRESETS: { name: string; hex: string | null }[] = [
+  { name: '기본', hex: null },
+  { name: '슬레이트', hex: '#64748b' },
+  { name: '레드', hex: '#ef4444' },
+  { name: '오렌지', hex: '#f97316' },
+  { name: '앰버', hex: '#f59e0b' },
+  { name: '에메랄드', hex: '#10b981' },
+  { name: '틸', hex: '#14b8a6' },
+  { name: '스카이', hex: '#0ea5e9' },
+  { name: '블루', hex: '#2563eb' },
+  { name: '인디고', hex: '#6366f1' },
+  { name: '퍼플', hex: '#8b5cf6' },
+  { name: '핑크', hex: '#ec4899' },
+  { name: '브라운', hex: '#a16207' },
+];
+
+export function renderFolderSvgIcon(color?: string | null, expanded = false): string {
+  const fillColor = color ? escapeHtml(color) : 'var(--folder-default-fill, #eab308)';
+  if (expanded) {
+    return `<svg class="tree-folder-svg" viewBox="0 0 20 20" width="15" height="15" aria-hidden="true"><path fill="${fillColor}" d="M2.2 4.2A1.7 1.7 0 0 1 3.9 2.5h4.2l1.6 1.7h6.4a1.7 1.7 0 0 1 1.7 1.7v1.1H4.8a1.6 1.6 0 0 0-1.5 1.1L2 12.2V4.2zm1.8 4.1h13.7a1.2 1.2 0 0 1 1.1 1.6l-2.1 5.9a1.5 1.5 0 0 1-1.4 1H3a1.2 1.2 0 0 1-1.1-1.6l2-5.9a1.2 1.2 0 0 1 1.1-1z"/></svg>`;
+  }
+  return `<svg class="tree-folder-svg" viewBox="0 0 20 20" width="15" height="15" aria-hidden="true"><path fill="${fillColor}" d="M2.5 4.3A1.8 1.8 0 0 1 4.3 2.5h4.1l1.7 1.7h5.6a1.8 1.8 0 0 1 1.8 1.8v8.7a1.8 1.8 0 0 1-1.8 1.8H4.3a1.8 1.8 0 0 1-1.8-1.8V4.3z"/></svg>`;
+}
+
+export function openFolderStyleModal(opts: {
+  folderName: string;
+  currentIcon: string | null;
+  currentColor: string | null;
+  onSave: (icon: string | null, color: string | null) => Promise<void> | void;
+}): void {
+  let pickedIcon: string | null = opts.currentIcon || null;
+  let pickedColor: string | null = opts.currentColor || null;
+  let busy = false;
+
+  const { card, close } = createModalBase(460);
+  card.innerHTML = `
+    <div class="modal-header">
+      <span>🎨 폴더 아이콘 · 색상 변경</span>
+      <button type="button" class="icon-btn" data-close>✕</button>
+    </div>
+    <div class="modal-body" style="display:flex;flex-direction:column;gap:14px;">
+      <div class="folder-style-preview" data-preview-box>
+        <span style="font-size:11px;color:var(--text-muted);margin-right:6px;">미리보기</span>
+        <span class="folder-style-preview-pill" data-preview-pill></span>
+      </div>
+
+      <div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+          <span style="font-size:12.5px;font-weight:700;">폴더 색상</span>
+          <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);cursor:pointer;">
+            <span>직접 선택</span>
+            <input type="color" data-color-native value="${escapeHtml(pickedColor || '#2563eb')}" style="width:28px;height:22px;padding:0;border:1px solid var(--border-subtle);border-radius:4px;background:transparent;cursor:pointer;" />
+          </label>
+        </div>
+        <div class="folder-color-grid" data-color-grid></div>
+      </div>
+
+      <div>
+        <div style="font-size:12.5px;font-weight:700;margin-bottom:8px;">폴더 아이콘</div>
+        <div class="folder-icon-grid" data-icon-grid></div>
+        <div style="margin-top:8px;display:flex;gap:6px;align-items:center;">
+          <input type="text" class="text-input input-sm" data-custom-icon placeholder="직접 이모지 입력 (예: 💎)" maxlength="4" value="${pickedIcon ? escapeHtml(pickedIcon) : ''}" />
+          <button type="button" class="btn btn-sm" data-apply-custom-icon>입력 적용</button>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer" style="justify-content:space-between;">
+      <button type="button" class="btn btn-danger" data-reset>기본으로 초기화</button>
+      <div style="display:flex;gap:8px;">
+        <button type="button" class="btn" data-cancel>취소</button>
+        <button type="button" class="btn btn-primary" data-save>저장</button>
+      </div>
+    </div>
+  `;
+
+  const previewPill = card.querySelector('[data-preview-pill]') as HTMLElement;
+  const colorGrid = card.querySelector('[data-color-grid]') as HTMLElement;
+  const iconGrid = card.querySelector('[data-icon-grid]') as HTMLElement;
+  const nativeColor = card.querySelector('[data-color-native]') as HTMLInputElement;
+  const customIconIn = card.querySelector('[data-custom-icon]') as HTMLInputElement;
+  const saveBtn = card.querySelector('[data-save]') as HTMLButtonElement;
+
+  const refreshUi = () => {
+    const iconHtml = pickedIcon
+      ? `<span class="tree-icon">${escapeHtml(pickedIcon)}</span>`
+      : `<span class="tree-icon">${renderFolderSvgIcon(pickedColor, false)}</span>`;
+    previewPill.innerHTML = `
+      <span class="tree-chevron">▶</span>
+      ${iconHtml}
+      <span class="tree-label" style="${pickedColor ? `color:${escapeHtml(pickedColor)};font-weight:600;` : 'font-weight:600;'}">${escapeHtml(opts.folderName)}</span>
+    `;
+    colorGrid.querySelectorAll<HTMLElement>('[data-swatch-hex]').forEach((el) => {
+      const hex = el.getAttribute('data-swatch-hex') || '';
+      const active = (pickedColor || '') === hex;
+      el.classList.toggle('active', active);
+    });
+    iconGrid.querySelectorAll<HTMLElement>('[data-icon-val]').forEach((el) => {
+      const val = el.getAttribute('data-icon-val') || '';
+      const active = (pickedIcon || '') === val;
+      el.classList.toggle('active', active);
+    });
+    if (pickedColor) {
+      nativeColor.value = pickedColor;
+    }
+    defBtn.innerHTML = renderFolderSvgIcon(pickedColor, false);
+  };
+
+  for (const sw of FOLDER_COLOR_PRESETS) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'folder-color-swatch';
+    b.setAttribute('data-swatch-hex', sw.hex || '');
+    b.title = sw.name;
+    if (sw.hex) {
+      b.style.background = sw.hex;
+    } else {
+      b.textContent = '기본';
+      b.classList.add('is-default');
+    }
+    b.addEventListener('click', () => {
+      pickedColor = sw.hex;
+      refreshUi();
+    });
+    colorGrid.appendChild(b);
+  }
+
+  nativeColor.addEventListener('input', () => {
+    pickedColor = nativeColor.value.toLowerCase();
+    refreshUi();
+  });
+
+  const defBtn = document.createElement('button');
+  defBtn.type = 'button';
+  defBtn.className = 'emoji-btn folder-icon-choice';
+  defBtn.setAttribute('data-icon-val', '');
+  defBtn.title = '기본 SVG 폴더 아이콘 (선택한 색상에 맞춰 변경)';
+  defBtn.innerHTML = renderFolderSvgIcon(pickedColor, false);
+  defBtn.addEventListener('click', () => {
+    pickedIcon = null;
+    customIconIn.value = '';
+    refreshUi();
+  });
+  iconGrid.appendChild(defBtn);
+
+  for (const em of FOLDER_ICON_PRESETS) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'emoji-btn folder-icon-choice';
+    b.setAttribute('data-icon-val', em);
+    b.textContent = em;
+    b.addEventListener('click', () => {
+      pickedIcon = em;
+      customIconIn.value = em;
+      refreshUi();
+    });
+    iconGrid.appendChild(b);
+  }
+
+  customIconIn.addEventListener('input', () => {
+    pickedIcon = customIconIn.value.trim() || null;
+    refreshUi();
+  });
+
+  card.querySelector('[data-apply-custom-icon]')?.addEventListener('click', () => {
+    pickedIcon = customIconIn.value.trim() || null;
+    refreshUi();
+  });
+
+  const commit = async (icon: string | null, color: string | null) => {
+    if (busy) return;
+    busy = true;
+    saveBtn.disabled = true;
+    try {
+      await opts.onSave(icon, color);
+      close();
+    } finally {
+      busy = false;
+      saveBtn.disabled = false;
+    }
+  };
+
+  saveBtn.addEventListener('click', () => {
+    void commit(pickedIcon, pickedColor);
+  });
+  card.querySelector('[data-reset]')?.addEventListener('click', () => {
+    void commit(null, null);
+  });
+  card.querySelector('[data-cancel]')?.addEventListener('click', close);
+  card.querySelector('[data-close]')?.addEventListener('click', close);
+
+  refreshUi();
+}
+
 export const COVER_PRESETS: { name: string; value: string }[] = [
   { name: '노션 선셋', value: 'linear-gradient(135deg, #f6d365 0%, #fda085 100%)' },
   { name: '오션 블루', value: 'linear-gradient(135deg, #2383e2 0%, #6dd5ed 100%)' },

@@ -4,6 +4,7 @@ pub mod api;
 pub mod crypto;
 pub mod platform;
 pub mod sync_controller;
+pub mod updater;
 pub mod vault;
 
 #[derive(Debug)]

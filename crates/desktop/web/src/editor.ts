@@ -1120,6 +1120,89 @@ export class StudioEditorController {
     return btn;
   }
 
+  private getScrollPane(): HTMLElement | null {
+    return this.hostEl.closest('#app-editor-pane') as HTMLElement | null;
+  }
+
+  private preservePaneScroll(fn: () => void): void {
+    const pane = this.getScrollPane();
+    const savedTop = pane ? pane.scrollTop : 0;
+    const savedLeft = pane ? pane.scrollLeft : 0;
+    try {
+      fn();
+    } finally {
+      if (pane) {
+        pane.scrollTop = savedTop;
+        pane.scrollLeft = savedLeft;
+        requestAnimationFrame(() => {
+          if (pane.isConnected) {
+            pane.scrollTop = savedTop;
+            pane.scrollLeft = savedLeft;
+          }
+        });
+        window.setTimeout(() => {
+          if (pane.isConnected) {
+            pane.scrollTop = savedTop;
+            pane.scrollLeft = savedLeft;
+          }
+        }, 0);
+      }
+    }
+  }
+
+  private focusEditorWithoutScroll(): void {
+    this.preservePaneScroll(() => {
+      const anyEd = this.editor as any;
+      const mode: EditorType = this.editor?.isWysiwygMode() ? 'wysiwyg' : 'markdown';
+      const targetDom: HTMLElement | null =
+        (mode === 'wysiwyg' ? anyEd?.wwEditor?.view?.dom : anyEd?.mdEditor?.view?.dom) ??
+        this.hostEl.querySelector<HTMLElement>('.ProseMirror');
+      if (targetDom) {
+        try {
+          targetDom.focus({ preventScroll: true });
+        } catch {
+          targetDom.focus();
+        }
+      }
+    });
+  }
+
+  private handleHostMouseDownCapture = (ev: MouseEvent): void => {
+    const target = ev.target as HTMLElement | null;
+    if (!target) return;
+    if (
+      target.closest(
+        'button, input, textarea, select, [data-flow-action], [data-flow-convert-start]'
+      )
+    ) {
+      return;
+    }
+    const pmEl = target.closest('.ProseMirror') as HTMLElement | null;
+    if (!pmEl) return;
+    const pane = this.getScrollPane();
+    if (!pane) return;
+    const savedTop = pane.scrollTop;
+    const savedLeft = pane.scrollLeft;
+    if (document.activeElement !== pmEl) {
+      try {
+        pmEl.focus({ preventScroll: true });
+      } catch {
+        // ignore
+      }
+      pane.scrollTop = savedTop;
+      pane.scrollLeft = savedLeft;
+      requestAnimationFrame(() => {
+        if (pane.isConnected && Math.abs(pane.scrollTop - savedTop) > 150) {
+          const sel = window.getSelection();
+          if (!sel || sel.isCollapsed) {
+            pane.scrollTop = savedTop;
+            pane.scrollLeft = savedLeft;
+          }
+        }
+      });
+    }
+  };
+
   private createPopupItem(label: string, onClick: () => void): HTMLButtonElement {
     const item = document.createElement('button');
     item.type = 'button';
@@ -1136,7 +1219,7 @@ export class StudioEditorController {
           moreBtn.textContent = '🛠️ 도구 ▾';
         }
       }
-      this.editor?.focus();
+      this.focusEditorWithoutScroll();
     });
     return item;
   }
@@ -1174,12 +1257,12 @@ export class StudioEditorController {
     const undoBtn = this.makeBtn('↩', '실행 취소 (Ctrl+Z)');
     undoBtn.addEventListener('click', () => {
       this.editor?.exec('undo');
-      this.editor?.focus();
+      this.focusEditorWithoutScroll();
     });
     const redoBtn = this.makeBtn('↪', '다시 실행 (Ctrl+Y)');
     redoBtn.addEventListener('click', () => {
       this.editor?.exec('redo');
-      this.editor?.focus();
+      this.focusEditorWithoutScroll();
     });
     const findBtn = this.makeBtn('🔍찾기', '찾기 및 바꾸기 (Ctrl+F / Ctrl+H)');
     findBtn.addEventListener('click', () => this.openFindBar(true));
@@ -1215,25 +1298,25 @@ export class StudioEditorController {
     const underlineBtn = this.makeBtn('U', '밑줄 (Ctrl+U)', 'underline-btn');
     underlineBtn.addEventListener('click', () => {
       this.editor?.exec('underline');
-      this.editor?.focus();
+      this.focusEditorWithoutScroll();
     });
 
     const supBtn = this.makeBtn('X²', '위 첨자 (<sup>)');
     supBtn.addEventListener('click', () => {
       this.editor?.exec('superscript');
-      this.editor?.focus();
+      this.focusEditorWithoutScroll();
     });
 
     const subBtn = this.makeBtn('X₂', '아래 첨자 (<sub>)');
     subBtn.addEventListener('click', () => {
       this.editor?.exec('subscript');
-      this.editor?.focus();
+      this.focusEditorWithoutScroll();
     });
 
     const kbdBtn = this.makeBtn('⌨', '단축키 배지 (<kbd>)');
     kbdBtn.addEventListener('click', () => {
       this.editor?.exec('kbdKey');
-      this.editor?.focus();
+      this.focusEditorWithoutScroll();
     });
 
     const highlightPopupBody = document.createElement('div');
@@ -1257,26 +1340,26 @@ export class StudioEditorController {
       b.addEventListener('click', () => {
         this.editor?.exec('highlightColor', { color: sw.color });
         this.closeToolbarPopup();
-        this.editor?.focus();
+        this.focusEditorWithoutScroll();
       });
       swatchGrid.appendChild(b);
     }
     highlightPopupBody.querySelector('[data-action="md-mark"]')?.addEventListener('click', () => {
       this.editor?.exec('markdownHighlight');
       this.closeToolbarPopup();
-      this.editor?.focus();
+      this.focusEditorWithoutScroll();
     });
     highlightPopupBody.querySelector('[data-action="clear-mark"]')?.addEventListener('click', () => {
       this.editor?.exec('clearHighlight');
       this.closeToolbarPopup();
-      this.editor?.focus();
+      this.focusEditorWithoutScroll();
     });
     const highlightBtn = this.makeBtn('형광펜', '배경 형광펜 팔레트', 'highlight-btn');
 
     const clearFmtBtn = this.makeBtn('Tx', '선택 서식 지우기');
     clearFmtBtn.addEventListener('click', () => {
       this.editor?.exec('clearInlineStyle');
-      this.editor?.focus();
+      this.focusEditorWithoutScroll();
     });
 
     // ─── Group 4: Alignment ───
@@ -1310,7 +1393,7 @@ export class StudioEditorController {
           calloutTitle: preset.defaultTitle,
         });
         this.closeToolbarPopup();
-        this.editor?.focus();
+        this.focusEditorWithoutScroll();
       });
       calloutPopupBody.appendChild(item);
     }
@@ -1434,7 +1517,7 @@ export class StudioEditorController {
       sb.addEventListener('click', () => {
         this.insertInlineText(sym);
         this.closeToolbarPopup();
-        this.editor?.focus();
+        this.focusEditorWithoutScroll();
       });
       mathSymsWrap.appendChild(sb);
     }
@@ -1521,7 +1604,7 @@ export class StudioEditorController {
       sb.addEventListener('click', () => {
         this.insertInlineText(ch);
         this.closeToolbarPopup();
-        this.editor?.focus();
+        this.focusEditorWithoutScroll();
       });
       symGrid.appendChild(sb);
     }
@@ -1597,6 +1680,7 @@ export class StudioEditorController {
       el: this.editorMountEl,
       height: 'auto',
       minHeight: '460px',
+      autofocus: false,
       initialEditType: params.mode,
       previewStyle: 'vertical',
       initialValue: hydrated,
@@ -1813,7 +1897,16 @@ export class StudioEditorController {
       },
     });
 
+    // Prevent TOAST UI's internal EditorBase.prototype.focus() (`setTimeout` + `tr.scrollIntoView()`)
+    // from yanking #app-editor-pane back to the cursor after toolbar clicks or popups.
+    const anyEd = this.editor as any;
+    const safeFocus = () => this.focusEditorWithoutScroll();
+    anyEd.focus = safeFocus;
+    if (anyEd.wwEditor) anyEd.wwEditor.focus = safeFocus;
+    if (anyEd.mdEditor) anyEd.mdEditor.focus = safeFocus;
+
     this.attachToolbarToDock(params.theme);
+    this.hostEl.addEventListener('mousedown', this.handleHostMouseDownCapture, true);
     this.hostEl.addEventListener('click', this.handleHostClick);
   }
 
@@ -2028,7 +2121,7 @@ export class StudioEditorController {
     if (this.findBarEl) {
       this.findBarEl.style.display = 'none';
     }
-    this.editor?.focus();
+    this.focusEditorWithoutScroll();
   }
 
   private collectProseMirrorMatches(query: string): TextMatchRange[] {
@@ -2155,45 +2248,55 @@ export class StudioEditorController {
       this.insertInlineHtmlViaMarker(trimmed);
       return;
     }
-    this.editor.insertText(text);
-    this.editor.focus();
+    this.preservePaneScroll(() => {
+      this.editor?.insertText(text);
+    });
+    this.focusEditorWithoutScroll();
   }
 
   private insertInlineHtmlViaMarker(htmlToken: string): void {
     if (!this.editor) return;
-    const marker = `__OBS_INLINE_${Date.now()}_${Math.floor(Math.random() * 10000)}__`;
-    this.editor.insertText(marker);
-    const md = this.editor.getMarkdown();
-    if (md.includes(marker)) {
-      const next = md.replace(marker, htmlToken);
-      this.editor.setMarkdown(next, false);
-      this.callbacks.onMarkdownChange(dehydrateMarkdownMediaUrls(next));
-    }
-    this.editor.focus();
+    this.preservePaneScroll(() => {
+      if (!this.editor) return;
+      const marker = `__OBS_INLINE_${Date.now()}_${Math.floor(Math.random() * 10000)}__`;
+      this.editor.insertText(marker);
+      const md = this.editor.getMarkdown();
+      if (md.includes(marker)) {
+        const next = md.replace(marker, htmlToken);
+        this.editor.setMarkdown(next, false);
+        this.callbacks.onMarkdownChange(dehydrateMarkdownMediaUrls(next));
+      }
+    });
+    this.focusEditorWithoutScroll();
   }
 
   public insertBlockSnippet(snippet: string): void {
     if (!this.editor) return;
     const clean = snippet.trim();
     if (!this.editor.isWysiwygMode()) {
-      this.editor.insertText(`\n\n${clean}\n\n`);
-      this.editor.focus();
+      this.preservePaneScroll(() => {
+        this.editor?.insertText(`\n\n${clean}\n\n`);
+      });
+      this.focusEditorWithoutScroll();
       return;
     }
 
-    const marker = `__OBS_BLOCK_${Date.now()}_${Math.floor(Math.random() * 10000)}__`;
-    this.editor.insertText(marker);
-    const md = this.editor.getMarkdown();
-    if (md.includes(marker)) {
-      const next = md.replace(marker, `\n\n${clean}\n\n`);
-      this.editor.setMarkdown(next, false);
-      this.callbacks.onMarkdownChange(dehydrateMarkdownMediaUrls(next));
-    } else {
-      const appended = `${md.trimEnd()}\n\n${clean}\n\n`;
-      this.editor.setMarkdown(appended, true);
-      this.callbacks.onMarkdownChange(dehydrateMarkdownMediaUrls(appended));
-    }
-    this.editor.focus();
+    this.preservePaneScroll(() => {
+      if (!this.editor) return;
+      const marker = `__OBS_BLOCK_${Date.now()}_${Math.floor(Math.random() * 10000)}__`;
+      this.editor.insertText(marker);
+      const md = this.editor.getMarkdown();
+      if (md.includes(marker)) {
+        const next = md.replace(marker, `\n\n${clean}\n\n`);
+        this.editor.setMarkdown(next, false);
+        this.callbacks.onMarkdownChange(dehydrateMarkdownMediaUrls(next));
+      } else {
+        const appended = `${md.trimEnd()}\n\n${clean}\n\n`;
+        this.editor.setMarkdown(appended, false);
+        this.callbacks.onMarkdownChange(dehydrateMarkdownMediaUrls(appended));
+      }
+    });
+    this.focusEditorWithoutScroll();
   }
 
   private wrapSelectionWithBlockAlign(align: string): void {
@@ -2237,16 +2340,19 @@ export class StudioEditorController {
 
   private insertFootnote(): void {
     if (!this.editor) return;
-    const md = this.editor.getMarkdown();
-    while (md.includes(`[^${this.footnoteSeq}]`)) {
-      this.footnoteSeq++;
-    }
-    const n = this.footnoteSeq++;
-    this.editor.insertText(`[^${n}]`);
-    const nextMd = `${this.editor.getMarkdown().trimEnd()}\n\n[^${n}]: 각주 설명을 입력하세요.\n`;
-    this.editor.setMarkdown(nextMd, false);
-    this.callbacks.onMarkdownChange(dehydrateMarkdownMediaUrls(nextMd));
-    this.editor.focus();
+    this.preservePaneScroll(() => {
+      if (!this.editor) return;
+      const md = this.editor.getMarkdown();
+      while (md.includes(`[^${this.footnoteSeq}]`)) {
+        this.footnoteSeq++;
+      }
+      const n = this.footnoteSeq++;
+      this.editor.insertText(`[^${n}]`);
+      const nextMd = `${this.editor.getMarkdown().trimEnd()}\n\n[^${n}]: 각주 설명을 입력하세요.\n`;
+      this.editor.setMarkdown(nextMd, false);
+      this.callbacks.onMarkdownChange(dehydrateMarkdownMediaUrls(nextMd));
+    });
+    this.focusEditorWithoutScroll();
   }
 
   private transformSelectionText(
@@ -2301,7 +2407,7 @@ export class StudioEditorController {
     }
 
     view.dispatch(view.state.tr.insertText(out, from, to));
-    this.editor?.focus();
+    this.focusEditorWithoutScroll();
   }
 
   private async copyCleanMarkdown(): Promise<void> {
@@ -2351,7 +2457,9 @@ export class StudioEditorController {
     const updatedMd = `${normMd.slice(0, matched.bodyStart)}${nextCode}${normMd.slice(matched.bodyEnd)}`;
     this.suppressChange = true;
     try {
-      this.editor.setMarkdown(updatedMd, false);
+      this.preservePaneScroll(() => {
+        this.editor?.setMarkdown(updatedMd, false);
+      });
     } finally {
       this.suppressChange = false;
     }
@@ -2510,12 +2618,12 @@ export class StudioEditorController {
                 }
               }
               view.dispatch(tr);
-              view.focus();
+              this.focusEditorWithoutScroll();
             }
             return;
           }
         }
-        this.editor?.focus();
+        this.focusEditorWithoutScroll();
         return;
       }
 
@@ -2573,7 +2681,7 @@ export class StudioEditorController {
     } else {
       this.editor.insertText(`![${alt}](${mediaUrl})`);
     }
-    this.editor.focus();
+    this.focusEditorWithoutScroll();
   }
 
   public insertAttachmentLink(label: string, mediaUrl: string, isImage = false): void {
@@ -2588,7 +2696,7 @@ export class StudioEditorController {
     } else {
       this.editor.insertText(`[${display}](${mediaUrl})`);
     }
-    this.editor.focus();
+    this.focusEditorWithoutScroll();
   }
 
   public insertWikiLink(noteTitle: string): void {
@@ -2606,7 +2714,7 @@ export class StudioEditorController {
           if (prevTwo === '[[') {
             const tr = state.tr.insertText(token, pos - 2, pos);
             dispatch(tr);
-            this.editor.focus();
+            this.focusEditorWithoutScroll();
             return;
           }
         }
@@ -2614,7 +2722,7 @@ export class StudioEditorController {
     }
 
     this.editor.insertText(token);
-    this.editor.focus();
+    this.focusEditorWithoutScroll();
   }
 
   private getActiveProseMirrorView(): any | null {
@@ -2635,23 +2743,27 @@ export class StudioEditorController {
     } else {
       redo(view.state, view.dispatch);
     }
-    this.editor?.focus();
+    this.focusEditorWithoutScroll();
   }
 
   private execEditorCommand(cmd: string, payload?: Record<string, any>): void {
     if (!this.editor) return;
-    try {
-      this.editor.exec(cmd, payload);
-    } catch {
-      // fallback ignore for mode-specific commands
-    }
-    this.editor.focus();
+    this.preservePaneScroll(() => {
+      try {
+        this.editor?.exec(cmd, payload);
+      } catch {
+        // fallback ignore for mode-specific commands
+      }
+    });
+    this.focusEditorWithoutScroll();
   }
 
   private insertTextOrSnippet(text: string): void {
     if (!this.editor) return;
-    this.editor.insertText(text);
-    this.editor.focus();
+    this.preservePaneScroll(() => {
+      this.editor?.insertText(text);
+    });
+    this.focusEditorWithoutScroll();
   }
 
   private attachEditorContextMenu(): void {
@@ -2783,12 +2895,12 @@ export class StudioEditorController {
     );
     addItem('▸', '접기 / 펼치기 토글', () => {
       if (isWysiwyg) {
-        const cur = this.editor!.getHTML();
-        void cur;
-        this.editor!.setHTML(
-          `${this.editor!.getHTML()}<details open><summary>토글 제목</summary><p>접기/펼치기 내용을 입력하세요.</p></details>`,
-          false
-        );
+        this.preservePaneScroll(() => {
+          this.editor?.setHTML(
+            `${this.editor!.getHTML()}<details open><summary>토글 제목</summary><p>접기/펼치기 내용을 입력하세요.</p></details>`,
+            false
+          );
+        });
       } else {
         this.insertTextOrSnippet(
           '\n<details open>\n<summary>토글 제목</summary>\n\n내용을 입력하세요.\n\n</details>\n'
@@ -2896,7 +3008,9 @@ export class StudioEditorController {
     this.suppressChange = true;
     try {
       const hydrated = hydrateMarkdownMediaUrls(markdown, this.callbacks.getActiveVault());
-      this.editor.setMarkdown(hydrated, false);
+      this.preservePaneScroll(() => {
+        this.editor?.setMarkdown(hydrated, false);
+      });
     } finally {
       this.suppressChange = false;
     }
@@ -2949,6 +3063,7 @@ export class StudioEditorController {
       window.removeEventListener('resize', this.docToolbarResizeBound);
       this.docToolbarResizeBound = null;
     }
+    this.hostEl.removeEventListener('mousedown', this.handleHostMouseDownCapture, true);
     this.hostEl.removeEventListener('click', this.handleHostClick);
     this.findBarEl = null;
     this.editorMountEl = null;

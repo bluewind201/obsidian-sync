@@ -15,6 +15,7 @@ import type {
   SearchHitDto,
   SyncSnapshotDto,
   TrashItemDto,
+  UpdateStatusDto,
   VaultBatchCryptoResult,
   VaultScanDto,
   WorkspaceState,
@@ -186,6 +187,9 @@ export const api = {
 
   createFolder: (vault: string, parent: string, name: string) =>
     rpc<{ path: string; scan: VaultScanDto }>('vault/create_folder', { vault, parent, name }),
+
+  setFolderStyle: (vault: string, path: string, icon: string | null, color: string | null) =>
+    rpc<{ scan: VaultScanDto }>('folder/style', { vault, path, icon, color }),
 
   renameItem: (vault: string, path: string, new_name: string) =>
     rpc<{ new_path: string; updated_links: number; scan: VaultScanDto }>('vault/rename', {
@@ -389,6 +393,15 @@ export const api = {
   syncOpenDataDir: () => rpc<Record<string, never>>('sync/open_data_dir', {}),
 
   syncClearMessage: () => rpc<SyncSnapshotDto>('sync/clear_message', {}),
+
+  // Windows GitHub Self-Updater RPCs
+  updateStatus: () => rpc<UpdateStatusDto>('update/status', {}),
+
+  updateCheck: () => rpc<UpdateStatusDto>('update/check', {}),
+
+  updateSetAuto: (enabled: boolean) => rpc<UpdateStatusDto>('update/set_auto', { enabled }),
+
+  updateApply: () => rpc<{ restarting: boolean }>('update/apply', {}),
 
   // Android Native Controls
   androidInfo: () => rpc<AndroidAppInfoDto>('android/info', {}),

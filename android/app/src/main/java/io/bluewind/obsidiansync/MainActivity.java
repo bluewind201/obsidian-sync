@@ -793,7 +793,18 @@ public final class MainActivity extends Activity {
     private void checkUpdateQuietly() {
         bg.execute(() -> {
             try {
-                availableUpdate = Updater.check(this);
+                Updater.Release found = Updater.check(this);
+                availableUpdate = found;
+                if (found != null
+                        && Updater.autoEnabled(this)
+                        && getPackageManager().canRequestPackageInstalls()) {
+                    String lastPrompted = Updater.prefs(this).getString("last_auto_tag", "");
+                    if (!found.tag.equals(lastPrompted)) {
+                        Updater.prefs(this).edit().putString("last_auto_tag", found.tag).apply();
+                        Updater.run(this);
+                        availableUpdate = null;
+                    }
+                }
             } catch (Exception ignored) { }
         });
     }

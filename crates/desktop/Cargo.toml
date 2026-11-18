@@ -32,6 +32,9 @@ directories = "5"
 open = "5"
 
 [target.'cfg(windows)'.dependencies]
+ureq = { version = "2.10", default-features = false, features = ["tls", "json"] }
+sha2 = "0.10"
+hex = "0.4"
 tao = "0.37"
 wry = "0.57"
 webview2-com = "0.39"

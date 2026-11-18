@@ -12,6 +12,7 @@ import type {
   SyncMode,
   SyncSnapshotDto,
   SyncSubTab,
+  UpdateStatusDto,
 } from './types';
 
 const SETUP_DOC = 'https://github.com/bluewind201/obsidian-sync/blob/main/docs/SETUP.md';
@@ -203,6 +204,8 @@ export interface SyncCenterCallbacks {
   onSnapshotUpdated: (snap: SyncSnapshotDto) => void;
   onOpenVaultInEditor: (vaultPath: string) => void;
   onGetActiveVault?: () => string | null;
+  onUpdateStatusChanged?: (status: UpdateStatusDto) => void;
+  onApplyUpdate?: () => Promise<void> | void;
   onToast: (msg: string, isError?: boolean) => void;
 }
 
@@ -230,20 +233,38 @@ export class SyncCenterController {
   private nasOtpValue = '';
   private nasModalEl: HTMLElement | null = null;
   private lastLiveSignature = '';
+  private lastUpdateSignature = '';
+  private logsInitialized = false;
   private androidInfo: AndroidAppInfoDto | null = null;
+  private updateStatus: UpdateStatusDto | null = null;
 
   constructor(
     container: HTMLElement,
     initialSnapshot: SyncSnapshotDto,
-    callbacks: SyncCenterCallbacks
+    callbacks: SyncCenterCallbacks,
+    initialUpdateStatus?: UpdateStatusDto | null
   ) {
     this.container = container;
     this.snapshot = initialSnapshot;
     this.draftCfg = deepClone(initialSnapshot.cfg);
     this.callbacks = callbacks;
+    this.updateStatus = initialUpdateStatus ?? null;
     this.syncIgnoreMapFromDraft();
     if (this.draftCfg.profiles.length === 0) {
       this.subTab = 'settings';
+    }
+  }
+
+  public receiveUpdateStatus(status: UpdateStatusDto | null): void {
+    this.updateStatus = status;
+    const sig = JSON.stringify(status);
+    if (sig === this.lastUpdateSignature) return;
+    this.lastUpdateSignature = sig;
+    if (this.subTab === 'home') {
+      const card = this.container.querySelector<HTMLElement>('[data-home-auto-card]');
+      if (card) {
+        this.populateHomeAutoCard(card);
+      }
     }
   }
 
@@ -264,6 +285,9 @@ export class SyncCenterController {
 
   public setSubTab(tab: SyncSubTab, profileIdx?: number): void {
     this.subTab = tab;
+    if (tab !== 'logs') {
+      this.logsInitialized = false;
+    }
     if (typeof profileIdx === 'number') {
       this.selectedIdx = profileIdx;
       this.confirmDeleteProfile = false;
@@ -273,7 +297,7 @@ export class SyncCenterController {
 
   /**
    * Called whenever background polling or an RPC returns a fresh SyncSnapshotDto.
-   * Updates live status widgets without clobbering focused text inputs in Settings!
+   * Updates live status widgets without clobbering focused text inputs or resetting scroll!
    */
   public receiveSnapshot(snap: SyncSnapshotDto, forceSyncDraft = false): void {
     const wasDirty = this.isDraftDirty();
@@ -299,11 +323,14 @@ export class SyncCenterController {
       autostart: snap.autostart,
     });
 
-    if (forceSyncDraft || ((this.subTab === 'home' || this.subTab === 'logs') && !this.pickerBusy)) {
+    const sigChanged = sig !== this.lastLiveSignature;
+    if (sigChanged) {
       this.lastLiveSignature = sig;
+    }
+
+    if (forceSyncDraft || (sigChanged && (this.subTab === 'home' || this.subTab === 'logs') && !this.pickerBusy)) {
       this.renderFull();
-    } else if (sig !== this.lastLiveSignature) {
-      this.lastLiveSignature = sig;
+    } else if (sigChanged) {
       this.refreshSettingsLiveZones();
     }
 
@@ -311,6 +338,14 @@ export class SyncCenterController {
   }
 
   public renderFull(): void {
+    const prevScreenEl = this.container.querySelector<HTMLElement>('.sync-screen');
+    const prevScreenScroll = prevScreenEl ? prevScreenEl.scrollTop : 0;
+    const prevLogsBox = this.container.querySelector<HTMLElement>('[data-logs-box]');
+    const prevLogsTop = prevLogsBox ? prevLogsBox.scrollTop : null;
+    const prevLogsAtBottom = prevLogsBox
+      ? prevLogsBox.scrollHeight - prevLogsBox.scrollTop - prevLogsBox.clientHeight < 48
+      : true;
+
     this.container.innerHTML = '';
     const screen = document.createElement('div');
     screen.className = 'sync-screen';
@@ -326,7 +361,7 @@ export class SyncCenterController {
       <div>
         <div style="display:flex;align-items:center;gap:10px;">
           <span style="font-size:22px;font-weight:800;">🔄 Onyx 동기화 센터</span>
-          <span class="pill-badge">v${escapeHtml(this.snapshot.version || '0.8.0')}</span>
+          <span class="pill-badge">v${escapeHtml(this.snapshot.version || '1.1.0')}</span>
         </div>
         <div style="font-size:13px;color:var(--text-secondary);margin-top:2px;">
           내 Obsidian 볼트를 Synology NAS, 클라우드 드라이브(OneDrive · Google Drive · 네이버 MYBOX/클라우드), 공유 폴더와 실시간 동기화합니다.
@@ -360,6 +395,9 @@ export class SyncCenterController {
       b.className = `sync-subtab${this.subTab === t.id ? ' active' : ''}`;
       b.textContent = t.label;
       b.addEventListener('click', () => {
+        if (this.subTab !== t.id) {
+          this.logsInitialized = false;
+        }
         this.subTab = t.id;
         this.renderFull();
       });
@@ -375,10 +413,13 @@ export class SyncCenterController {
     } else if (this.subTab === 'settings') {
       this.renderSettingsTab(content);
     } else {
-      this.renderLogsTab(content);
+      this.renderLogsTab(content, prevLogsTop, prevLogsAtBottom);
     }
 
     this.container.appendChild(screen);
+    if (prevScreenScroll > 0) {
+      screen.scrollTop = prevScreenScroll;
+    }
     this.renderMessageBanner();
     this.syncNasBrowserModal();
   }
@@ -537,6 +578,13 @@ export class SyncCenterController {
       });
     }
     host.appendChild(heroCard);
+
+    // Auto-start & GitHub Auto-Update Card (PC + Android)
+    const autoCard = document.createElement('div');
+    autoCard.className = 'sync-card sync-autoupdate-card';
+    autoCard.setAttribute('data-home-auto-card', '1');
+    this.populateHomeAutoCard(autoCard);
+    host.appendChild(autoCard);
 
     // Profiles Card
     const profCard = document.createElement('div');
@@ -2137,7 +2185,186 @@ export class SyncCenterController {
       .catch(() => {});
   }
 
-  private renderLogsTab(host: HTMLElement): void {
+  private populateHomeAutoCard(card: HTMLElement): void {
+    const isAndroid = isAndroidApp();
+    if (isAndroid) {
+      const renderAndroid = (info: AndroidAppInfoDto | null) => {
+        const autoOn = info ? info.auto_update : true;
+        const ver = info?.version || this.snapshot.version || '1.1.0';
+        const avail = info?.available_update_tag;
+        const msg = info?.last_update_message || (avail ? `새 버전 ${avail} 설치 가능` : 'GitHub 최신 버전을 자동으로 확인합니다.');
+        card.innerHTML = `
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+            <span style="font-weight:700;font-size:15px;">🚀 자동 업데이트 (Android)</span>
+            <span class="pill-badge">현재 v${escapeHtml(ver)}</span>
+          </div>
+          <div class="sync-toggle-row">
+            <label class="sync-toggle-label">
+              <input type="checkbox" data-home-android-auto ${autoOn ? 'checked' : ''} />
+              <div>
+                <div style="font-weight:600;font-size:13.5px;">⚡ GitHub 새 버전 자동 업데이트</div>
+                <div style="font-size:12px;color:var(--text-secondary);margin-top:2px;">${escapeHtml(msg)}</div>
+              </div>
+            </label>
+            <button type="button" class="btn btn-sm ${avail ? 'btn-primary' : ''}" data-home-android-check>
+              ${avail ? `📲 ${escapeHtml(avail)} 업데이트` : '지금 업데이트 확인'}
+            </button>
+          </div>
+        `;
+        const chk = card.querySelector('[data-home-android-auto]') as HTMLInputElement | null;
+        chk?.addEventListener('change', async () => {
+          try {
+            const r = await api.androidSetAutoUpdate(chk.checked);
+            if (this.androidInfo) this.androidInfo.auto_update = r.auto_update;
+          } catch (err: any) {
+            this.callbacks.onToast(err?.message || '자동 업데이트 설정 변경 실패', true);
+          }
+        });
+        card.querySelector('[data-home-android-check]')?.addEventListener('click', async () => {
+          try {
+            const res = await api.androidUpdateNow();
+            this.callbacks.onToast(res.message);
+            this.androidInfo = await api.androidInfo();
+            renderAndroid(this.androidInfo);
+          } catch (err: any) {
+            this.callbacks.onToast(err?.message || '업데이트 확인 실패', true);
+          }
+        });
+      };
+
+      renderAndroid(this.androidInfo);
+      if (!this.androidInfo) {
+        void api
+          .androidInfo()
+          .then((info) => {
+            this.androidInfo = info;
+            if (document.body.contains(card)) renderAndroid(info);
+          })
+          .catch(() => {});
+      }
+      return;
+    }
+
+    const upd = this.updateStatus;
+    const autoUpdateOn = upd ? upd.auto_update : true;
+    const ver = upd?.current_version || this.snapshot.version || '1.1.0';
+    const pct =
+      upd && upd.total_bytes > 0
+        ? Math.min(100, Math.round((upd.downloaded_bytes / upd.total_bytes) * 100))
+        : 0;
+    const statusText = upd?.message || 'GitHub Releases에서 새 버전을 자동으로 확인합니다.';
+
+    card.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+        <span style="font-weight:700;font-size:15px;">🚀 PC 자동 실행 및 GitHub 자동 업데이트</span>
+        <span class="pill-badge">현재 v${escapeHtml(ver)}</span>
+      </div>
+
+      <div class="sync-toggle-row">
+        <label class="sync-toggle-label">
+          <input type="checkbox" data-home-autostart ${this.snapshot.autostart ? 'checked' : ''} />
+          <div>
+            <div style="font-weight:600;font-size:13.5px;">🔄 PC 재시작 시 자동 실행 (동기화 자동 시작)</div>
+            <div style="font-size:12px;color:var(--text-secondary);margin-top:2px;">
+              PC를 켜거나 다시 시작할 때 트레이에서 자동 실행되어 볼트를 실시간으로 동기화합니다.
+            </div>
+          </div>
+        </label>
+        <span class="pill-badge ${this.snapshot.autostart ? 'ok' : ''}">
+          ${this.snapshot.autostart ? '켜짐' : '꺼짐'}
+        </span>
+      </div>
+
+      <div class="sync-toggle-row">
+        <label class="sync-toggle-label">
+          <input type="checkbox" data-home-autoupdate ${autoUpdateOn ? 'checked' : ''} />
+          <div style="flex:1;">
+            <div style="font-weight:600;font-size:13.5px;">⚡ GitHub 새 버전 자동 업데이트</div>
+            <div style="font-size:12px;color:${upd?.error ? 'var(--danger)' : 'var(--text-secondary)'};margin-top:2px;">
+              ${escapeHtml(statusText)}
+            </div>
+            ${
+              upd?.downloading
+                ? `<div class="update-progress-track"><div class="update-progress-fill" style="width:${pct}%"></div></div>`
+                : ''
+            }
+          </div>
+        </label>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+          <button type="button" class="btn btn-sm" data-home-check-update ${upd?.checking || upd?.downloading || upd?.applying ? 'disabled' : ''}>
+            ${upd?.checking ? '확인 중…' : '🔄 업데이트 확인'}
+          </button>
+          ${
+            upd?.available_tag
+              ? `<button type="button" class="btn btn-sm btn-primary" data-home-apply-update ${upd.applying ? 'disabled' : ''}>
+                  ${upd.applying ? '재시작 중…' : `🚀 ${escapeHtml(upd.available_tag)} 지금 업데이트 및 재시작`}
+                </button>`
+              : ''
+          }
+        </div>
+      </div>
+    `;
+
+    const autoChk = card.querySelector('[data-home-autostart]') as HTMLInputElement | null;
+    autoChk?.addEventListener('change', async () => {
+      try {
+        const snap = await api.syncSetAutostart(autoChk.checked);
+        this.receiveSnapshot(snap);
+        this.callbacks.onToast(
+          autoChk.checked
+            ? 'PC 재시작 시 자동 실행 및 자동 동기화를 켰습니다.'
+            : 'PC 재시작 시 자동 실행을 껐습니다.'
+        );
+      } catch (err: any) {
+        this.callbacks.onToast(err?.message || '자동 실행 설정 실패', true);
+      }
+    });
+
+    const autoUpdChk = card.querySelector('[data-home-autoupdate]') as HTMLInputElement | null;
+    autoUpdChk?.addEventListener('change', async () => {
+      try {
+        const nextSt = await api.updateSetAuto(autoUpdChk.checked);
+        this.updateStatus = nextSt;
+        this.callbacks.onUpdateStatusChanged?.(nextSt);
+        this.populateHomeAutoCard(card);
+        this.callbacks.onToast(
+          nextSt.auto_update
+            ? 'GitHub 새 버전 자동 업데이트를 켰습니다.'
+            : 'GitHub 자동 업데이트를 껐습니다.'
+        );
+      } catch (err: any) {
+        this.callbacks.onToast(err?.message || '자동 업데이트 설정 실패', true);
+      }
+    });
+
+    card.querySelector('[data-home-check-update]')?.addEventListener('click', async () => {
+      try {
+        const nextSt = await api.updateCheck();
+        this.updateStatus = nextSt;
+        this.callbacks.onUpdateStatusChanged?.(nextSt);
+        this.populateHomeAutoCard(card);
+        this.callbacks.onToast(nextSt.message || '업데이트 확인 완료');
+      } catch (err: any) {
+        this.callbacks.onToast(err?.message || '업데이트 확인 실패', true);
+      }
+    });
+
+    card.querySelector('[data-home-apply-update]')?.addEventListener('click', () => {
+      if (this.callbacks.onApplyUpdate) {
+        void this.callbacks.onApplyUpdate();
+      } else {
+        void api.updateApply().catch((err: any) => {
+          this.callbacks.onToast(err?.message || '업데이트 적용 실패', true);
+        });
+      }
+    });
+  }
+
+  private renderLogsTab(
+    host: HTMLElement,
+    prevScrollTop: number | null = null,
+    wasNearBottom = true
+  ): void {
     const logs = this.snapshot.status?.logs || [];
     const card = document.createElement('div');
     card.className = 'sync-card';
@@ -2155,7 +2382,7 @@ export class SyncCenterController {
       this.callbacks.onToast('동기화 기록 전체를 복사했습니다.');
     });
 
-    const box = card.querySelector('[data-logs-box]')!;
+    const box = card.querySelector('[data-logs-box]') as HTMLElement;
     if (logs.length === 0) {
       box.innerHTML = `<div style="padding:24px;text-align:center;color:var(--text-muted);font-family:inherit;">동기화를 시작하면 여기에 기록이 표시됩니다.</div>`;
     } else {
@@ -2168,9 +2395,15 @@ export class SyncCenterController {
         `;
         box.appendChild(row);
       }
-      setTimeout(() => {
-        box.scrollTop = box.scrollHeight;
-      }, 0);
+      const shouldStickBottom = !this.logsInitialized || wasNearBottom;
+      this.logsInitialized = true;
+      requestAnimationFrame(() => {
+        if (shouldStickBottom) {
+          box.scrollTop = box.scrollHeight;
+        } else if (prevScrollTop !== null) {
+          box.scrollTop = prevScrollTop;
+        }
+      });
     }
 
     host.appendChild(card);
