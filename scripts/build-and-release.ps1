@@ -236,16 +236,15 @@ try {
         $notesBody = @"
 ## Onyx Studio $vTag 주요 개선 사항
 
-### 1. Windows 100% 순수 네이티브 Rust GUI (`eframe`/`egui` + `glow`) 완전 통합 — `WebView2Loader.dll` 의존성 영구 제거
-- **원인 해결**: `tao` / `wry` / `webview2-com`을 `Cargo.toml` 및 데스크톱 바이너리에서 완전히 제거하여, 어떤 Windows PC에서도 **`WebView2Loader.dll`이나 Edge WebView2 런타임 없이 단일 `OnyxStudio.exe`만으로 즉시 실행**됩니다.
-- **보안·성능 극대화**: 로컬 인바운드 포트 리스닝(`0개`) + 표준 Win32 OS DLL만 링크하며, 노트·볼트 AES-256-GCM 선택 암호화, 폴더 스타일(아이콘/색상), ⊞/⊟ 전체 접기/펼치기, GitHub 릴리즈 무중단 자동 업데이트 기능을 모두 네이티브 Rust UI로 제공합니다.
+### 1. WebView Notion 스튜디오 1:1 동일 순수 네이티브 Rust GUI (`eframe`/`egui` + `glow`, Zero `WebView2Loader.dll`)
+- **디자인·구조 1:1 복원**: Notion 스튜디오 팔레트(`#FFFFFF` / `#F7F7F5` / `#2383E2`), `[O]` 블루 아바타, 일일노트 `⚙️` 폴더 설정, 사이드바 드래그 앤 드롭, 틴트 커스텀 벡터 폴더 아이콘, `⊞/⊟` 전체 접기/펼치기, 태그 기본 숨김을 순수 네이티브 UI로 통합했습니다.
+- **3단 크롬 & 단일 문서 인플레이스 위지윅**: `[👁️ 뷰어 | 위지윅 모드 | 마크다운 분할]` 세그먼트, 50% 슬림 고밀도 도킹 툴바(8그룹), A4/전체폭 스테이지, 상단 룰러 배지, 좌우 여백 희미한 경계 가이드, 테두리 없는 28px 노션 제목, `10pt` 균일 본문과 블록 인플레이스 편집을 제공합니다.
+- **Zero `WebView2Loader.dll` 유지**: `tao`/`wry`/`webview2-com` 없이 단일 `OnyxStudio.exe`(로컬 포트 0개)로 즉시 실행됩니다.
 
-### 2. 외부 글 복사·붙여넣기 시 순수 일반 텍스트 붙여넣기 & 이미지 보존
-- **텍스트 속성 코드 100% 제거**: 외부 웹페이지·블로그·워드·메신저 등에서 글을 복사해 붙여넣을 때 글자 앞뒤로 붙던 HTML 태그·속성(`<span style="...">`, `<font>`, `<div>`, 제로폭 공백 `\u200B` 등)을 원천 차단하여 **순수 일반 텍스트**로만 깔끔하게 붙여넣습니다.
-- **이미지는 이미지 그대로 첨부 & 인라인 렌더링**:
-  - 화면 캡처(`Win+Shift+S`, PrintScreen `CF_DIB`/`PNG`), 브라우저 **이미지 복사**, 탐색기 이미지 파일 복사(`CF_HDROP`)는 볼트 `attachments/`에 자동 저장되고 문서 미리보기에서 **실제 그림으로 즉시 렌더링**됩니다.
-  - 글과 그림(`<img>`)이 함께 섞인 외부 웹 게시글을 복사해 붙여넣을 때도 **그림은 첨부 이미지로 보존**하고 **글은 코드 없는 일반 텍스트**로 정리합니다.
-  - 기존 노트에 남아 있던 외부 HTML 태그도 툴바 **`🧹 코드·태그 정리`** 버튼 한 번으로 이미지 손실 없이 일괄 제거할 수 있습니다.
+### 2. 벡터 플로우차트 엔진 · 선명한 표 · A4 인쇄/PDF · 3종 클러스터 그래프
+- **고화질 벡터 플로우차트 & 빌더**: Mermaid `flowchart TB/TD/BT/LR/RL`, `graph`, `sequenceDiagram`, `mindmap`을 Sugiyama 계층 레이아웃 · 5종 테마 · 곡선/직선/직각 경로로 렌더링하고 비주얼 플로우차트 빌더 및 SVG 내보내기를 지원합니다.
+- **표 & A4 PDF 출력**: 편집·뷰어·PDF 모두에서 `#CBD5E1`/`#94A3B8` 표 테두리가 선명하게 유지되며, A4 여백·인라인 SVG 플로우차트·첨부 이미지를 포함한 A4 인쇄 및 PDF 저장을 지원합니다.
+- **3종 레이아웃 그래프 & 동기화 개선**: `Cluster`/`Radial`/`Hierarchy` 그래프 뷰 + 오른쪽 인스펙터 카드, Obsidian 볼트 `🔌 연결 해제`·폴더 변경 초기화·1클릭 클라우드 드라이브 연동을 추가했습니다.
 
 ---
 
@@ -284,9 +283,9 @@ try {
         Write-Host "[OnyxStudio] Publishing $vTag release (--latest)..." -ForegroundColor Green
         if ($existingTags -contains $vTag) {
             Invoke-Gh release upload $vTag $outExe $outZip $outOnyxApk $outLegacyApk $sumsFile --clobber --repo bluewind201/obsidian-sync
-            Invoke-Gh release edit $vTag --title "Onyx Studio $vTag — 순수 네이티브 Rust GUI (Zero WebView2) & 깔끔한 텍스트·이미지 붙여넣기" --notes-file $notesPath --latest --repo bluewind201/obsidian-sync
+            Invoke-Gh release edit $vTag --title "Onyx Studio $vTag — WebView 1:1 노션 스튜디오 순수 네이티브 Rust UI 통합 (Zero WebView2 · 플로우차트 · A4 PDF · 클러스터 그래프)" --notes-file $notesPath --latest --repo bluewind201/obsidian-sync
         } else {
-            Invoke-Gh release create $vTag $outExe $outZip $outOnyxApk $outLegacyApk $sumsFile --target main --title "Onyx Studio $vTag — 순수 네이티브 Rust GUI (Zero WebView2) & 깔끔한 텍스트·이미지 붙여넣기" --notes-file $notesPath --latest --repo bluewind201/obsidian-sync
+            Invoke-Gh release create $vTag $outExe $outZip $outOnyxApk $outLegacyApk $sumsFile --target main --title "Onyx Studio $vTag — WebView 1:1 노션 스튜디오 순수 네이티브 Rust UI 통합 (Zero WebView2 · 플로우차트 · A4 PDF · 클러스터 그래프)" --notes-file $notesPath --latest --repo bluewind201/obsidian-sync
         }
     }
 } finally {

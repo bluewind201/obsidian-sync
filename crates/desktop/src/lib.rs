@@ -10,7 +10,11 @@ pub mod updater;
 pub mod vault;
 
 #[cfg(not(target_os = "android"))]
+pub mod flowchart;
+#[cfg(not(target_os = "android"))]
 pub mod graph_view;
+#[cfg(not(target_os = "android"))]
+pub mod print_pdf;
 #[cfg(not(target_os = "android"))]
 pub mod studio_ui;
 #[cfg(not(target_os = "android"))]

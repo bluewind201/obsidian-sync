@@ -189,7 +189,7 @@ impl SyncCenterState {
                             ui.vertical(|ui| {
                                 ui.horizontal(|ui| {
                                     ui.label(
-                                        RichText::new("🔄 실시간 동기화 센터")
+                                        RichText::new("🔄 Onyx 동기화 센터")
                                             .size(21.0)
                                             .strong()
                                             .color(pal.text_primary),
@@ -197,12 +197,12 @@ impl SyncCenterState {
                                     ui::pill_badge(
                                         ui,
                                         &format!("v{}", snap.version),
-                                        pal.accent_purple,
-                                        pal.accent_purple_soft,
+                                        pal.accent_blue,
+                                        pal.accent_blue_soft,
                                     );
                                 });
                                 ui.label(
-                                    RichText::new("Obsidian 볼트 및 일반 폴더를 Synology NAS, OneDrive, Google Drive, 네이버 클라우드/GCS, 공유 폴더와 실시간 동기화합니다.")
+                                    RichText::new("내 Obsidian 볼트를 Synology NAS, 클라우드 드라이브(OneDrive · Google Drive · 네이버 MYBOX/클라우드), 공유 폴더와 실시간 동기화합니다.")
                                         .size(12.5)
                                         .color(pal.text_secondary),
                                 );
@@ -269,7 +269,7 @@ impl SyncCenterState {
                                                 .size(13.5)
                                                 .strong()
                                                 .color(if active {
-                                                    pal.accent_purple
+                                                    pal.accent_blue
                                                 } else {
                                                     pal.text_secondary
                                                 }),
@@ -338,7 +338,7 @@ impl SyncCenterState {
 
         let (dot_color, hero_title, hero_sub) = if running && st.is_some_and(|s| s.syncing) {
             (
-                pal.accent_purple,
+                pal.accent_blue,
                 "동기화 중…".to_string(),
                 "변경된 파일을 주고받고 있습니다".to_string(),
             )
@@ -397,7 +397,8 @@ impl SyncCenterState {
                                     .color(Color32::WHITE)
                                     .strong(),
                             )
-                            .fill(pal.accent_purple)
+                            .fill(pal.accent_blue)
+                            .stroke(Stroke::NONE)
                             .rounding(Rounding::same(8.0))
                             .min_size(egui::vec2(120.0, 34.0)),
                         );
@@ -445,7 +446,8 @@ impl SyncCenterState {
                                         .color(Color32::WHITE)
                                         .strong(),
                                 )
-                                .fill(pal.accent_purple)
+                                .fill(pal.accent_blue)
+                                .stroke(Stroke::NONE)
                                 .rounding(Rounding::same(8.0))
                                 .min_size(egui::vec2(114.0, 34.0)),
                             )
@@ -513,15 +515,15 @@ impl SyncCenterState {
         ui::card(ui, pal, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
-                    RichText::new(format!("동기화 폴더 ({})", self.draft_cfg.profiles.len()))
-                        .size(15.5)
-                        .strong(),
+                    RichText::new(format!(
+                        "연결된 Obsidian 볼트 ({})",
+                        self.draft_cfg.profiles.len()
+                    ))
+                    .size(15.5)
+                    .strong(),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("＋ 일반 폴더").clicked() {
-                        self.create_profile(backend, ProfileKind::Folder);
-                    }
-                    if ui.button("＋ Obsidian 볼트").clicked() {
+                    if ui.button("＋ Obsidian 볼트 추가").clicked() {
                         self.create_profile(backend, ProfileKind::Obsidian);
                     }
                 });
@@ -531,11 +533,12 @@ impl SyncCenterState {
             if self.draft_cfg.profiles.is_empty() {
                 ui.label(
                     RichText::new(
-                        "아직 등록된 동기화 프로필이 없습니다. 위의 버튼으로 폴더를 추가해 보세요.",
+                        "아직 등록된 동기화 프로필이 없습니다. 위의 버튼으로 Obsidian 볼트를 추가해 보세요.",
                     )
                     .color(pal.text_muted),
                 );
             } else {
+                let mut disconnect_idx: Option<usize> = None;
                 let profiles_snapshot = self.draft_cfg.profiles.clone();
                 for (idx, p) in profiles_snapshot.iter().enumerate() {
                     let pst = st_clone
@@ -544,7 +547,7 @@ impl SyncCenterState {
                     let (p_dot, status_line, is_err) = if !p.enabled {
                         (pal.text_muted, "꺼짐".to_string(), false)
                     } else if pst.is_some_and(|x| x.syncing) {
-                        (pal.accent_purple, "동기화 중…".to_string(), false)
+                        (pal.accent_blue, "동기화 중…".to_string(), false)
                     } else if let Some(err) = pst.and_then(|x| x.last_error.as_ref()) {
                         (
                             pal.danger,
@@ -567,21 +570,23 @@ impl SyncCenterState {
                             ui::status_dot(ui, p_dot, 9.0);
                             ui.label(RichText::new(p.display_name()).strong().size(14.5));
                             ui.label(
-                                RichText::new(format!(
-                                    "{} · {}",
-                                    match p.kind {
-                                        ProfileKind::Obsidian => "Obsidian",
-                                        ProfileKind::Folder => "폴더",
-                                    },
-                                    p.mode.display_name()
-                                ))
-                                .size(12.0)
-                                .color(pal.text_muted),
+                                RichText::new(format!("Obsidian · {}", p.mode.display_name()))
+                                    .size(12.0)
+                                    .color(pal.text_muted),
                             );
 
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
+                                    if ui
+                                        .small_button("🔌 연결 해제")
+                                        .on_hover_text(
+                                            "이 볼트 동기화 연결을 해제합니다 (PC 파일은 유지됨)",
+                                        )
+                                        .clicked()
+                                    {
+                                        disconnect_idx = Some(idx);
+                                    }
                                     if ui.button("설정").clicked() {
                                         self.selected_idx = idx;
                                         self.confirm_delete = false;
@@ -636,6 +641,33 @@ impl SyncCenterState {
                         }));
                     });
                     ui.add_space(6.0);
+                }
+                if let Some(d_idx) = disconnect_idx {
+                    if d_idx < self.draft_cfg.profiles.len() {
+                        let removed = self.draft_cfg.profiles.remove(d_idx);
+                        let removed_name = removed.display_name();
+                        self.ignore_texts.remove(&removed.id);
+                        self.selected_idx = self.selected_idx.saturating_sub(1);
+                        let mut st_guard = backend.lock().unwrap();
+                        let has_service = st_guard.sync.service.is_some();
+                        st_guard.sync.reset_profile(removed.id);
+                        let saved_ok = st_guard.sync.save_config(
+                            self.draft_cfg.clone(),
+                            !self.draft_cfg.profiles.is_empty() && has_service,
+                        );
+                        if saved_ok {
+                            let cfg_clone = st_guard.sync.cfg.clone();
+                            st_guard.workspace.state.sync_vaults_with_config(&cfg_clone);
+                            let _ = st_guard.workspace.save_and_refresh_watcher();
+                        }
+                        *snap = st_guard.sync.snapshot();
+                        action = Some(SyncUiAction::Toast(
+                            format!(
+                                "'{removed_name}' 동기화 연결을 해제했습니다 (로컬 파일 유지)."
+                            ),
+                            false,
+                        ));
+                    }
                 }
             }
 
@@ -832,10 +864,11 @@ impl SyncCenterState {
                         pal.text_primary
                     }))
                     .fill(if selected {
-                        pal.accent_purple
+                        pal.accent_blue
                     } else {
                         pal.bg_inset
                     })
+                    .stroke(Stroke::NONE)
                     .rounding(Rounding::same(99.0));
                     if ui.add(btn).clicked() && self.selected_idx != i {
                         self.selected_idx = i;
@@ -843,11 +876,8 @@ impl SyncCenterState {
                         self.otp_input.clear();
                     }
                 }
-                if ui.button("＋ Obsidian 볼트").clicked() {
+                if ui.button("＋ Obsidian 볼트 추가").clicked() {
                     self.create_profile(backend, ProfileKind::Obsidian);
-                }
-                if ui.button("＋ 일반 폴더 (사진 등)").clicked() {
-                    self.create_profile(backend, ProfileKind::Folder);
                 }
             });
         });
@@ -886,7 +916,8 @@ impl SyncCenterState {
                         egui::Button::new(
                             RichText::new(start_label).color(Color32::WHITE).strong(),
                         )
-                        .fill(pal.accent_purple)
+                        .fill(pal.accent_blue)
+                        .stroke(Stroke::NONE)
                         .rounding(Rounding::same(8.0))
                         .min_size(egui::vec2(150.0, 34.0)),
                     )
@@ -1078,26 +1109,28 @@ impl SyncCenterState {
 
         ui.add_space(10.0);
 
-        // ② 내 PC 폴더
+        // ② 내 PC Obsidian 볼트 폴더
         let step2_done = !self.draft_cfg.profiles[idx].local_path.trim().is_empty();
-        ui::step_card(ui, pal, 2, "내 PC 폴더", step2_done, |ui| {
+        ui::step_card(ui, pal, 2, "내 PC 볼트 폴더", step2_done, |ui| {
+            let pid_for_reset = self.draft_cfg.profiles[idx].id.clone();
             let p = &mut self.draft_cfg.profiles[idx];
-            let desc = match p.kind {
-                ProfileKind::Obsidian => {
-                    "Obsidian 볼트(보관함) 폴더를 고르세요. .obsidian 폴더가 들어 있는 폴더입니다. (새 기기라면 빈 폴더여도 괜찮습니다.)"
-                }
-                ProfileKind::Folder => "동기화할 폴더를 고르세요 (예: 사진, 문서 폴더).",
-            };
-            ui.label(RichText::new(desc).size(12.5).color(pal.text_secondary));
+            ui.label(
+                RichText::new(
+                    "Obsidian 볼트(보관함) 폴더를 선택하세요. 폴더 변경 시 이전 동기화 상태 기록이 자동으로 초기화되어 안전하게 새 볼트로 전환됩니다.",
+                )
+                .size(12.5)
+                .color(pal.text_secondary),
+            );
             ui.horizontal(|ui| {
                 ui.add(
                     egui::TextEdit::singleline(&mut p.local_path)
                         .hint_text(r"C:\Users\나\Documents\MyVault")
-                        .desired_width(ui.available_width() - 105.0),
+                        .desired_width((ui.available_width() - 210.0).max(160.0)),
                 );
-                if ui.button("폴더 선택…").clicked() {
+                if ui.button("📂 폴더 변경…").clicked() {
                     if let Some(picked) = platform::pick_folder() {
-                        if p.name.trim().is_empty() || p.name == "새 폴더" {
+                        let changed = p.local_path.trim() != picked.trim();
+                        if p.name.trim().is_empty() || p.name == "새 폴더" || changed {
                             if let Some(last) = picked
                                 .trim_end_matches(['/', '\\'])
                                 .rsplit(['/', '\\'])
@@ -1107,7 +1140,23 @@ impl SyncCenterState {
                             }
                         }
                         p.local_path = picked;
+                        if changed {
+                            backend
+                                .lock()
+                                .unwrap()
+                                .sync
+                                .reset_profile(pid_for_reset.clone());
+                        }
                     }
+                }
+                if !p.local_path.trim().is_empty()
+                    && ui
+                        .button("🔌 연결 해제")
+                        .on_hover_text("연결된 로컬 볼트 폴더 경로를 지우고 상태를 초기화합니다")
+                        .clicked()
+                {
+                    p.local_path.clear();
+                    backend.lock().unwrap().sync.reset_profile(pid_for_reset);
                 }
             });
         });
@@ -1120,7 +1169,41 @@ impl SyncCenterState {
 
         ui::step_card(ui, pal, 3, "저장소", step3_done, |ui| {
             let p_id = self.draft_cfg.profiles[idx].id.clone();
-            let cur_kind = self.draft_cfg.profiles[idx].backend.kind();
+            let detected_top = self.detected_clouds.clone();
+            if !detected_top.is_empty() {
+                ui::sub_card(ui, pal, |ui| {
+                    ui.label(
+                        RichText::new("☁️ API 설정 없이 PC 클라우드 드라이브로 1클릭 간편 연결")
+                            .strong()
+                            .size(12.5)
+                            .color(pal.accent_blue),
+                    );
+                    ui.label(
+                        RichText::new(
+                            "OneDrive · Google Drive · Synology Drive · 네이버 MYBOX가 PC에 설치되어 있으면 복잡한 OAuth/API 키 없이 바로 동기화할 수 있습니다.",
+                        )
+                        .size(11.5)
+                        .color(pal.text_secondary),
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        for dc in &detected_top {
+                            if ui
+                                .small_button(format!("☁️ {} 바로 연결", dc.label))
+                                .clicked()
+                            {
+                                let target =
+                                    sync_controller::prepare_folder_target(&dc.path, "OnyxVault")
+                                        .unwrap_or_else(|_| dc.path.clone());
+                                self.draft_cfg.profiles[idx].backend =
+                                    BackendConfig::LocalFolder { path: target };
+                            }
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+            }
+            let cur_backend_kind = self.draft_cfg.profiles[idx].backend.kind();
+            let cur_kind = cur_backend_kind;
             let card_w = ((ui.available_width() - 10.0) / 2.0).max(200.0);
 
             egui::Grid::new("backend_choice_grid")
@@ -1466,7 +1549,7 @@ impl SyncCenterState {
                                                 .size(20.0)
                                                 .strong()
                                                 .monospace()
-                                                .color(pal.accent_purple),
+                                                .color(pal.accent_blue),
                                         );
                                         if ui.button("📋 코드 복사").clicked() {
                                             ui.output_mut(|o| o.copied_text = code.clone());
@@ -1532,7 +1615,8 @@ impl SyncCenterState {
                                         .color(Color32::WHITE)
                                         .strong(),
                                 )
-                                .fill(pal.accent_purple)
+                                .fill(pal.accent_blue)
+                                .stroke(Stroke::NONE)
                                 .rounding(Rounding::same(7.0)),
                             )
                             .clicked()
@@ -2106,7 +2190,8 @@ impl SyncCenterState {
                                     .color(Color32::WHITE)
                                     .strong(),
                             )
-                            .fill(pal.accent_purple),
+                            .fill(pal.accent_blue)
+                            .stroke(Stroke::NONE),
                         )
                         .clicked()
                     {
