@@ -1,19 +1,23 @@
-# Onyx Studio (v1.1.1) — Obsidian 볼트 호환 Notion 마크다운 스튜디오 & 실시간 동기화 (Windows · Android 통합)
+# Onyx Studio (v1.2.0) — 100% 순수 네이티브 Rust 스튜디오(Windows) · Android 스튜디오 & 6종 실시간 동기화
 
-**Obsidian 볼트 호환 지식 베이스 + 모바일 전용 고가독성 MD 읽기 뷰어 / 초간편 쓰기 모드 + PC 전체 스튜디오(TOAST UI 확장 · `flowchart TB` 벡터 다이어그램 · 시각적 빌더 · 우클릭 컨텍스트 도구) + A4 1.5cm 여백/PDF 출력 + AES-256-GCM 암호화 + 6종 클라우드/NAS 실시간 동기화**를 **Windows(`OnyxStudio.exe`)와 Android(`OnyxStudio-android.apk`) 모두**에서 하나의 통합 앱으로 제공합니다.
+**Windows 100% 순수 네이티브 Rust GUI(`eframe`/`egui` + `glow`, Zero WebView2 · Zero 로컬 포트) + Android 고가독성 스튜디오 + 외부 글 순수 일반 텍스트 & 이미지 보존 붙여넣기 + AES-256-GCM 암호화 + 6종 클라우드/NAS 실시간 동기화**를 **Windows(`OnyxStudio.exe`)와 Android(`OnyxStudio-android.apk`)**에서 하나의 통합 생태계로 제공합니다.
 
 > 기존 `Obsidian Sync` (`v0.7.0` 이하)에서 **`Onyx Studio` (`v0.8.0+`)** 로 이름이 새롭게 변경되었습니다. 기존 설정과 동기화 상태는 첫 실행 시 자동으로 `OnyxStudio` 폴더로 마이그레이션되며, Android 앱(`io.bluewind.obsidiansync`)도 앱 내 업데이트로 바로 이어집니다.
 
 노트를 편집하고 저장하면 몇 초 안에 내 저장소(Synology NAS, OneDrive, Google Drive, 네이버 클라우드 등)로 올라가고, 다른 기기에서 바꾼 내용은 자동으로 내려받습니다.
 Obsidian 공식 제품이 아닌 개인 오픈소스 프로젝트입니다.
 
-## 주요 기능 (v1.1.1)
+## 주요 기능 (v1.2.0)
 
-### 0. v1.1.1 신규 개선 및 편의 기능
-- **외부 글 복사·붙여넣기 시 순수 일반 텍스트 붙여넣기 & 이미지 보존**:
-  - 외부 웹페이지·블로그·MS Word·메신저 등에서 글을 복사해 붙여넣을 때 HTML 인라인 속성(`<span style="color:...; font-size:...">`, `<div>`, `<b>`, `<a href>`, `<mark>`, 제로폭 공백 `\u200B` 등)이 함께 따라와 글자 앞뒤로 코드가 붙던 문제를 원천 차단했습니다.
-  - 화면 캡처·브라우저 **이미지 복사**·이미지 파일 붙여넣기는 기존처럼 볼트 `attachments/` 폴더에 이미지로 바로 저장·삽입되며, **글과 그림(`<img>`)이 함께 포함된 외부 웹 게시글**을 복사해 붙여넣을 때도 그림은 그림으로(인라인 `data:image`는 첨부파일로 자동 분리 저장), 글은 속성 코드 없는 **순수 일반 텍스트**로 깔끔하게 붙여넣어집니다.
-  - 에디터 우클릭 컨텍스트 메뉴에 **`📥 붙여넣기 — 일반 텍스트 · 이미지 (Ctrl+V)`** 항목을 추가하고, `Ctrl+S` 저장 단축키가 TOAST UI 기본 취소선(`~~~~`) 단축키와 충돌하지 않도록 수정했습니다.
+### 0. v1.2.0 핵심 아키텍처 통합 (Zero WebView2 & 깔끔 붙여넣기)
+- **Windows 100% 순수 네이티브 Rust GUI (`eframe`/`egui` + `glow`) 완전 통합 — `WebView2Loader.dll` 영구 제거**:
+  - `tao` / `wry` / `webview2-com` 의존성을 완전히 제거하여, 어떤 Windows PC(사내 보안망·폐쇄망 포함)에서도 **`WebView2Loader.dll`이나 Microsoft Edge WebView2 런타임 없이 `OnyxStudio.exe` 단일 파일만으로 즉시 실행**됩니다.
+  - 로컬 인바운드 포트 리스닝(`0개`) + 표준 Win32 OS 시스템 DLL만 링크하며, 인메모리로 동기화·암호화·그래프 엔진과 직접 연동됩니다.
+- **외부 글 복사·붙여넣기 시 순수 일반 텍스트 붙여넣기 & 이미지 자동 보존**:
+  - 외부 웹페이지·블로그·MS Word·메신저 등에서 글을 복사해 붙여넣을 때 HTML 인라인 속성(`<span style="color:...; font-size:...">`, `<div>`, `<b>`, `<a href>`, `<mark>`, 제로폭 공백 `\u{200B}` 등)이 함께 따라와 글자 앞뒤로 코드가 붙던 문제를 Windows 네이티브 클립보드(`win_clipboard.rs`)와 Android 웹 에디터(`pasteClean.ts`) 양쪽에서 원천 차단했습니다.
+  - 화면 캡처(`Win+Shift+S`, PrintScreen `CF_DIB`/`PNG`)·브라우저 **이미지 복사**·탐색기 이미지 파일 복사(`CF_HDROP`)는 볼트 `attachments/` 폴더에 이미지로 바로 저장되며 문서 미리보기에서 **실제 그림으로 인라인 렌더링**됩니다.
+  - **글과 그림(`<img>`)이 함께 포함된 외부 웹 게시글**을 복사해 붙여넣을 때도 그림은 볼트 첨부 이미지로 자동 저장·보존하고, 글은 속성 코드 없는 **순수 일반 텍스트**로 깔끔하게 붙여넣어집니다.
+  - 기존 노트에 남아 있던 외부 HTML 속성 태그도 툴바 **`🧹 코드·태그 정리`** 버튼 한 번으로 이미지 손실 없이 일괄 제거할 수 있습니다.
 
 ### 0-1. v1.1.0 주요 개선 사항
 - **스크롤 위치 고정 (위로 튀는 현상 완전 해결)**: 긴 노트 편집·툴바 클릭·자동 저장·동기화 센터 폴링·오른쪽 인스펙터 갱신 중에도 스크롤 위치가 맨 위로 되돌아가지 않습니다.
@@ -69,7 +73,7 @@ Obsidian 공식 제품이 아닌 개인 오픈소스 프로젝트입니다.
 
 | 기기 | 파일 | 설치 |
 | --- | --- | --- |
-| Windows 10/11 | `OnyxStudio-windows-x64.zip` / `OnyxStudio.exe` | 압축 해제 후 `OnyxStudio.exe` 단일 파일 실행 (설치 불필요, WebView2 내장 활용) |
+| Windows 10/11 | `OnyxStudio-windows-x64.zip` / `OnyxStudio.exe` | 압축 해제 후 `OnyxStudio.exe` 단일 파일 실행 (설치·외부 DLL·WebView2 일절 불필요) |
 | Android 11+ | `OnyxStudio-android.apk` | 파일을 열어 설치. Notion/TOAST UI 편집 스튜디오 + 상주 실시간 동기화 모두 포함, 앱 내 자동 업데이트 지원 |
 
 ## 안전장치

@@ -665,6 +665,33 @@ impl App {
         self.set_msg("로그아웃했습니다", false);
     }
 
+    pub fn oauth_save_manual_token(
+        &mut self,
+        backend: &BackendConfig,
+        access_token: &str,
+        refresh_token: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let access = access_token.trim();
+        if access.is_empty() {
+            anyhow::bail!("Access Token을 입력해 주세요.");
+        }
+        let path = auth::token_path(&self.data_dir, backend)
+            .ok_or_else(|| anyhow::anyhow!("OAuth 로그인이 필요 없는 저장소입니다."))?;
+        let rt = refresh_token
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let token = auth::OAuthToken {
+            access_token: access.to_string(),
+            refresh_token: rt,
+            expires_at: chrono::Utc::now().timestamp() + 3600,
+        };
+        auth::save_token(&path, &token)?;
+        self.oauth_cancel();
+        self.set_msg("수동 OAuth 토큰을 저장했습니다.", false);
+        Ok(())
+    }
+
     pub fn set_autostart(&mut self, enable: bool) {
         match platform::set_autostart(enable) {
             Ok(()) => {

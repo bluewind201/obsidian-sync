@@ -15,4 +15,5 @@ ObsidianSync-*.zip
 ObsidianSync-*.apk
 SHA256SUMS.txt
 android/app/src/main/jniLibs/
+crates/desktop/icons/
 
