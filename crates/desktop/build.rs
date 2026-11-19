@@ -262,7 +262,9 @@ fn main() {
         };
 
         let mut embedded_custom_icon = false;
-        if let (Some(ico_path), Ok("gnu")) = (&chosen_ico, env::var("CARGO_CFG_TARGET_ENV").as_deref()) {
+        if let (Some(ico_path), Ok("gnu")) =
+            (&chosen_ico, env::var("CARGO_CFG_TARGET_ENV").as_deref())
+        {
             println!("cargo:rerun-if-changed={}", ico_path.display());
             let rc_path = out_dir.join("onyx_studio_custom.rc");
             let obj_path = out_dir.join("onyx_studio_custom_icon.o");
@@ -355,7 +357,11 @@ fn find_webview2_loader_dll(out_dir: &Path) -> Option<PathBuf> {
         };
         let mut matches: Vec<PathBuf> = crates
             .flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with("webview2-com-sys-"))
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("webview2-com-sys-")
+            })
             .map(|e| e.path().join("x64/WebView2Loader.dll"))
             .filter(|p| p.is_file())
             .collect();

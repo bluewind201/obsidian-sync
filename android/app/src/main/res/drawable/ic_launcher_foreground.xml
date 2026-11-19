@@ -1,17 +1,65 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Onyx Studio 앱 아이콘 전경: 4면 패싯 오닉스 크리스탈 젬 -->
-<vector xmlns:android="http://schemas.android.com/apk/res/android"
+<!-- Onyx Studio 앱 아이콘 전경: 듀얼 싱크 링 + 퍼플 패싯 크리스탈 젬 (데스크톱 icons/icon.svg 통일) -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
-    <!-- Top-Left Bright Sky Facet -->
-    <path android:pathData="M54,23 L30,54 L54,54 Z" android:fillColor="#FF38BDF8"/>
-    <!-- Top-Right Indigo Facet -->
-    <path android:pathData="M54,23 L78,54 L54,54 Z" android:fillColor="#FF818CF8"/>
-    <!-- Bottom-Left Deep Ocean Facet -->
-    <path android:pathData="M30,54 L54,85 L54,54 Z" android:fillColor="#FF0284C7"/>
-    <!-- Bottom-Right Royal Indigo Facet -->
-    <path android:pathData="M78,54 L54,85 L54,54 Z" android:fillColor="#FF6366F1"/>
-    <!-- Outer Crisp Specular Stroke -->
-    <path android:pathData="M54,23 L78,54 L54,85 L30,54 Z" android:fillColor="#00000000" android:strokeColor="#99E0F2FE" android:strokeWidth="1.5" android:strokeLineJoin="round"/>
-    <!-- Core White Crystal Highlight -->
-    <path android:pathData="M54,41 L64,54 L54,67 L44,54 Z" android:fillColor="#FFF8FAFC"/>
+    <!-- Upper Dual Orbit Sync Ring + Cyan Arrow -->
+    <path android:pathData="M31.0,50.8 A23.2,23.2 0 0,1 75.1,44.0"
+        android:fillColor="#00000000" android:strokeWidth="3.5" android:strokeLineCap="round">
+        <aapt:attr name="android:strokeColor">
+            <gradient android:type="linear" android:startX="31" android:startY="44" android:endX="75" android:endY="44"
+                android:startColor="#FF22D3EE" android:endColor="#FFA855F7"/>
+        </aapt:attr>
+    </path>
+    <path android:pathData="M78.0,47.4 L78.6,38.3 L70.3,42.1 Z" android:fillColor="#FF22D3EE"/>
+
+    <!-- Lower Dual Orbit Sync Ring + Pink Arrow -->
+    <path android:pathData="M77.0,57.2 A23.2,23.2 0 0,1 32.9,64.0"
+        android:fillColor="#00000000" android:strokeWidth="3.5" android:strokeLineCap="round">
+        <aapt:attr name="android:strokeColor">
+            <gradient android:type="linear" android:startX="77" android:startY="64" android:endX="33" android:endY="57"
+                android:startColor="#FFF472B6" android:endColor="#FF38BDF8"/>
+        </aapt:attr>
+    </path>
+    <path android:pathData="M30.0,60.6 L29.4,69.7 L37.7,65.9 Z" android:fillColor="#FFF472B6"/>
+
+    <!-- Faceted Purple Obsidian Crystal Core -->
+    <path android:pathData="M54.0,31.0 L40.9,47.0 L54.0,43.2 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient android:type="linear" android:startX="41" android:startY="31" android:endX="54" android:endY="47">
+                <item android:offset="0.0" android:color="#FFE9D5FF"/>
+                <item android:offset="0.5" android:color="#FFA855F7"/>
+                <item android:offset="1.0" android:color="#FF6B21A8"/>
+            </gradient>
+        </aapt:attr>
+    </path>
+    <path android:pathData="M54.0,31.0 L67.1,47.0 L54.0,43.2 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient android:type="linear" android:startX="54" android:startY="31" android:endX="67" android:endY="47">
+                <item android:offset="0.0" android:color="#FFC084FC"/>
+                <item android:offset="0.55" android:color="#FF7E22CE"/>
+                <item android:offset="1.0" android:color="#FF3B0764"/>
+            </gradient>
+        </aapt:attr>
+    </path>
+    <path android:pathData="M40.9,47.0 L54.0,43.2 L54.0,77.0 L39.1,59.9 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient android:type="linear" android:startX="46" android:startY="43" android:endX="46" android:endY="77">
+                <item android:offset="0.0" android:color="#FFF3E8FF"/>
+                <item android:offset="0.35" android:color="#FFC084FC"/>
+                <item android:offset="1.0" android:color="#FF581C87"/>
+            </gradient>
+        </aapt:attr>
+    </path>
+    <path android:pathData="M67.1,47.0 L54.0,43.2 L54.0,77.0 L68.9,59.9 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient android:type="linear" android:startX="54" android:startY="43" android:endX="69" android:endY="77">
+                <item android:offset="0.0" android:color="#FFC084FC"/>
+                <item android:offset="0.55" android:color="#FF7E22CE"/>
+                <item android:offset="1.0" android:color="#FF3B0764"/>
+            </gradient>
+        </aapt:attr>
+    </path>
+    <path android:pathData="M54.0,31.0 L48.7,44.7 L54.0,77.0 L59.3,44.7 Z" android:fillColor="#47F3E8FF"/>
+    <path android:pathData="M40.9,47.0 L54.0,43.2 L67.1,47.0" android:fillColor="#00000000" android:strokeColor="#A6FFFFFF" android:strokeWidth="0.7" android:strokeLineJoin="round"/>
+    <path android:pathData="M54.0,31.0 L54.0,77.0" android:fillColor="#00000000" android:strokeColor="#8CFFFFFF" android:strokeWidth="0.7"/>
 </vector>

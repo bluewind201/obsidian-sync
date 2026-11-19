@@ -110,6 +110,17 @@ try {
     $builtExe = Join-Path $env:CARGO_TARGET_DIR "release\OnyxStudio.exe"
     if (-not (Test-Path $builtExe)) { throw "Built executable not found: $builtExe" }
 
+    # Gate: Verify no external WebView2Loader.dll PE import (embedded shim only -> single standalone EXE)
+    if (Test-Path "C:\mingw64\bin\objdump.exe") {
+        $dllImports = & "C:\mingw64\bin\objdump.exe" -p $builtExe | Select-String "DLL Name:"
+        Write-Host "PE DLL Imports:" -ForegroundColor DarkGray
+        $dllImports | ForEach-Object { Write-Host "  $($_.Line.Trim())" -ForegroundColor DarkGray }
+        if ($dllImports | Where-Object { $_.Line -match "WebView2Loader" }) {
+            throw "FATAL: External WebView2Loader.dll import detected in $builtExe! Embedded shim required for single-EXE portability."
+        }
+        Write-Host "Verified standalone PE imports (embedded WebView2Loader shim, 0 external WebView2Loader.dll import)" -ForegroundColor Green
+    }
+
     # Optional Authenticode code signing if matching local CodeSigning cert exists
     $signCert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert -ErrorAction SilentlyContinue |
         Where-Object { $_.Subject -match 'Obsidian|Onyx|Bluewind' } |

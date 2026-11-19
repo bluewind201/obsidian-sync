@@ -6,83 +6,25 @@ use std::sync::{Arc, Mutex};
 
 pub type SharedTrigger = Arc<Mutex<Option<Trigger>>>;
 
-/// Onyx Studio 앱 아이콘 RGBA 생성 (딥 오닉스 스퀘클 배경 + 4면 패싯 크리스탈 젬)
+/// Onyx Studio 앱 아이콘 RGBA 반환 (퍼플 크리스탈 + 듀얼 싱크 링: `icons/icon.png` 기반)
 pub fn icon_rgba(size: u32) -> Vec<u8> {
-    let mut v = Vec::with_capacity((size * size * 4) as usize);
-    let half = (size as f32 - 1.0) * 0.5;
-    let max_d = size.max(1) as f32;
-    let lerp = |a: f32, b: f32, t: f32| -> u8 { (a + (b - a) * t).round().clamp(0.0, 255.0) as u8 };
-    let blend = |bg: [u8; 4], fg: [u8; 3], alpha: f32| -> [u8; 4] {
-        let a = alpha.clamp(0.0, 1.0);
-        [
-            lerp(bg[0] as f32, fg[0] as f32, a),
-            lerp(bg[1] as f32, fg[1] as f32, a),
-            lerp(bg[2] as f32, fg[2] as f32, a),
-            255,
-        ]
-    };
+    const ICON_64: &[u8] = include_bytes!("../icons/icon_64.rgba");
+    const ICON_32: &[u8] = include_bytes!("../icons/icon_32.rgba");
 
-    for y in 0..size {
-        for x in 0..size {
-            let nx = if half > 0.0 {
-                (x as f32 - half) / half
-            } else {
-                0.0
-            };
-            let ny = if half > 0.0 {
-                (y as f32 - half) / half
-            } else {
-                0.0
-            };
-
-            // Rounded-square SDF (corner radius 0.28 in normalized -1..1 space)
-            let qx = (nx.abs() - 0.68).max(0.0);
-            let qy = (ny.abs() - 0.68).max(0.0);
-            let sdf = (qx * qx + qy * qy).sqrt() - 0.28;
-            let px_edge = 2.0 / max_d;
-            let bg_alpha = (0.5 - sdf / px_edge).clamp(0.0, 1.0);
-
-            if bg_alpha <= 0.0 {
-                v.extend_from_slice(&[0, 0, 0, 0]);
-                continue;
-            }
-
-            // Deep obsidian slate gradient
-            let t = ((ny + 1.0) * 0.5).clamp(0.0, 1.0);
-            let mut px = [
-                lerp(15.0, 30.0, t),
-                lerp(23.0, 41.0, t),
-                lerp(42.0, 59.0, t),
-                (bg_alpha * 255.0).round().clamp(0.0, 255.0) as u8,
-            ];
-
-            // Subtle inner sky-indigo rim along squircle border
-            let rim = 1.0 - ((sdf + 0.04).abs() / 0.04).clamp(0.0, 1.0);
-            if rim > 0.0 && bg_alpha > 0.9 {
-                px = blend(px, [56, 189, 248], rim * 0.35);
-            }
-
-            // Outer crystal gem silhouette (elongated diamond / hex-cut)
-            let gem_d = (nx.abs() * 1.24 + ny.abs()) - 0.66;
-            let gem_cov = (0.5 - gem_d / (px_edge * 1.2)).clamp(0.0, 1.0);
-            if gem_cov > 0.0 && bg_alpha > 0.9 {
-                let facet = match (nx >= 0.0, ny >= 0.0) {
-                    (false, false) => [56, 189, 248], // top-left bright cyan (#38BDF8)
-                    (true, false) => [129, 140, 248], // top-right light indigo (#818CF8)
-                    (false, true) => [2, 132, 199],   // bottom-left ocean blue (#0284C7)
-                    (true, true) => [99, 102, 241],   // bottom-right indigo (#6366F1)
-                };
-                px = blend(px, facet, gem_cov);
-
-                // Inner crisp specular diamond facet
-                let core_d = (nx.abs() * 1.24 + ny.abs()) - 0.25;
-                let core_cov = (0.5 - core_d / (px_edge * 1.2)).clamp(0.0, 1.0);
-                if core_cov > 0.0 {
-                    px = blend(px, [248, 250, 252], core_cov * 0.92);
-                }
-            }
-
-            v.extend_from_slice(&px);
+    if size == 64 {
+        return ICON_64.to_vec();
+    }
+    if size == 32 {
+        return ICON_32.to_vec();
+    }
+    let sz = size.max(1);
+    let mut v = Vec::with_capacity((sz * sz * 4) as usize);
+    for y in 0..sz {
+        let sy = ((y * 64) / sz).min(63) as usize;
+        for x in 0..sz {
+            let sx = ((x * 64) / sz).min(63) as usize;
+            let off = (sy * 64 + sx) * 4;
+            v.extend_from_slice(&ICON_64[off..off + 4]);
         }
     }
     v
