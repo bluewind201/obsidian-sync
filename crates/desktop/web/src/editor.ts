@@ -60,6 +60,17 @@ import {
   dehydrateMarkdownMediaUrls,
   hydrateMarkdownMediaUrls,
 } from './api';
+import {
+  classifyClipboardData,
+  CleanPasteSegment,
+  dataUrlToImageBlob,
+  extractPlainTextAndImagesFromHtml,
+  normalizePastedPlainText,
+  ONYX_INTERNAL_CLIPBOARD_MIME,
+} from './pasteClean';
+
+let toastPmViewMod: any = null;
+let toastPmModelMod: any = null;
 
 export interface CalloutPreset {
   type: string;
@@ -609,7 +620,9 @@ function makeHtmlTagRenderer(tagName: string) {
  * safe HTML renderers for rich typography, callouts, toggles, columns, and page breaks.
  */
 function notionRichPlugin(context: PluginContext): PluginInfo {
-  const { pmState, pmView } = context;
+  const { pmState, pmView, pmModel } = context;
+  if (pmView) toastPmViewMod = pmView;
+  if (pmModel) toastPmModelMod = pmModel;
 
   const diagramPluginKey = new (pmState.PluginKey as any)('onyxDiagramLive');
   const buildDiagramWysiwygPlugin = () => {
@@ -867,7 +880,11 @@ function notionRichPlugin(context: PluginContext): PluginInfo {
         const selectedText = slice.content.textBetween(0, slice.content.size, '\n');
         if (!selectedText) return false;
         const cleaned = selectedText
-          .replace(/<\/?(?:mark|u|span|sup|sub|kbd|b|strong|i|em|s|del)[^>]*>/gi, '')
+          .replace(
+            /<\/?(?:mark|u|span|sup|sub|kbd|b|strong|i|em|s|del|font|div|p|a|h[1-6]|code)[^>]*>/gi,
+            ''
+          )
+          .replace(/(?<!!)\[([^\]]+)\]\([^)]+\)/g, '$1')
           .replace(/\*\*([\s\S]*?)\*\*/g, '$1')
           .replace(/__([\s\S]*?)__/g, '$1')
           .replace(/~~([\s\S]*?)~~/g, '$1')
@@ -1015,6 +1032,7 @@ function notionRichPlugin(context: PluginContext): PluginInfo {
           'emph',
           'strike',
           'code',
+          'link',
           'span',
           'mark',
           'u',
@@ -1105,6 +1123,8 @@ export class StudioEditorController {
   private contextMenuEl: HTMLElement | null = null;
   private ctxDocClickBound: ((ev: Event) => void) | null = null;
   private ctxDocKeyBound: ((ev: KeyboardEvent) => void) | null = null;
+  private shiftHeldForPaste = false;
+  private imagePasteSeq = 0;
 
   constructor(hostEl: HTMLElement, callbacks: StudioEditorCallbacks) {
     this.hostEl = hostEl;
@@ -1906,8 +1926,512 @@ export class StudioEditorController {
     if (anyEd.mdEditor) anyEd.mdEditor.focus = safeFocus;
 
     this.attachToolbarToDock(params.theme);
+    this.attachCleanClipboardHandlers();
     this.hostEl.addEventListener('mousedown', this.handleHostMouseDownCapture, true);
     this.hostEl.addEventListener('click', this.handleHostClick);
+  }
+
+  private handleMountKeyTrack = (ev: KeyboardEvent): void => {
+    this.shiftHeldForPaste = Boolean(ev.shiftKey);
+    if (ev.type !== 'keydown') return;
+    const mod = ev.ctrlKey || ev.metaKey;
+    if (!mod || ev.altKey) return;
+    const k = ev.key.toLowerCase();
+    // Intercept Ctrl+S before TOAST UI's built-in `Mod-s` Strike (`~~~~`) keymap runs!
+    if (k === 's' && !ev.shiftKey) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      this.callbacks.onSaveShortcut();
+      return;
+    }
+    if (k === 'u' && !ev.shiftKey) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      this.editor?.exec('underline');
+      return;
+    }
+    if (k === 'f' && !ev.shiftKey) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      this.openFindBar(false);
+      return;
+    }
+    if (k === 'h' && !ev.shiftKey) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      this.openFindBar(true);
+    }
+  };
+
+  private attachCleanClipboardHandlers(): void {
+    if (!this.editorMountEl) return;
+    this.editorMountEl.addEventListener('keydown', this.handleMountKeyTrack, true);
+    this.editorMountEl.addEventListener('keyup', this.handleMountKeyTrack, true);
+    this.editorMountEl.addEventListener('copy', this.handleEditorCopyBubble, false);
+    this.editorMountEl.addEventListener('cut', this.handleEditorCopyBubble, false);
+    this.editorMountEl.addEventListener('paste', this.handleEditorPasteCapture, true);
+    this.editorMountEl.addEventListener('drop', this.handleEditorDropCapture, true);
+  }
+
+  private detachCleanClipboardHandlers(): void {
+    if (!this.editorMountEl) return;
+    this.editorMountEl.removeEventListener('keydown', this.handleMountKeyTrack, true);
+    this.editorMountEl.removeEventListener('keyup', this.handleMountKeyTrack, true);
+    this.editorMountEl.removeEventListener('copy', this.handleEditorCopyBubble, false);
+    this.editorMountEl.removeEventListener('cut', this.handleEditorCopyBubble, false);
+    this.editorMountEl.removeEventListener('paste', this.handleEditorPasteCapture, true);
+    this.editorMountEl.removeEventListener('drop', this.handleEditorDropCapture, true);
+  }
+
+  private handleEditorCopyBubble = (ev: ClipboardEvent): void => {
+    const target = ev.target as HTMLElement | null;
+    if (!target || !target.closest('.ProseMirror')) return;
+    const dt = ev.clipboardData;
+    if (!dt) return;
+    const html = dt.getData('text/html') || '';
+    if (html && !/\b(?:font-family|mso-[a-z-]+)\s*:/i.test(html)) {
+      try {
+        dt.setData(ONYX_INTERNAL_CLIPBOARD_MIME, '1');
+      } catch {
+        // ignore restricted clipboard implementations
+      }
+    }
+  };
+
+  private isPasteTargetEditorSurface(target: HTMLElement | null): boolean {
+    if (!target) return false;
+    if (target.classList.contains('toastui-editor-pseudo-clipboard')) return true;
+    const tag = target.tagName.toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || tag === 'select') return false;
+    return Boolean(target.closest('.ProseMirror'));
+  }
+
+  private flushActiveImeComposition(view: any): void {
+    if (!view || !view.composing) return;
+    try {
+      if (typeof toastPmViewMod?.__endComposition === 'function') {
+        toastPmViewMod.__endComposition(view);
+      } else {
+        view.domObserver?.forceFlush?.();
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  private clearPseudoClipboardTextarea(): void {
+    if (!this.editorMountEl) return;
+    const pseudo = this.editorMountEl.querySelector<HTMLTextAreaElement>(
+      'textarea.toastui-editor-pseudo-clipboard'
+    );
+    if (pseudo) {
+      pseudo.value = '';
+    }
+  }
+
+  private hasAncestorOfType($pos: any, names: string[]): boolean {
+    if (!$pos || typeof $pos.depth !== 'number') return false;
+    for (let d = $pos.depth; d >= 0; d--) {
+      const n = $pos.node(d)?.type?.name;
+      if (n && names.includes(n)) return true;
+    }
+    return false;
+  }
+
+  private tryInsertPastedFlowchartBlock(plainText: string): boolean {
+    if (!this.editor || !this.editor.isWysiwygMode()) return false;
+    const view = this.getActiveProseMirrorView();
+    if (!view) return false;
+    const parentType = view.state.selection.$from.parent?.type?.name;
+    if (parentType === 'codeBlock') return false;
+
+    const trimmed = plainText.replace(/\r\n?/g, '\n').trim();
+    if (!trimmed) return false;
+
+    let lang: string | null = null;
+    let body = '';
+    const fenced =
+      /^```(mermaid|flowchart|flow|diagram|graph)\s*\n([\s\S]*?)\n```\s*$/i.exec(trimmed);
+    if (fenced) {
+      const rawLang = fenced[1].toLowerCase();
+      lang = rawLang === 'diagram' ? 'mermaid' : rawLang;
+      body = fenced[2];
+    } else if (looksLikeBareFlowchartText(trimmed)) {
+      lang = 'mermaid';
+      body = trimmed;
+    }
+    if (!lang) return false;
+
+    const codeBlockType = view.state.schema.nodes.codeBlock;
+    if (!codeBlockType) return false;
+    this.flushActiveImeComposition(view);
+    const cbNode = codeBlockType.create(
+      { language: lang },
+      body ? view.state.schema.text(body) : undefined
+    );
+    view.dispatch(
+      view.state.tr
+        .setStoredMarks([])
+        .replaceSelectionWith(cbNode)
+        .scrollIntoView()
+        .setMeta('paste', true)
+        .setMeta('uiEvent', 'paste')
+    );
+    return true;
+  }
+
+  /**
+   * Inserts pure plain text into either WYSIWYG or Markdown mode with zero HTML tags,
+   * zero inline style attributes, and zero inherited ProseMirror marks.
+   */
+  public insertCleanPlainText(rawText: string): void {
+    if (!this.editor) return;
+    this.clearPseudoClipboardTextarea();
+
+    if (this.tryInsertPastedFlowchartBlock(rawText)) {
+      this.focusEditorWithoutScroll();
+      return;
+    }
+
+    const anyEd = this.editor as any;
+    if (!this.editor.isWysiwygMode()) {
+      const cleanMdText = normalizePastedPlainText(rawText);
+      if (!cleanMdText) return;
+      const mdView = anyEd.mdEditor?.view;
+      this.flushActiveImeComposition(mdView);
+      this.preservePaneScroll(() => {
+        if (anyEd.mdEditor?.replaceSelection) {
+          anyEd.mdEditor.replaceSelection(cleanMdText);
+        } else {
+          this.editor?.insertText(cleanMdText);
+        }
+      });
+      this.focusEditorWithoutScroll();
+      return;
+    }
+
+    const wwView = anyEd.wwEditor?.view;
+    if (!wwView) return;
+    this.flushActiveImeComposition(wwView);
+
+    const { state } = wwView;
+    const { schema, selection } = state;
+    const $from = selection.$from;
+
+    // 1) Inside code block: preserve verbatim newlines & indentation
+    if ($from.parent?.type?.name === 'codeBlock' || $from.parent?.type?.spec?.code) {
+      const codeTxt = normalizePastedPlainText(rawText);
+      if (!codeTxt) return;
+      const tr = state.tr
+        .insertText(codeTxt, selection.from, selection.to)
+        .scrollIntoView()
+        .setMeta('paste', true)
+        .setMeta('uiEvent', 'paste');
+      wwView.dispatch(tr);
+      this.focusEditorWithoutScroll();
+      return;
+    }
+
+    // 2) Inside table cell: GFM table cells hold a single paragraph
+    if (this.hasAncestorOfType($from, ['tableHeadCell', 'tableBodyCell'])) {
+      const cellTxt = normalizePastedPlainText(rawText).replace(/\n+/g, ' ').trim();
+      if (!cellTxt) return;
+      const tr = state.tr
+        .setStoredMarks([])
+        .replaceSelectionWith(schema.text(cellTxt, []), false)
+        .scrollIntoView()
+        .setMeta('paste', true)
+        .setMeta('uiEvent', 'paste');
+      wwView.dispatch(tr);
+      this.focusEditorWithoutScroll();
+      return;
+    }
+
+    // 3) Normal document blocks (or list items): mark-free plain text paragraphs
+    const inList = this.hasAncestorOfType($from, ['listItem']);
+    let clean = normalizePastedPlainText(rawText, { collapseExcessBlankLines: true });
+    if (inList) {
+      clean = clean.replace(/\n{2,}/g, '\n');
+    }
+    if (!clean) return;
+
+    if (!clean.includes('\n')) {
+      const tr = state.tr
+        .setStoredMarks([])
+        .replaceSelectionWith(schema.text(clean, []), false)
+        .scrollIntoView()
+        .setMeta('paste', true)
+        .setMeta('uiEvent', 'paste');
+      wwView.dispatch(tr);
+      this.focusEditorWithoutScroll();
+      return;
+    }
+
+    const paraType = schema.nodes.paragraph;
+    const lines = clean.split('\n');
+    const paras = lines.map((line) =>
+      paraType.create(null, line.length > 0 ? [schema.text(line, [])] : [])
+    );
+    const SliceCls = toastPmModelMod?.Slice ?? (selection.content().constructor as any);
+    const FragCls = toastPmModelMod?.Fragment ?? (state.doc.content.constructor as any);
+    const slice = new SliceCls(FragCls.from(paras), 1, 1);
+    const tr = state.tr
+      .setStoredMarks([])
+      .replaceSelection(slice)
+      .scrollIntoView()
+      .setMeta('paste', true)
+      .setMeta('uiEvent', 'paste');
+    wwView.dispatch(tr);
+    this.focusEditorWithoutScroll();
+  }
+
+  private async uploadPastedImageBlob(
+    blob: Blob | File,
+    suggestedExt?: string
+  ): Promise<{ url: string; alt: string; relPath: string } | null> {
+    const activeVault = this.callbacks.getActiveVault();
+    if (!activeVault) {
+      this.callbacks.onToast('열려 있는 볼트가 없어 이미지를 저장할 수 없습니다.', true);
+      return null;
+    }
+    try {
+      const ext =
+        (suggestedExt || blob.type.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '') || 'png';
+      this.imagePasteSeq = (this.imagePasteSeq + 1) % 10000;
+      const rawName =
+        blob instanceof File && blob.name && !/^image\.[a-z0-9]+$/i.test(blob.name)
+          ? blob.name
+          : `pasted-${Date.now()}-${this.imagePasteSeq}.${ext}`;
+      const dataBase64 = await blobToBase64(blob);
+      const res = await api.uploadAttachment(activeVault, rawName, dataBase64);
+      return { url: res.media_url, alt: rawName, relPath: res.rel_path };
+    } catch (err: any) {
+      this.callbacks.onToast(err?.message || '이미지 업로드 실패', true);
+      return null;
+    }
+  }
+
+  private async insertPastedImageBlobs(blobs: Array<File | Blob>): Promise<void> {
+    this.clearPseudoClipboardTextarea();
+    const view = this.getActiveProseMirrorView();
+    this.flushActiveImeComposition(view);
+
+    let savedCount = 0;
+    let lastRelPath = '';
+    for (const blob of blobs) {
+      const uploaded = await this.uploadPastedImageBlob(blob);
+      if (!uploaded) continue;
+      this.insertImageMarkdown(uploaded.url, uploaded.alt);
+      savedCount++;
+      lastRelPath = uploaded.relPath;
+    }
+    if (savedCount === 1) {
+      this.callbacks.onToast(`첨부파일 저장됨: ${lastRelPath}`);
+    } else if (savedCount > 1) {
+      this.callbacks.onToast(`이미지 ${savedCount}개 첨부됨`);
+    }
+  }
+
+  private async insertCleanSegments(segments: CleanPasteSegment[]): Promise<void> {
+    if (!this.editor || segments.length === 0) return;
+    this.clearPseudoClipboardTextarea();
+
+    // Resolve any `data:image/...` URIs into clean vault attachment files first
+    const resolved: Array<
+      { kind: 'text'; text: string } | { kind: 'image'; url: string; alt: string }
+    > = [];
+    for (const seg of segments) {
+      if (seg.kind === 'text') {
+        const clean = normalizePastedPlainText(seg.text, { collapseExcessBlankLines: true });
+        if (clean) resolved.push({ kind: 'text', text: clean });
+      } else {
+        if (seg.src.trim().toLowerCase().startsWith('data:image/')) {
+          const decoded = dataUrlToImageBlob(seg.src);
+          if (decoded) {
+            const up = await this.uploadPastedImageBlob(decoded.blob, decoded.ext);
+            if (up) {
+              resolved.push({
+                kind: 'image',
+                url: up.url,
+                alt: seg.alt && seg.alt !== 'image' ? seg.alt : up.alt,
+              });
+            }
+          }
+        } else {
+          resolved.push({ kind: 'image', url: seg.src, alt: seg.alt || 'image' });
+        }
+      }
+    }
+
+    if (resolved.length === 0 || !this.editor) return;
+
+    const anyEd = this.editor as any;
+    if (!this.editor.isWysiwygMode()) {
+      const mdBlocks = resolved.map((r) =>
+        r.kind === 'text' ? r.text : `![${r.alt}](${r.url})`
+      );
+      const joined = mdBlocks.join('\n\n');
+      const mdView = anyEd.mdEditor?.view;
+      this.flushActiveImeComposition(mdView);
+      this.preservePaneScroll(() => {
+        if (anyEd.mdEditor?.replaceSelection) {
+          anyEd.mdEditor.replaceSelection(joined);
+        } else {
+          this.editor?.insertText(joined);
+        }
+      });
+      this.focusEditorWithoutScroll();
+      return;
+    }
+
+    const wwView = anyEd.wwEditor?.view;
+    if (!wwView) return;
+    this.flushActiveImeComposition(wwView);
+
+    const { state } = wwView;
+    const { schema, selection } = state;
+    const paraType = schema.nodes.paragraph;
+    const imageType = schema.nodes.image;
+    const paras: any[] = [];
+
+    for (const item of resolved) {
+      if (item.kind === 'text') {
+        for (const line of item.text.split('\n')) {
+          paras.push(paraType.create(null, line.length > 0 ? [schema.text(line, [])] : []));
+        }
+      } else if (imageType) {
+        const imgNode = imageType.createAndFill({
+          imageUrl: item.url,
+          altText: item.alt,
+        });
+        if (imgNode) {
+          paras.push(paraType.create(null, [imgNode]));
+        }
+      }
+    }
+
+    if (paras.length === 0) return;
+    const SliceCls = toastPmModelMod?.Slice ?? (selection.content().constructor as any);
+    const FragCls = toastPmModelMod?.Fragment ?? (state.doc.content.constructor as any);
+    const slice = new SliceCls(FragCls.from(paras), 1, 1);
+    const tr = state.tr
+      .setStoredMarks([])
+      .replaceSelection(slice)
+      .scrollIntoView()
+      .setMeta('paste', true)
+      .setMeta('uiEvent', 'paste');
+    wwView.dispatch(tr);
+    this.focusEditorWithoutScroll();
+  }
+
+  private handleEditorPasteCapture = (ev: ClipboardEvent): void => {
+    if (!this.editor) return;
+    const target = ev.target as HTMLElement | null;
+    if (!this.isPasteTargetEditorSurface(target)) return;
+
+    const view = this.getActiveProseMirrorView();
+    const forcePlain = Boolean(this.shiftHeldForPaste || view?.input?.shiftKey);
+    const action = classifyClipboardData(ev.clipboardData, { forcePlainText: forcePlain });
+
+    if (action.kind === 'internal' || action.kind === 'noop') {
+      return;
+    }
+
+    ev.preventDefault();
+    ev.stopPropagation();
+
+    if (action.kind === 'image-blobs') {
+      void this.insertPastedImageBlobs(action.blobs);
+      return;
+    }
+    if (action.kind === 'segments') {
+      void this.insertCleanSegments(action.segments);
+      return;
+    }
+    if (action.kind === 'plain-text') {
+      this.insertCleanPlainText(action.text);
+    }
+  };
+
+  private handleEditorDropCapture = (ev: DragEvent): void => {
+    if (!this.editor) return;
+    const view = this.getActiveProseMirrorView();
+    // Preserve internal editor selection dragging & native image/file drops
+    if (view?.dragging) return;
+    const dt = ev.dataTransfer;
+    if (!dt) return;
+    if (dt.files && dt.files.length > 0) return;
+
+    const action = classifyClipboardData(dt, { forcePlainText: Boolean(ev.shiftKey) });
+    if (action.kind === 'internal' || action.kind === 'noop') return;
+
+    ev.preventDefault();
+    ev.stopPropagation();
+
+    if (view && typeof view.posAtCoords === 'function') {
+      const coords = view.posAtCoords({ left: ev.clientX, top: ev.clientY });
+      if (coords && typeof coords.pos === 'number') {
+        const SelCls = view.state.selection.constructor as any;
+        if (typeof SelCls?.near === 'function') {
+          view.dispatch(view.state.tr.setSelection(SelCls.near(view.state.doc.resolve(coords.pos))));
+        }
+      }
+    }
+
+    if (action.kind === 'image-blobs') {
+      void this.insertPastedImageBlobs(action.blobs);
+    } else if (action.kind === 'segments') {
+      void this.insertCleanSegments(action.segments);
+    } else if (action.kind === 'plain-text') {
+      this.insertCleanPlainText(action.text);
+    }
+  };
+
+  private async pasteFromSystemClipboard(): Promise<void> {
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.read === 'function') {
+        const items = await navigator.clipboard.read();
+        for (const item of items) {
+          const imgType = item.types.find((t) => t.toLowerCase().startsWith('image/'));
+          const hasText = item.types.includes('text/plain');
+          if (imgType && !hasText) {
+            const blob = await item.getType(imgType);
+            await this.insertPastedImageBlobs([blob]);
+            return;
+          }
+          if (item.types.includes('text/html')) {
+            const htmlBlob = await item.getType('text/html');
+            const htmlText = await htmlBlob.text();
+            if (/<img\b/i.test(htmlText)) {
+              const segs = extractPlainTextAndImagesFromHtml(htmlText);
+              if (segs.some((s) => s.kind === 'image')) {
+                await this.insertCleanSegments(segs);
+                return;
+              }
+            }
+          }
+          if (hasText) {
+            const txtBlob = await item.getType('text/plain');
+            const txt = await txtBlob.text();
+            if (txt) {
+              this.insertCleanPlainText(txt);
+              return;
+            }
+          }
+        }
+      }
+    } catch {
+      // Fallback to readText below
+    }
+
+    try {
+      const plain = await navigator.clipboard.readText();
+      if (plain) {
+        this.insertCleanPlainText(plain);
+      }
+    } catch {
+      this.callbacks.onToast('클립보드 접근 권한이 없거나 비어 있습니다. Ctrl+V를 사용해 주세요.', true);
+    }
   }
 
   /**
@@ -2677,6 +3201,24 @@ export class StudioEditorController {
   public insertImageMarkdown(mediaUrl: string, alt: string): void {
     if (!this.editor) return;
     if (this.editor.isWysiwygMode()) {
+      const wwView = (this.editor as any).wwEditor?.view;
+      const imageType = wwView?.state?.schema?.nodes?.image;
+      if (wwView && imageType) {
+        this.flushActiveImeComposition(wwView);
+        const imgNode = imageType.createAndFill({
+          imageUrl: mediaUrl,
+          altText: alt || 'image',
+        });
+        if (imgNode) {
+          const tr = wwView.state.tr
+            .setStoredMarks([])
+            .replaceSelectionWith(imgNode, false)
+            .scrollIntoView();
+          wwView.dispatch(tr);
+          this.focusEditorWithoutScroll();
+          return;
+        }
+      }
       this.editor.exec('addImage', { imageUrl: mediaUrl, altText: alt });
     } else {
       this.editor.insertText(`![${alt}](${mediaUrl})`);
@@ -2953,6 +3495,9 @@ export class StudioEditorController {
 
     addSep();
     addItem('🔍', '본문 찾기 / 바꾸기 (Ctrl+F)', () => this.openFindBar(true));
+    addItem('📥', '붙여넣기 — 일반 텍스트 · 이미지 (Ctrl+V)', () => {
+      void this.pasteFromSystemClipboard();
+    });
     if (hasSelection) {
       addItem('📋', '선택 텍스트 복사', () => {
         const sel = window.getSelection()?.toString() || '';
@@ -3063,6 +3608,7 @@ export class StudioEditorController {
       window.removeEventListener('resize', this.docToolbarResizeBound);
       this.docToolbarResizeBound = null;
     }
+    this.detachCleanClipboardHandlers();
     this.hostEl.removeEventListener('mousedown', this.handleHostMouseDownCapture, true);
     this.hostEl.removeEventListener('click', this.handleHostClick);
     this.findBarEl = null;

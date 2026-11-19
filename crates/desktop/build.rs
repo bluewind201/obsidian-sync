@@ -250,11 +250,26 @@ fn main() {
     writeln!(f, "}}").unwrap();
 
     // Embed Win32 application icon into Windows executables (OnyxStudio.exe)
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
-        && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
-    {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let res_path = out_dir.join("onyx_studio.res");
         write_win32_icon_res(&res_path);
-        println!("cargo:rustc-link-arg-bins={}", res_path.display());
+        match env::var("CARGO_CFG_TARGET_ENV").as_deref() {
+            Ok("msvc") => {
+                println!("cargo:rustc-link-arg-bins={}", res_path.display());
+            }
+            Ok("gnu") => {
+                let obj_path = out_dir.join("onyx_studio_icon.o");
+                let status = std::process::Command::new("windres")
+                    .args(["-J", "res", "-O", "coff", "-i"])
+                    .arg(&res_path)
+                    .arg("-o")
+                    .arg(&obj_path)
+                    .status();
+                if matches!(status, Ok(s) if s.success()) && obj_path.is_file() {
+                    println!("cargo:rustc-link-arg-bins={}", obj_path.display());
+                }
+            }
+            _ => {}
+        }
     }
 }

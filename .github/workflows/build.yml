@@ -1,9 +1,6 @@
+# [비활성화 — 로컬 PC 빌드(D:\BuildToolset & scripts\build-and-release.ps1)로 이관 완료 (ADR-008)]
 name: Build and release
 on:
-  push:
-    branches: [main]
-    tags: ['v*']
-  pull_request:
   workflow_dispatch:
 permissions:
   contents: read
