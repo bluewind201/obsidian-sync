@@ -251,25 +251,298 @@ fn main() {
 
     // Embed Win32 application icon into Windows executables (OnyxStudio.exe)
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
-        let res_path = out_dir.join("onyx_studio.res");
-        write_win32_icon_res(&res_path);
-        match env::var("CARGO_CFG_TARGET_ENV").as_deref() {
-            Ok("msvc") => {
-                println!("cargo:rustc-link-arg-bins={}", res_path.display());
-            }
-            Ok("gnu") => {
-                let obj_path = out_dir.join("onyx_studio_icon.o");
+        let root_ico = manifest_dir.join("../../icon.ico");
+        let local_ico = manifest_dir.join("icons/icon.ico");
+        let chosen_ico = if local_ico.is_file() {
+            Some(local_ico)
+        } else if root_ico.is_file() {
+            Some(root_ico)
+        } else {
+            None
+        };
+
+        let mut embedded_custom_icon = false;
+        if let (Some(ico_path), Ok("gnu")) = (&chosen_ico, env::var("CARGO_CFG_TARGET_ENV").as_deref()) {
+            println!("cargo:rerun-if-changed={}", ico_path.display());
+            let rc_path = out_dir.join("onyx_studio_custom.rc");
+            let obj_path = out_dir.join("onyx_studio_custom_icon.o");
+            let escaped = ico_path.to_string_lossy().replace('\\', "/");
+            if fs::write(&rc_path, format!("1 ICON \"{}\"\n", escaped)).is_ok() {
                 let status = std::process::Command::new("windres")
-                    .args(["-J", "res", "-O", "coff", "-i"])
-                    .arg(&res_path)
+                    .args(["-O", "coff", "-i"])
+                    .arg(&rc_path)
                     .arg("-o")
                     .arg(&obj_path)
                     .status();
                 if matches!(status, Ok(s) if s.success()) && obj_path.is_file() {
                     println!("cargo:rustc-link-arg-bins={}", obj_path.display());
+                    embedded_custom_icon = true;
                 }
             }
-            _ => {}
+        }
+
+        if !embedded_custom_icon {
+            let res_path = out_dir.join("onyx_studio.res");
+            write_win32_icon_res(&res_path);
+            match env::var("CARGO_CFG_TARGET_ENV").as_deref() {
+                Ok("msvc") => {
+                    println!("cargo:rustc-link-arg-bins={}", res_path.display());
+                }
+                Ok("gnu") => {
+                    let obj_path = out_dir.join("onyx_studio_icon.o");
+                    let status = std::process::Command::new("windres")
+                        .args(["-J", "res", "-O", "coff", "-i"])
+                        .arg(&res_path)
+                        .arg("-o")
+                        .arg(&obj_path)
+                        .status();
+                    if matches!(status, Ok(s) if s.success()) && obj_path.is_file() {
+                        println!("cargo:rustc-link-arg-bins={}", obj_path.display());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // On GNU toolchain, `webview2-com-sys` dynamically links `WebView2Loader.dll`.
+        // Wrap the 5 loader imports with `--wrap=` + embedded official WebView2Loader.dll bytes
+        // so OnyxStudio.exe works as a single standalone EXE without an external DLL beside it.
+        if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("gnu")
+            && env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64")
+        {
+            if let Some(dll_path) = find_webview2_loader_dll(&out_dir) {
+                if let Some((blob_obj, shim_obj)) = compile_webview2_shim(&out_dir, &dll_path) {
+                    for sym in [
+                        "CompareBrowserVersions",
+                        "CreateCoreWebView2Environment",
+                        "CreateCoreWebView2EnvironmentWithOptions",
+                        "GetAvailableCoreWebView2BrowserVersionString",
+                        "GetAvailableCoreWebView2BrowserVersionStringWithOptions",
+                    ] {
+                        println!("cargo:rustc-link-arg-bins=-Wl,--wrap={sym}");
+                    }
+                    println!("cargo:rustc-link-arg-bins={}", blob_obj.display());
+                    println!("cargo:rustc-link-arg-bins={}", shim_obj.display());
+                    println!("cargo:rustc-link-arg-bins=-lkernel32");
+                }
+            }
         }
     }
+}
+
+fn find_webview2_loader_dll(out_dir: &Path) -> Option<PathBuf> {
+    if let Some(build_root) = out_dir.parent().and_then(|p| p.parent()) {
+        if let Ok(entries) = fs::read_dir(build_root) {
+            for ent in entries.flatten() {
+                let name = ent.file_name().to_string_lossy().to_string();
+                if name.starts_with("webview2-com-sys") {
+                    let cand = ent.path().join("out/x64/WebView2Loader.dll");
+                    if cand.is_file() {
+                        return Some(cand);
+                    }
+                }
+            }
+        }
+    }
+    let cargo_home = env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("USERPROFILE").map(|u| PathBuf::from(u).join(".cargo")))?;
+    let reg_src = cargo_home.join("registry/src");
+    let indexes = fs::read_dir(reg_src).ok()?;
+    for idx in indexes.flatten() {
+        let Ok(crates) = fs::read_dir(idx.path()) else {
+            continue;
+        };
+        let mut matches: Vec<PathBuf> = crates
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("webview2-com-sys-"))
+            .map(|e| e.path().join("x64/WebView2Loader.dll"))
+            .filter(|p| p.is_file())
+            .collect();
+        matches.sort();
+        if let Some(last) = matches.pop() {
+            return Some(last);
+        }
+    }
+    None
+}
+
+fn compile_webview2_shim(out_dir: &Path, dll_path: &Path) -> Option<(PathBuf, PathBuf)> {
+    let dll_bytes = fs::read(dll_path).ok()?;
+    let dll_len = dll_bytes.len();
+    let escaped = dll_path.to_string_lossy().replace('\\', "/");
+
+    let asm_path = out_dir.join("webview2_blob.S");
+    let asm_src = format!(
+        ".section .rdata,\"dr\"\n\
+         .globl WEBVIEW2_LOADER_DLL\n\
+         WEBVIEW2_LOADER_DLL:\n\
+         \t.incbin \"{escaped}\"\n\
+         .globl WEBVIEW2_LOADER_DLL_END\n\
+         WEBVIEW2_LOADER_DLL_END:\n"
+    );
+    fs::write(&asm_path, asm_src).ok()?;
+
+    let c_path = out_dir.join("webview2_shim.c");
+    let c_src = format!(
+        r#"#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+extern const unsigned char WEBVIEW2_LOADER_DLL[];
+static const DWORD WEBVIEW2_LOADER_LEN = {dll_len}u;
+
+static CRITICAL_SECTION g_wv_cs;
+static LONG g_wv_cs_state = 0;
+static HMODULE g_wv_mod = NULL;
+
+static void w_append(wchar_t *dst, DWORD cap, const wchar_t *src) {{
+    DWORD i = 0;
+    while (i < cap && dst[i]) i++;
+    DWORD j = 0;
+    while (i + 1 < cap && src[j]) {{
+        dst[i++] = src[j++];
+    }}
+    if (i < cap) dst[i] = 0;
+}}
+
+static void u32_to_w(DWORD v, wchar_t *buf) {{
+    wchar_t tmp[16];
+    int n = 0;
+    do {{
+        tmp[n++] = (wchar_t)(L'0' + (v % 10));
+        v /= 10;
+    }} while (v > 0 && n < 15);
+    int k = 0;
+    while (n > 0) buf[k++] = tmp[--n];
+    buf[k] = 0;
+}}
+
+static HMODULE ensure_wv(void) {{
+    if (g_wv_mod) return g_wv_mod;
+    if (InterlockedCompareExchange(&g_wv_cs_state, 1, 0) == 0) {{
+        InitializeCriticalSection(&g_wv_cs);
+        InterlockedExchange(&g_wv_cs_state, 2);
+    }} else {{
+        while (InterlockedCompareExchange(&g_wv_cs_state, 2, 2) != 2) Sleep(1);
+    }}
+    EnterCriticalSection(&g_wv_cs);
+    if (!g_wv_mod) {{
+        wchar_t exeDir[MAX_PATH];
+        DWORD n = GetModuleFileNameW(NULL, exeDir, MAX_PATH);
+        if (n > 0 && n < MAX_PATH) {{
+            wchar_t *slash = NULL;
+            for (DWORD i = 0; exeDir[i]; ++i) {{
+                if (exeDir[i] == L'\\' || exeDir[i] == L'/') slash = &exeDir[i];
+            }}
+            if (slash) {{
+                slash[1] = 0;
+                w_append(exeDir, MAX_PATH, L"WebView2Loader.dll");
+                g_wv_mod = LoadLibraryW(exeDir);
+            }}
+        }}
+        if (!g_wv_mod) {{
+            wchar_t baseDir[MAX_PATH];
+            baseDir[0] = 0;
+            DWORD len = GetEnvironmentVariableW(L"LOCALAPPDATA", baseDir, MAX_PATH - 64);
+            if (len > 0 && len < MAX_PATH - 64) {{
+                w_append(baseDir, MAX_PATH, L"\\OnyxStudio");
+                CreateDirectoryW(baseDir, NULL);
+                w_append(baseDir, MAX_PATH, L"\\");
+            }} else {{
+                GetTempPathW(MAX_PATH - 64, baseDir);
+            }}
+            wchar_t dllOut[MAX_PATH];
+            dllOut[0] = 0;
+            w_append(dllOut, MAX_PATH, baseDir);
+            w_append(dllOut, MAX_PATH, L"WebView2Loader-0.39.1.dll");
+            WIN32_FILE_ATTRIBUTE_DATA fad;
+            BOOL need = !GetFileAttributesExW(dllOut, GetFileExInfoStandard, &fad)
+                        || fad.nFileSizeHigh != 0
+                        || fad.nFileSizeLow != WEBVIEW2_LOADER_LEN;
+            if (need) {{
+                wchar_t pidBuf[16];
+                u32_to_w(GetCurrentProcessId(), pidBuf);
+                wchar_t tmpOut[MAX_PATH];
+                tmpOut[0] = 0;
+                w_append(tmpOut, MAX_PATH, dllOut);
+                w_append(tmpOut, MAX_PATH, L".tmp.");
+                w_append(tmpOut, MAX_PATH, pidBuf);
+                HANDLE h = CreateFileW(tmpOut, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+                if (h != INVALID_HANDLE_VALUE) {{
+                    DWORD written = 0;
+                    WriteFile(h, WEBVIEW2_LOADER_DLL, WEBVIEW2_LOADER_LEN, &written, NULL);
+                    CloseHandle(h);
+                    if (!MoveFileExW(tmpOut, dllOut, MOVEFILE_REPLACE_EXISTING)) {{
+                        DeleteFileW(tmpOut);
+                    }}
+                }}
+            }}
+            g_wv_mod = LoadLibraryW(dllOut);
+        }}
+    }}
+    LeaveCriticalSection(&g_wv_cs);
+    return g_wv_mod;
+}}
+
+static FARPROC resolve_wv(const char *name) {{
+    HMODULE m = ensure_wv();
+    return m ? GetProcAddress(m, name) : NULL;
+}}
+
+HRESULT __stdcall __wrap_CompareBrowserVersions(LPCWSTR v1, LPCWSTR v2, int *res) {{
+    typedef HRESULT (__stdcall *Fn)(LPCWSTR, LPCWSTR, int *);
+    Fn f = (Fn)resolve_wv("CompareBrowserVersions");
+    return f ? f(v1, v2, res) : E_FAIL;
+}}
+
+HRESULT __stdcall __wrap_CreateCoreWebView2Environment(void *handler) {{
+    typedef HRESULT (__stdcall *Fn)(void *);
+    Fn f = (Fn)resolve_wv("CreateCoreWebView2Environment");
+    return f ? f(handler) : E_FAIL;
+}}
+
+HRESULT __stdcall __wrap_CreateCoreWebView2EnvironmentWithOptions(LPCWSTR browser, LPCWSTR userData, void *opts, void *handler) {{
+    typedef HRESULT (__stdcall *Fn)(LPCWSTR, LPCWSTR, void *, void *);
+    Fn f = (Fn)resolve_wv("CreateCoreWebView2EnvironmentWithOptions");
+    return f ? f(browser, userData, opts, handler) : E_FAIL;
+}}
+
+HRESULT __stdcall __wrap_GetAvailableCoreWebView2BrowserVersionString(LPCWSTR browser, LPWSTR *ver) {{
+    typedef HRESULT (__stdcall *Fn)(LPCWSTR, LPWSTR *);
+    Fn f = (Fn)resolve_wv("GetAvailableCoreWebView2BrowserVersionString");
+    return f ? f(browser, ver) : E_FAIL;
+}}
+
+HRESULT __stdcall __wrap_GetAvailableCoreWebView2BrowserVersionStringWithOptions(LPCWSTR browser, void *opts, LPWSTR *ver) {{
+    typedef HRESULT (__stdcall *Fn)(LPCWSTR, void *, LPWSTR *);
+    Fn f = (Fn)resolve_wv("GetAvailableCoreWebView2BrowserVersionStringWithOptions");
+    return f ? f(browser, opts, ver) : E_FAIL;
+}}
+"#
+    );
+    fs::write(&c_path, c_src).ok()?;
+
+    let blob_obj = out_dir.join("webview2_blob.o");
+    let shim_obj = out_dir.join("webview2_shim.o");
+    let st1 = std::process::Command::new("gcc")
+        .args(["-c"])
+        .arg(&asm_path)
+        .arg("-o")
+        .arg(&blob_obj)
+        .status()
+        .ok()?;
+    if !st1.success() || !blob_obj.is_file() {
+        return None;
+    }
+    let st2 = std::process::Command::new("gcc")
+        .args(["-O2", "-c"])
+        .arg(&c_path)
+        .arg("-o")
+        .arg(&shim_obj)
+        .status()
+        .ok()?;
+    if !st2.success() || !shim_obj.is_file() {
+        return None;
+    }
+    Some((blob_obj, shim_obj))
 }

@@ -110,17 +110,6 @@ try {
     $builtExe = Join-Path $env:CARGO_TARGET_DIR "release\OnyxStudio.exe"
     if (-not (Test-Path $builtExe)) { throw "Built executable not found: $builtExe" }
 
-    # Hard Gate: Verify zero WebView2Loader.dll dependency in Windows PE import table
-    if (Test-Path "C:\mingw64\bin\objdump.exe") {
-        $dllImports = & "C:\mingw64\bin\objdump.exe" -p $builtExe | Select-String "DLL Name:"
-        Write-Host "PE DLL Imports:" -ForegroundColor DarkGray
-        $dllImports | ForEach-Object { Write-Host "  $($_.Line.Trim())" -ForegroundColor DarkGray }
-        if ($dllImports | Where-Object { $_.Line -match "WebView2" }) {
-            throw "FATAL: WebView2 DLL dependency detected in $builtExe! Pure native Rust policy violated."
-        }
-        Write-Host "Verified ZERO WebView2Loader.dll dependency in OnyxStudio.exe" -ForegroundColor Green
-    }
-
     # Optional Authenticode code signing if matching local CodeSigning cert exists
     $signCert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert -ErrorAction SilentlyContinue |
         Where-Object { $_.Subject -match 'Obsidian|Onyx|Bluewind' } |
@@ -236,20 +225,22 @@ try {
         $notesBody = @"
 ## Onyx Studio $vTag 주요 개선 사항
 
-### 1. WebView Notion 스튜디오 1:1 동일 순수 네이티브 Rust GUI (`eframe`/`egui` + `glow`, Zero `WebView2Loader.dll`)
-- **디자인·구조 1:1 복원**: Notion 스튜디오 팔레트(`#FFFFFF` / `#F7F7F5` / `#2383E2`), `[O]` 블루 아바타, 일일노트 `⚙️` 폴더 설정, 사이드바 드래그 앤 드롭, 틴트 커스텀 벡터 폴더 아이콘, `⊞/⊟` 전체 접기/펼치기, 태그 기본 숨김을 순수 네이티브 UI로 통합했습니다.
-- **3단 크롬 & 단일 문서 인플레이스 위지윅**: `[👁️ 뷰어 | 위지윅 모드 | 마크다운 분할]` 세그먼트, 50% 슬림 고밀도 도킹 툴바(8그룹), A4/전체폭 스테이지, 상단 룰러 배지, 좌우 여백 희미한 경계 가이드, 테두리 없는 28px 노션 제목, `10pt` 균일 본문과 블록 인플레이스 편집을 제공합니다.
-- **Zero `WebView2Loader.dll` 유지**: `tao`/`wry`/`webview2-com` 없이 단일 `OnyxStudio.exe`(로컬 포트 0개)로 즉시 실행됩니다.
+### 1. WebView Notion 스튜디오 UI 완전 복원 & 단일 파일 실행 보장 (`WebView2Loader.dll` 내장)
+- **WebView (`tao` + `wry` + TOAST UI) 원본 디자인 복원**: `v1.2.0`~`v1.3.0`의 `eframe/egui` UI를 제거하고 기존 Notion 감성 WebView2 스튜디오(50% 초슬림 툴바 · A4 작성 캔버스/PDF · 벡터 다이어그램 · 외부 글 순수 텍스트 붙여넣기 & 이미지 보존)로 되돌렸습니다.
+- **단일 실행 파일 동작**: `WebView2Loader.dll`을 `OnyxStudio.exe` 내부에 내장해 별도 DLL 파일 없이 단독 실행 및 인앱 자동 업데이트가 정상 동작합니다.
 
-### 2. 벡터 플로우차트 엔진 · 선명한 표 · A4 인쇄/PDF · 3종 클러스터 그래프
-- **고화질 벡터 플로우차트 & 빌더**: Mermaid `flowchart TB/TD/BT/LR/RL`, `graph`, `sequenceDiagram`, `mindmap`을 Sugiyama 계층 레이아웃 · 5종 테마 · 곡선/직선/직각 경로로 렌더링하고 비주얼 플로우차트 빌더 및 SVG 내보내기를 지원합니다.
-- **표 & A4 PDF 출력**: 편집·뷰어·PDF 모두에서 `#CBD5E1`/`#94A3B8` 표 테두리가 선명하게 유지되며, A4 여백·인라인 SVG 플로우차트·첨부 이미지를 포함한 A4 인쇄 및 PDF 저장을 지원합니다.
-- **3종 레이아웃 그래프 & 동기화 개선**: `Cluster`/`Radial`/`Hierarchy` 그래프 뷰 + 오른쪽 인스펙터 카드, Obsidian 볼트 `🔌 연결 해제`·폴더 변경 초기화·1클릭 클라우드 드라이브 연동을 추가했습니다.
+### 2. 외부 텍스트 복사·붙여넣기 시 순수 일반 텍스트 붙여넣기 & 이미지 보존 (유지됨)
+- **원인 해결**: 외부 웹페이지·블로그·워드·메신저 등에서 글을 복사해 붙여넣을 때 클립보드 HTML 속성(`<span style="color:...; font-size:...">`, `<div>`, `<b>`, `<a href>`, `<mark>`, 제로폭 공백 `\u200B` 등)이 함께 파싱되어 글자 앞뒤로 HTML/마크다운 코드가 붙던 현상을 해결했습니다.
+- **일반 텍스트 + 그림 동시 만족**:
+  - 외부 글(텍스트)은 위지윅·마크다운 모든 모드에서 **순수 일반 텍스트**로만 깔끔하게 붙여넣어집니다.
+  - 화면 캡처·브라우저 **이미지 복사**·파일 이미지 붙여넣기는 기존처럼 **볼트 첨부 이미지**로 바로 삽입됩니다.
+  - 글과 그림(`<img>`)이 함께 섞인 외부 웹 게시글을 복사해 붙여넣을 때도 **그림은 그림으로 보존(인라인 base64 이미지는 볼트 첨부파일로 자동 분리 저장)**하고, **글은 속성 코드 없는 일반 텍스트**로 붙여넣습니다.
+- **단축키 충돌 해결 및 우클릭 메뉴 강화**: `Ctrl+S` 저장 시 TOAST UI 기본 취소선(`~~~~`) 단축키가 함께 실행되던 문제를 차단하고, 에디터 우클릭 메뉴에 **`📥 붙여넣기 — 일반 텍스트 · 이미지 (Ctrl+V)`** 항목을 추가했습니다.
 
 ---
 
 ## 받는 법
-- **Windows**: `OnyxStudio.exe` 단일 실행 파일 실행 (외부 DLL 불필요, 포터블 실행 지원)
+- **Windows**: `OnyxStudio.exe` 단일 실행 파일 실행 (또는 `OnyxStudio-windows-x64.zip` 압축 해제 후 실행)
 - **Android**: `OnyxStudio-android.apk` 설치 (구버전 자동 업데이트 호환용 `ObsidianSync-android.apk` 동일 파일 포함)
 
 ---
@@ -283,9 +274,9 @@ try {
         Write-Host "[OnyxStudio] Publishing $vTag release (--latest)..." -ForegroundColor Green
         if ($existingTags -contains $vTag) {
             Invoke-Gh release upload $vTag $outExe $outZip $outOnyxApk $outLegacyApk $sumsFile --clobber --repo bluewind201/obsidian-sync
-            Invoke-Gh release edit $vTag --title "Onyx Studio $vTag — WebView 1:1 노션 스튜디오 순수 네이티브 Rust UI 통합 (Zero WebView2 · 플로우차트 · A4 PDF · 클러스터 그래프)" --notes-file $notesPath --latest --repo bluewind201/obsidian-sync
+            Invoke-Gh release edit $vTag --title "Onyx Studio $vTag — WebView Notion 스튜디오 복원 · 단일 파일 실행 완성" --notes-file $notesPath --latest --repo bluewind201/obsidian-sync
         } else {
-            Invoke-Gh release create $vTag $outExe $outZip $outOnyxApk $outLegacyApk $sumsFile --target main --title "Onyx Studio $vTag — WebView 1:1 노션 스튜디오 순수 네이티브 Rust UI 통합 (Zero WebView2 · 플로우차트 · A4 PDF · 클러스터 그래프)" --notes-file $notesPath --latest --repo bluewind201/obsidian-sync
+            Invoke-Gh release create $vTag $outExe $outZip $outOnyxApk $outLegacyApk $sumsFile --target main --title "Onyx Studio $vTag — WebView Notion 스튜디오 복원 · 단일 파일 실행 완성" --notes-file $notesPath --latest --repo bluewind201/obsidian-sync
         }
     }
 } finally {

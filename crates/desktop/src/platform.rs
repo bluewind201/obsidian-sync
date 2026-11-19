@@ -281,7 +281,9 @@ mod imp {
         }
     }
 
-    pub fn spawn_activation_callback(on_activate: impl Fn() + Send + 'static) {
+    pub fn spawn_activation_listener(
+        event_proxy: tao::event_loop::EventLoopProxy<crate::AppUserEvent>,
+    ) {
         let name = wide(ACTIVATE_EVENT_NAME);
         let h_raw: isize = unsafe {
             let h: HANDLE = CreateEventW(std::ptr::null(), 0, 0, name.as_ptr());
@@ -299,7 +301,12 @@ mod imp {
                     if wait != WAIT_OBJECT_0 {
                         break;
                     }
-                    on_activate();
+                    if event_proxy
+                        .send_event(crate::AppUserEvent::ShowMainWindow)
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
                 CloseHandle(h);
             });
@@ -542,9 +549,6 @@ mod imp {
 
     #[allow(dead_code)]
     pub fn signal_activate_event() {}
-
-    #[allow(dead_code)]
-    pub fn spawn_activation_callback(_: impl Fn() + Send + 'static) {}
 
     #[allow(dead_code)]
     pub fn show_window(_: isize) {}

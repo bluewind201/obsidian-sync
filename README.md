@@ -1,26 +1,23 @@
-# Onyx Studio (v1.3.0) — 100% 순수 네이티브 Rust 스튜디오(Windows) · Android 스튜디오 & 실시간 동기화
+# Onyx Studio (v1.3.1) — Obsidian 볼트 호환 Notion 마크다운 스튜디오 & 실시간 동기화 (Windows · Android 통합)
 
-**Windows 100% 순수 네이티브 Rust GUI(`eframe`/`egui` + `glow`, Zero WebView2 · Zero 로컬 포트)에서 WebView Notion 스튜디오와 1:1 동일한 디자인·구조를 구현하고, Android 고가독성 스튜디오 · 벡터 플로우차트 엔진 · A4 PDF/인쇄 · 3종 클러스터 그래프 · 실시간 동기화**를 **Windows(`OnyxStudio.exe`)와 Android(`OnyxStudio-android.apk`)**에서 하나의 통합 생태계로 제공합니다.
+**Obsidian 볼트 호환 지식 베이스 + 모바일 전용 고가독성 MD 읽기 뷰어 / 초간편 쓰기 모드 + PC 전체 스튜디오(WebView Notion UI · TOAST UI 확장 · `flowchart TB` 벡터 다이어그램 · 시각적 빌더 · 우클릭 컨텍스트 도구 · `WebView2Loader.dll` 내장 단일 파일) + A4 1.5cm 여백/PDF 출력 + AES-256-GCM 암호화 + 6종 클라우드/NAS 실시간 동기화**를 **Windows(`OnyxStudio.exe`)와 Android(`OnyxStudio-android.apk`) 모두**에서 하나의 통합 앱으로 제공합니다.
 
 > 기존 `Obsidian Sync` (`v0.7.0` 이하)에서 **`Onyx Studio` (`v0.8.0+`)** 로 이름이 새롭게 변경되었습니다. 기존 설정과 동기화 상태는 첫 실행 시 자동으로 `OnyxStudio` 폴더로 마이그레이션되며, Android 앱(`io.bluewind.obsidiansync`)도 앱 내 업데이트로 바로 이어집니다.
 
 노트를 편집하고 저장하면 몇 초 안에 내 저장소(Synology NAS, OneDrive, Google Drive, 네이버 클라우드 등)로 올라가고, 다른 기기에서 바꾼 내용은 자동으로 내려받습니다.
 Obsidian 공식 제품이 아닌 개인 오픈소스 프로젝트입니다.
 
-## 주요 기능 (v1.3.0)
+## 주요 기능 (v1.3.1)
 
-### 0. v1.3.0 핵심 개선 사항 (WebView 1:1 노션 스튜디오 순수 네이티브 Rust UI 통합)
-- **WebView Notion 스튜디오 1:1 동일 순수 네이티브 Rust UI (`eframe`/`egui` + `glow`, Zero `WebView2Loader.dll`)**:
-  - 좌측 Notion `#F7F7F5` 사이드바(`[O]` 블루 아바타 `#2383E2`, 일일노트 `⚙️` 폴더 설정, 드래그 앤 드롭 폴더/루트 이동, 틴트 커스텀 벡터 폴더 아이콘, `⊞/⊟` 전체 접기/펼치기, 태그 기본 숨김).
-  - 상단 3단 크롬(탭 바 38px + 브레드크럼/3모드 세그먼트 `[👁️ 뷰어 | 위지윅 모드 | 마크다운 분할]` 44px + 50% 슬림 고밀도 도킹 툴바 8개 그룹 & 찾기/바꾸기 바).
-  - `#FFFFFF` A4 용지/전체폭 스테이지, 상단 룰러 배지, 좌우 여백 희미한 경계 가이드(`guide_line`), 테두리 없는 28px 노션 제목, **단일 문서 인플레이스 블록 위지윅 편집기**, `#CBD5E1` 테두리 직접 클릭 편집 표, `10pt`(`13.33px`) 균일 본문 가독성.
-- **고화질 벡터 플로우차트 엔진 & 비주얼 빌더 (`flowchart.rs`)**:
-  - Mermaid `flowchart TB/TD/BT/LR/RL`, `graph`, `sequenceDiagram`, `mindmap`을 Sugiyama 계층 레이아웃 · 5종 테마 · 곡선/직선/직각 라우팅 · 독립 SVG 출력으로 선명하게 렌더링하며, 인터랙티브 **플로우차트 빌더 모달**을 지원합니다.
-- **선명한 표 · A4 인쇄 및 PDF 내보내기 (`print_pdf.rs`)**:
-  - `WebView2Loader.dll` 없이 A4 여백/방향, `#CBD5E1`/`#94A3B8` 표 테두리, 인라인 SVG 플로우차트, 첨부 이미지를 1:1 유지하여 A4 인쇄 및 PDF 저장(브라우저 인쇄 엔진 + 순수 Rust `%PDF-1.4` 폴백)을 수행합니다.
-- **3종 레이아웃 클러스터 그래프 (`Cluster` / `Radial` / `Hierarchy`) & 동기화 센터 개선**:
-  - 폴더 클러스터 후광·배지, 홉 동심원, 방향성 계층 뷰, 오른쪽 선택 노드 인스펙터 카드를 제공하며, 동기화 센터는 **Obsidian 볼트 전용 연결 해제(`🔌 연결 해제`) · 폴더 변경 초기화 · 1클릭 클라우드 드라이브(Google Drive/OneDrive/Synology Drive/Dropbox/iCloud) 바로 연결**을 지원합니다.
-- **v1.2.0 기반 유지**: `WebView2Loader.dll` 영구 제거(로컬 포트 0개), 외부 웹/워드 복사 시 HTML 태그·제로폭 공백 차단 및 이미지 보존 클린 붙여넣기(`win_clipboard.rs` / `pasteClean.ts`).
+### 0. v1.3.1 — WebView Notion 스튜디오 UI 복원 · 단일 실행 파일 완성
+- **WebView (`tao` + `wry` + TOAST UI) 원본 디자인 완전 복원**: `v1.2.0`~`v1.3.0`에서 시도했던 네이티브 `eframe/egui` UI를 제거하고, 기존 **Notion 스타일 WebView2 스튜디오**(`crates/desktop/web` · TOAST UI 위지윅/마크다운 분할 · `pasteClean.ts` 클린 붙여넣기 · 벡터 다이어그램 · A4 PDF/인쇄)로 완전히 되돌렸습니다.
+- **단일 `OnyxStudio.exe` 실행 보장 (`WebView2Loader.dll` 내장)**: `webview2-com-sys` 동적 링크 시 별도 `WebView2Loader.dll`이 없어 실행이 막히던 문제를 빌드 타임 `--wrap=` + 내장 로더로 해결해, 외부 DLL 배치 없이 `OnyxStudio.exe` 단일 파일만으로 즉시 실행됩니다.
+
+### 0-1. v1.1.1 주요 개선 사항 (유지됨)
+- **외부 글 복사·붙여넣기 시 순수 일반 텍스트 붙여넣기 & 이미지 보존**:
+  - 외부 웹페이지·블로그·MS Word·메신저 등에서 글을 복사해 붙여넣을 때 HTML 인라인 속성(`<span style="color:...; font-size:...">`, `<div>`, `<b>`, `<a href>`, `<mark>`, 제로폭 공백 `\u200B` 등)이 함께 따라와 글자 앞뒤로 코드가 붙던 문제를 원천 차단했습니다.
+  - 화면 캡처·브라우저 **이미지 복사**·이미지 파일 붙여넣기는 기존처럼 볼트 `attachments/` 폴더에 이미지로 바로 저장·삽입되며, **글과 그림(`<img>`)이 함께 포함된 외부 웹 게시글**을 복사해 붙여넣을 때도 그림은 그림으로(인라인 `data:image`는 첨부파일로 자동 분리 저장), 글은 속성 코드 없는 **순수 일반 텍스트**로 깔끔하게 붙여넣어집니다.
+  - 에디터 우클릭 컨텍스트 메뉴에 **`📥 붙여넣기 — 일반 텍스트 · 이미지 (Ctrl+V)`** 항목을 추가하고, `Ctrl+S` 저장 단축키가 TOAST UI 기본 취소선(`~~~~`) 단축키와 충돌하지 않도록 수정했습니다.
 
 ### 0-1. v1.1.0 주요 개선 사항
 - **스크롤 위치 고정 (위로 튀는 현상 완전 해결)**: 긴 노트 편집·툴바 클릭·자동 저장·동기화 센터 폴링·오른쪽 인스펙터 갱신 중에도 스크롤 위치가 맨 위로 되돌아가지 않습니다.
@@ -50,7 +47,7 @@ Obsidian 공식 제품이 아닌 개인 오픈소스 프로젝트입니다.
 ### 4. ISO A4 용지 작성 캔버스 & 1:1 인쇄 / PDF 내보내기 (사용자 지정 여백)
 - **A4 용지 기준 작성 화면**: ISO A4(`210×297mm` 세로 / `297×210mm` 가로) 용지 비율 위에 작성하며, 화면 자동 배율 맞춤 및 `297mm` 페이지 구분 가이드를 제공합니다. (스마트폰 화면에서는 터치 편집 가독성을 위해 자동 100% 폭으로 표시되고, 인쇄/PDF 출력 시 A4 설정이 그대로 적용됩니다.)
 - **사용자 지정 여백**: 기본 여백 **상단 `2.0 cm` · 하단 `1.0 cm` · 좌우 `3.0 cm`** (`0.0 ~ 6.0 cm` 커스텀)으로 화면·인쇄·PDF가 일치합니다.
-- **네이티브 인쇄 & PDF 출력**: Windows는 `Ctrl+P` 및 순수 Rust HTML/SVG·`%PDF-1.4` 인쇄 엔진(`print_pdf.rs`, Zero WebView2), Android는 시스템 인쇄/`PDF로 저장`과 직접 연결됩니다.
+- **네이티브 인쇄 & PDF 출력**: Windows는 `Ctrl+P` 및 WebView2 `PrintToPdf`, Android는 시스템 인쇄/`PDF로 저장`과 직접 연결됩니다.
 
 ### 5. 볼트별 일일 문서(`Daily`) 저장 폴더 설정
 - 일일 문서(`Ctrl+D`) 옆 **`⚙️` 설정 버튼**에서 오늘의 일일 노트가 생성될 폴더를 **볼트별로 개별 지정**하거나 새 폴더(`일일업무` 등)를 즉시 생성할 수 있습니다.
@@ -76,7 +73,7 @@ Obsidian 공식 제품이 아닌 개인 오픈소스 프로젝트입니다.
 
 | 기기 | 파일 | 설치 |
 | --- | --- | --- |
-| Windows 10/11 | `OnyxStudio-windows-x64.zip` / `OnyxStudio.exe` | 압축 해제 후 `OnyxStudio.exe` 단일 파일 실행 (설치·외부 DLL·WebView2 일절 불필요) |
+| Windows 10/11 | `OnyxStudio-windows-x64.zip` / `OnyxStudio.exe` | 압축 해제 후 `OnyxStudio.exe` 단일 파일 실행 (설치 불필요, WebView2 내장 활용) |
 | Android 11+ | `OnyxStudio-android.apk` | 파일을 열어 설치. Notion/TOAST UI 편집 스튜디오 + 상주 실시간 동기화 모두 포함, 앱 내 자동 업데이트 지원 |
 
 ## 안전장치

@@ -13,7 +13,10 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-pub type SharedEventProxy = Option<std::sync::mpsc::Sender<crate::AppUserEvent>>;
+#[cfg(windows)]
+pub type SharedEventProxy = Option<tao::event_loop::EventLoopProxy<crate::AppUserEvent>>;
+#[cfg(not(windows))]
+pub type SharedEventProxy = Option<()>;
 
 pub struct BackendState {
     pub sync: App,
@@ -670,11 +673,11 @@ fn dispatch(state: &Arc<Mutex<BackendState>>, endpoint: &str, body: &[u8]) -> Re
             #[cfg(windows)]
             {
                 let Some(proxy) = proxy else {
-                    bail!("PDF 직접 내보내기는 인쇄 메뉴에서 지원됩니다.");
+                    bail!("PDF 내보내기 이벤트 채널이 초기화되지 않았습니다.");
                 };
                 let (tx, rx) = std::sync::mpsc::channel();
                 proxy
-                    .send(crate::AppUserEvent::ExportPdf {
+                    .send_event(crate::AppUserEvent::ExportPdf {
                         output_path: output_path.clone(),
                         landscape: req.landscape.unwrap_or(ws_landscape),
                         margin_top_cm: req.margin_top_cm.unwrap_or(ws_top).clamp(0.0, 6.0),
